@@ -4,6 +4,8 @@ One-click preview-style PDF export for Obsidian mobile and desktop.
 
 This repository currently publishes the packaged `v0.3.2` build that was validated in a real Obsidian vault. It is intended for manual installation or release-asset downloads.
 
+Project direction and future improvement rules are documented in [`PROJECT_DIRECTION.md`](PROJECT_DIRECTION.md).
+
 ## Features
 
 - Adds a ribbon button, command palette command, and note menu item: `导出预览版 PDF`.

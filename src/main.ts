@@ -12,6 +12,7 @@ import {
 import { PDFDocument, PDFFont, PDFPage, PDFString, rgb } from "pdf-lib";
 import type { Color } from "pdf-lib";
 import * as fontkitModule from "@pdf-lib/fontkit";
+import notoSansScRegularBase64 from "../fonts/NotoSansSC-Regular.otf";
 
 interface MobilePdfExporterSettings {
   outputFolder: string;
@@ -661,7 +662,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (!this.fontBytesPromise) {
       this.fontBytesPromise = this.app.vault.adapter
         .readBinary(this.getPluginAssetPath("fonts/SimHei.ttf"))
-        .catch(() => this.app.vault.adapter.readBinary(this.getPluginAssetPath("fonts/NotoSansSC-Regular.otf")));
+        .catch(() => this.app.vault.adapter.readBinary(this.getPluginAssetPath("fonts/NotoSansSC-Regular.otf")))
+        .catch(() => base64ToArrayBuffer(notoSansScRegularBase64));
     }
     return this.fontBytesPromise;
   }
@@ -2458,6 +2460,15 @@ function dataUrlToUint8Array(dataUrl: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
+}
+
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
 }
 
 function parseCssColor(value: string): Color | null {

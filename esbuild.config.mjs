@@ -27,6 +27,9 @@ const context = await esbuild.context({
     ...builtins
   ],
   format: "cjs",
+  loader: {
+    ".otf": "base64"
+  },
   logLevel: "info",
   minify: prod,
   outfile: "main.js",

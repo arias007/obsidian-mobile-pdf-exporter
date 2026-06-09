@@ -17,7 +17,7 @@ One-click preview-style PDF export for Obsidian mobile and desktop.
 
 ## Install
 
-Download `mobile-pdf-exporter-v0.3.12.zip` from the GitHub release, then extract it into:
+Download `mobile-pdf-exporter-v0.3.13.zip` from the GitHub release, then extract it into:
 
 ```text
 <your-vault>/.obsidian/plugins/mobile-pdf-exporter/
@@ -31,11 +31,11 @@ main.js
 styles.css
 README.md
 versions.json
-fonts/NotoSansSC-Regular.otf
-fonts/LICENSE-OFL.txt
 ```
 
 Restart Obsidian, or disable and re-enable the plugin from Obsidian settings.
+
+You can also install this repo through BRAT while it is waiting for inclusion in the official Obsidian community plugin browser.
 
 ## Usage
 
@@ -45,9 +45,15 @@ Open a Markdown note, then click the `导出预览版 PDF` ribbon/menu command. 
 
 Markor creates PDF through Android WebView printing, so its preview PDF text is selectable. Obsidian plugins do not expose Android native printing, so this plugin uses the closest available browser-side approach: render the Obsidian preview layout, then write real PDF text and images at matching positions.
 
-The local development build can try `fonts/SimHei.ttf` first and then fall back to `fonts/NotoSansSC-Regular.otf`. This public repository intentionally does not redistribute `SimHei.ttf`; the included Noto Sans SC font is the public bundled font.
+The release build embeds a Noto Sans SC font fallback in `main.js`, so community-plugin style installs work without extra font files. Local development builds can still try `fonts/SimHei.ttf` first when that file exists.
 
 ## Changelog
+
+### 0.3.13
+
+- Embeds the Noto Sans SC fallback font into `main.js` so standard Obsidian community-plugin installs can export Chinese PDFs without extra font files.
+- Publishes standard Obsidian release assets: `manifest.json`, `main.js`, and `styles.css`.
+- Keeps the 0.3.12 Excalidraw large drawing export and PNG-too-large warning avoidance behavior.
 
 ### 0.3.12
 

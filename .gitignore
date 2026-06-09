@@ -6,3 +6,5 @@ node_modules/
 dist/
 *.pdf
 *.zip
+fonts/SimHei.ttf
+fonts/NotoSansSC-Bold.otf

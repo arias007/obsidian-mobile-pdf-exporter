@@ -2,21 +2,21 @@
 
 One-click preview-style PDF export for Obsidian mobile and desktop.
 
-This repository currently publishes the packaged `v0.3.2` build that was validated in a real Obsidian vault. It is intended for manual installation or release-asset downloads.
+## What it does
 
-## Features
-
-- Adds a ribbon button, command palette command, and note menu item: `导出预览版 PDF`.
-- Exports the current Markdown note through an Obsidian preview-rendered layout.
-- Uses a phone-width PDF page size for mobile-style reading.
-- Keeps exported text selectable and copyable by writing real PDF text.
-- Embeds images separately.
-- Draws lightweight block backgrounds for code blocks, tables, quotes, and callouts.
+- Adds one ribbon button, one command, and one note menu item: `导出预览版 PDF`.
+- Exports the current Markdown preview to a phone-width PDF.
+- Keeps text selectable/copyable by writing a real PDF text layer.
+- Uses the rendered Obsidian preview DOM as the layout source.
+- Draws real vector PDF text as the visible body, so exported text stays sharp and selectable.
+- Embeds images separately and draws lightweight block backgrounds for code, tables, quotes, and callouts.
+- Draws link color/underlines, task checkboxes, list bullets, ordered-list markers, and small SVG icons from the rendered preview.
+- Avoids page breaks inside images, list items, paragraphs, code blocks, tables, quotes, embeds, and callouts when they can fit on one page.
 - Bundles `NotoSansSC-Regular.otf` for offline Chinese text export.
 
 ## Install
 
-Download `mobile-pdf-exporter-v0.3.2.zip` from the GitHub release, then extract it into:
+Download `mobile-pdf-exporter-v0.3.7.zip` from the GitHub release, then extract it into:
 
 ```text
 <your-vault>/.obsidian/plugins/mobile-pdf-exporter/
@@ -28,6 +28,7 @@ The plugin folder should contain:
 manifest.json
 main.js
 styles.css
+README.md
 versions.json
 fonts/NotoSansSC-Regular.otf
 ```
@@ -40,17 +41,48 @@ Open a Markdown note, then click the `导出预览版 PDF` ribbon/menu command. 
 
 ## Notes
 
-Markor can create selectable preview PDFs through Android WebView printing. Obsidian plugins do not expose the same Android native print pipeline, so this plugin uses a browser-side approach: render the Obsidian preview layout, collect visible text/image positions, then write a real selectable PDF.
+Markor creates PDF through Android WebView printing, so its preview PDF text is selectable. Obsidian plugins do not expose Android native printing, so this plugin uses the closest available browser-side approach: render the Obsidian preview layout, then write real PDF text and images at matching positions.
 
-The original local build tried `fonts/SimHei.ttf` first and then fell back to `fonts/NotoSansSC-Regular.otf`. This public repository intentionally does not redistribute `SimHei.ttf`; the included Noto Sans SC font is used as the public fallback.
+The local development build can try `fonts/SimHei.ttf` first and then fall back to `fonts/NotoSansSC-Regular.otf`. This public repository intentionally does not redistribute `SimHei.ttf`; the included Noto Sans SC font is the public bundled font.
 
 ## Changelog
+
+### 0.3.7
+
+- Waits for embedded previews and dynamic task blocks to settle before measuring the export DOM.
+- Removes unsupported emoji from the hidden export DOM before measurement, so missing emoji glyphs no longer leave oversized gaps around separators.
+- Keeps the 0.3.5 link-annotation and proportional image-scaling fixes.
+
+### 0.3.6
+
+- Tightens separator-heavy preview text before measurement, so `·`, `/`, `|`, punctuation, brackets, and short symbol runs no longer create oversized gaps in the exported PDF.
+- Keeps link annotations based on the final rendered DOM rectangles, so external links remain clickable after spacing cleanup.
+
+### 0.3.5
+
+- Tightens spacing around common separators such as `·`, `|`, `/`, Chinese punctuation, and list-like symbol runs so exported preview text no longer looks over-spaced.
+- Captures link rectangles from the rendered Obsidian preview and writes full PDF link annotations for normal web, mail, tel, and obsidian links.
+- Raises image/figure/page-embed keep priority and draws images with proportional scaling so they are moved or shrunk instead of being cut or flattened.
+
+### 0.3.4
+
+- Tightens phone-preview spacing for titles, headings, paragraphs, lists, quotes, code, embeds, and callouts to reduce the blank, flat feeling.
+- Keeps link underlines close to the actual text width and adds PDF link annotations for normal web/mail/tel/obsidian links.
+- Adds stronger image and figure page-break protection, with image height constrained to fit the phone page when possible.
+- Keeps the 0.3.3 selectable preview-text route and does not switch back to plain text or full-page image PDF.
+
+### 0.3.3
+
+- Builds from the accepted 0.3.2 selectable-text PDF path.
+- Preserves link colors by keeping differently colored preview text as separate PDF text runs.
+- Draws link underlines, task checkboxes, checked states, list bullets, ordered-list markers, and small SVG icons.
+- Keeps pagination improvements for images, list items, paragraphs, tables, code blocks, quotes, embeds, and callouts when they can fit on one page.
 
 ### 0.3.2
 
 - Replaced the full-page snapshot background with visible vector PDF text to avoid blurry exports.
-- Fixed page-width calculation so wide DOM content is wrapped inside the phone-size PDF instead of being clipped.
-- Tightened export CSS for tables, code blocks, long links, and embeds to reduce side overflow.
+- Fixed page width calculation so wide DOM content is wrapped inside the phone-size PDF instead of being clipped.
+- Tightened export CSS for tables, code blocks, long links, and embeds to prevent side overflow.
 - Uses actual content bottom for pagination to avoid trailing blank pages.
 - Adds image embedding and lightweight block backgrounds without rasterizing the whole page.
 
@@ -58,7 +90,7 @@ The original local build tried `fonts/SimHei.ttf` first and then fell back to `f
 
 - Fixed PDF font initialization when the bundled fontkit export shape is `{ default: fontkit }`.
 - Removed Obsidian-specific DOM helper calls from the renderer setup for better mobile compatibility.
-- Kept the preview-first approach: render preview layout, then write a real selectable PDF text layer.
+- Kept the Markor-inspired preview-first approach: render preview layout, then write a real selectable PDF text layer.
 
 ### 0.3.0
 
@@ -68,6 +100,15 @@ The original local build tried `fonts/SimHei.ttf` first and then fell back to `f
 - Writes selectable text from the preview DOM, not from a plain Markdown text dump.
 - Uses a preview snapshot only as the visual background; text remains real PDF text.
 - Falls back to visible selectable text if snapshot capture fails, avoiding blank PDFs.
+- Uses an embedded Chinese TrueType font for better PDF reader compatibility.
+
+### 0.2.0
+
+- Added a selectable Text PDF mode and embedded Noto Sans SC fonts.
+
+### 0.1.1
+
+- Fixed blank PDF exports caused by hidden snapshot rendering.
 
 ## License
 

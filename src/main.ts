@@ -5,7 +5,6 @@ import {
   Notice,
   Plugin,
   PluginSettingTab,
-  Platform,
   Setting,
   TFile,
   normalizePath
@@ -39,7 +38,6 @@ interface MobilePdfExporterSettings {
   colorMode: PdfColorMode;
   contentScalePercent: number;
   imageRasterScale: number;
-  showMobileFloatingButton: boolean;
 }
 
 interface RenderedPreview {
@@ -193,8 +191,7 @@ const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   pageOrientation: "portrait",
   colorMode: "color",
   contentScalePercent: 100,
-  imageRasterScale: 1.5,
-  showMobileFloatingButton: true
+  imageRasterScale: 1.5
 };
 
 const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
@@ -239,7 +236,6 @@ type FontkitModuleShape = Partial<RegisteredFontkit> & { default?: Partial<Regis
 export default class MobilePdfExporterPlugin extends Plugin {
   settings: MobilePdfExporterSettings = DEFAULT_SETTINGS;
   private fontBytesPromise: Promise<ArrayBuffer> | null = null;
-  private mobileExportButtonEl: HTMLButtonElement | null = null;
 
   async onload(): Promise<void> {
     this.settings = normalizeSettings(await this.loadData());
@@ -286,18 +282,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
     );
 
     this.addSettingTab(new MobilePdfExporterSettingTab(this.app, this));
-    this.registerMobileExportButton();
-  }
-
-  onunload(): void {
-    this.mobileExportButtonEl?.remove();
-    this.mobileExportButtonEl = null;
-    cleanupRenderRoots();
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
-    this.updateMobileExportButton();
   }
 
   async exportCurrentFile(): Promise<void> {
@@ -308,43 +296,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
 
     await this.exportFile(file);
-  }
-
-  private registerMobileExportButton(): void {
-    if (!Platform.isMobile) return;
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "mobile-pdf-exporter-floating-button";
-    button.textContent = "PDF";
-    button.setAttribute("aria-label", "导出当前笔记 PDF");
-    button.title = "导出当前笔记 PDF";
-    button.hidden = true;
-    document.body.appendChild(button);
-    this.mobileExportButtonEl = button;
-
-    this.registerDomEvent(button, "click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.exportCurrentFile();
-    });
-    this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.updateMobileExportButton()));
-    this.registerEvent(this.app.workspace.on("file-open", () => this.updateMobileExportButton()));
-    this.registerEvent(this.app.workspace.on("layout-change", () => this.updateMobileExportButton()));
-    this.app.workspace.onLayoutReady(() => this.updateMobileExportButton());
-    window.setTimeout(() => this.updateMobileExportButton(), 500);
-  }
-
-  private updateMobileExportButton(): void {
-    const button = this.mobileExportButtonEl;
-    if (!button) return;
-
-    const file = this.getActiveMarkdownFile();
-    const visible = this.settings.showMobileFloatingButton && Boolean(file);
-    button.hidden = !visible;
-    button.classList.toggle("is-visible", visible);
-    button.disabled = !visible;
-    button.title = file ? `导出 PDF：${file.basename}` : "导出当前笔记 PDF";
   }
 
   async exportFile(file: TFile): Promise<void> {
@@ -1088,18 +1039,6 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl)
-      .setName("手机浮动导出按钮")
-      .setDesc("手机端打开 Markdown 笔记时，在右下角显示 PDF 按钮。")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.showMobileFloatingButton)
-          .onChange(async (value) => {
-            this.plugin.settings.showMobileFloatingButton = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
     const codesContainer = appendElement(containerEl, "div", {
       cls: "mobile-pdf-exporter-settings-codes"
     });
@@ -1167,10 +1106,7 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     pageOrientation: normalizeChoice(saved.pageOrientation, PDF_ORIENTATIONS, DEFAULT_SETTINGS.pageOrientation),
     colorMode: normalizeChoice(saved.colorMode, PDF_COLOR_MODES, DEFAULT_SETTINGS.colorMode),
     contentScalePercent: clampNumber(saved.contentScalePercent, 80, 125, DEFAULT_SETTINGS.contentScalePercent),
-    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale),
-    showMobileFloatingButton: typeof saved.showMobileFloatingButton === "boolean"
-      ? saved.showMobileFloatingButton
-      : DEFAULT_SETTINGS.showMobileFloatingButton
+    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale)
   };
 }
 

@@ -193,44 +193,6 @@
   color: var(--text-muted);
 }
 
-.mobile-pdf-exporter-floating-button {
-  position: fixed;
-  right: max(16px, env(safe-area-inset-right));
-  bottom: calc(env(safe-area-inset-bottom) + 82px);
-  z-index: 2147483646;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 58px;
-  height: 58px;
-  border: 1px solid var(--interactive-accent);
-  border-radius: 50%;
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
-  opacity: 0;
-  transform: translateY(8px) scale(0.96);
-  transition: opacity 120ms ease, transform 120ms ease;
-  touch-action: manipulation;
-  user-select: none;
-}
-
-.mobile-pdf-exporter-floating-button.is-visible {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-}
-
-.mobile-pdf-exporter-floating-button:active {
-  transform: translateY(1px) scale(0.98);
-}
-
-.mobile-pdf-exporter-floating-button[hidden] {
-  display: none;
-}
-
 .mobile-pdf-exporter-settings-codes {
   margin-top: 28px;
   padding-top: 18px;

@@ -47,9 +47,15 @@ Open a Markdown note, then click the `导出预览版 PDF` ribbon/menu command. 
 
 Markor creates PDF through Android WebView printing, so its preview PDF text is selectable. Obsidian plugins do not expose Android native printing, so this plugin uses the closest available browser-side approach: render the Obsidian preview layout, then write real PDF text and images at matching positions.
 
-The release build embeds a Noto Sans SC font fallback in `main.js`, so community-plugin style installs work without extra font files. Local development builds can still try `fonts/SimHei.ttf` first when that file exists.
+The release package includes `fonts/NotoSansSC-Regular.otf` for selectable Chinese text export. The font is read only when exporting, so `main.js` stays smaller and Obsidian startup avoids parsing an embedded font string.
 
 ## Changelog
+
+### 0.3.29
+
+- Keeps the Obsidian-standard single `main.js` plugin structure while lazy-initializing the PDF runtime only after export starts.
+- Removes the embedded Noto Sans SC base64 fallback from `main.js`; the release package font file is loaded on demand during export.
+- Avoids startup DOM cleanup work and leaves render-root cleanup to the export path.
 
 ### 0.3.27
 

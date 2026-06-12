@@ -10,10 +10,7 @@ import {
   TFile,
   normalizePath
 } from "obsidian";
-import { PDFDocument, PDFFont, PDFPage, PDFString, rgb } from "pdf-lib";
-import type { Color } from "pdf-lib";
-import * as fontkitModule from "@pdf-lib/fontkit";
-import notoSansScRegularBase64 from "../fonts/NotoSansSC-Regular.otf";
+import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
 
 const NOTE_PDF_EXPORT_MODES = ["selectable", "image"] as const;
 type NotePdfExportMode = typeof NOTE_PDF_EXPORT_MODES[number];
@@ -277,6 +274,47 @@ const SETTINGS_EXTRA_CODE_ASSETS = [
 ] as const;
 type RegisteredFontkit = Parameters<PDFDocument["registerFontkit"]>[0];
 type FontkitModuleShape = Partial<RegisteredFontkit> & { default?: Partial<RegisteredFontkit> };
+type PdfLibRuntime = typeof import("pdf-lib");
+type PdfFontkitRuntime = typeof import("@pdf-lib/fontkit");
+interface PdfRuntime {
+  PDFDocument: PdfLibRuntime["PDFDocument"];
+  PDFString: PdfLibRuntime["PDFString"];
+  rgb: PdfLibRuntime["rgb"];
+  fontkitModule: PdfFontkitRuntime;
+}
+
+let pdfRuntimePromise: Promise<PdfRuntime> | null = null;
+let pdfStringRuntime: PdfLibRuntime["PDFString"] | null = null;
+let rgb: PdfLibRuntime["rgb"] = ((red: number, green: number, blue: number) => ({
+  type: "RGB",
+  red,
+  green,
+  blue
+}) as Color) as PdfLibRuntime["rgb"];
+
+async function loadPdfRuntime(): Promise<PdfRuntime> {
+  if (!pdfRuntimePromise) {
+    pdfRuntimePromise = Promise.all([import("pdf-lib"), import("@pdf-lib/fontkit")]).then(([pdfLib, fontkit]) => {
+      const runtime: PdfRuntime = {
+        PDFDocument: pdfLib.PDFDocument,
+        PDFString: pdfLib.PDFString,
+        rgb: pdfLib.rgb,
+        fontkitModule: fontkit
+      };
+      rgb = runtime.rgb;
+      pdfStringRuntime = runtime.PDFString;
+      return runtime;
+    });
+  }
+  return pdfRuntimePromise;
+}
+
+function getPdfStringRuntime(): PdfLibRuntime["PDFString"] {
+  if (!pdfStringRuntime) {
+    throw new Error("PDF 引擎尚未加载。");
+  }
+  return pdfStringRuntime;
+}
 
 export default class MobilePdfExporterPlugin extends Plugin {
   settings: MobilePdfExporterSettings = DEFAULT_SETTINGS;
@@ -284,7 +322,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
   async onload(): Promise<void> {
     this.settings = normalizeSettings(await this.loadData());
-    cleanupRenderRoots();
 
     this.addRibbonIcon("file-output", "导出预览版 PDF", () => {
       void this.exportCurrentFile();
@@ -470,10 +507,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private async imageBytesToSlicedExcalidrawPdf(file: TFile, imageBytes: Uint8Array): Promise<Blob> {
+    const { PDFDocument: PDFDocumentRuntime } = await loadPdfRuntime();
     const sourceImage = await imageBytesToHtmlImage(imageBytes);
     const sourceWidthPx = Math.max(1, sourceImage.naturalWidth || sourceImage.width);
     const sourceHeightPx = Math.max(1, sourceImage.naturalHeight || sourceImage.height);
-    const pdfDoc = await PDFDocument.create();
+    const pdfDoc = await PDFDocumentRuntime.create();
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(EXCALIDRAW_IMAGE_PDF_SUBJECT);
 
@@ -711,6 +749,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private async renderPreviewToSelectablePdf(file: TFile, pageEl: HTMLElement): Promise<Blob> {
+    const { PDFDocument: PDFDocumentRuntime, fontkitModule } = await loadPdfRuntime();
     const model = this.capturePreviewPdfModel(pageEl);
 
     if (
@@ -722,7 +761,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       throw new Error("预览没有可导出的内容。");
     }
 
-    const pdfDoc = await PDFDocument.create();
+    const pdfDoc = await PDFDocumentRuntime.create();
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(PDF_SUBJECT);
     pdfDoc.registerFontkit(resolvePdfFontkit(fontkitModule));
@@ -813,6 +852,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private async renderPreviewToImagePdf(file: TFile, pageEl: HTMLElement): Promise<Blob> {
+    const { PDFDocument: PDFDocumentRuntime } = await loadPdfRuntime();
     const model = this.capturePreviewPdfModel(pageEl);
 
     if (
@@ -824,7 +864,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       throw new Error("预览没有可导出的内容。");
     }
 
-    const pdfDoc = await PDFDocument.create();
+    const pdfDoc = await PDFDocumentRuntime.create();
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
 
@@ -917,7 +957,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
       this.fontBytesPromise = this.app.vault.adapter
         .readBinary(this.getPluginAssetPath("fonts/SimHei.ttf"))
         .catch(() => this.app.vault.adapter.readBinary(this.getPluginAssetPath("fonts/NotoSansSC-Regular.otf")))
-        .catch(() => base64ToArrayBuffer(notoSansScRegularBase64));
+        .catch(() => {
+          throw new Error("缺少 PDF 中文字体文件，请重新安装插件包中的 fonts/NotoSansSC-Regular.otf。");
+        });
     }
     return this.fontBytesPromise;
   }
@@ -2953,7 +2995,7 @@ function addLinkAnnotation(page: PDFPage, href: string, x: number, y: number, wi
       A: {
         Type: "Action",
         S: "URI",
-        URI: PDFString.of(target)
+        URI: getPdfStringRuntime().of(target)
       }
     });
     const annotationRef = context.register(annotation);
@@ -4006,15 +4048,6 @@ function dataUrlToUint8Array(dataUrl: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
-}
-
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
-  return buffer;
 }
 
 function parseCssColor(value: string): Color | null {

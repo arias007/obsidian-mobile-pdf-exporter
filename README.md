@@ -60,6 +60,11 @@ The release package includes `fonts/NotoSansSC-Regular.otf` for selectable Chine
 
 ## Changelog
 
+### 0.3.38
+
+- Publishes the next standard GitHub release for community plugin review refresh.
+- Keeps the 0.3.37 runtime behavior and direct release asset layout unchanged.
+
 ### 0.3.37
 
 - Carries forward the 0.3.36 community-review-compatible release structure.

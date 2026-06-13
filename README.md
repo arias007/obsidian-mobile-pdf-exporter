@@ -19,7 +19,7 @@ One-click preview-style PDF export for Obsidian mobile and desktop.
 
 ## Install
 
-Download `mobile-pdf-exporter-v0.3.17.zip` from the GitHub release, then extract it into:
+Download `mobile-pdf-exporter-v0.3.34.zip` from the GitHub release, then extract it into:
 
 ```text
 <your-vault>/.obsidian/plugins/mobile-pdf-exporter/
@@ -50,6 +50,32 @@ Markor creates PDF through Android WebView printing, so its preview PDF text is 
 The release package includes `fonts/NotoSansSC-Regular.otf` for selectable Chinese text export. The font is read only when exporting, so `main.js` stays smaller and Obsidian startup avoids parsing an embedded font string.
 
 ## Changelog
+
+### 0.3.34
+
+- Shows the export prompt first after tapping export, then starts the actual PDF work.
+- Simplifies the completed prompt text to a short "导出完成 / 完成" state.
+
+### 0.3.33
+
+- Moves the export busy/completed prompt slightly lower while keeping it as a compact top prompt.
+
+### 0.3.32
+
+- Adds current-screen NoteDraw support by copying the visible live `.notedraw-canvas` overlay into ordinary Markdown PDF exports.
+- Keeps the old Note Doodle current-screen behavior and still ignores hidden drawing canvases.
+- Speeds up direct Excalidraw PDF export by using lower practical raster scales, fewer retry candidates, shorter image-load waits, and duplicate-scale skipping for very large drawings.
+
+### 0.3.31
+
+- Warms up the PDF runtime and font as soon as the export options modal opens, reducing the delay after tapping export.
+- Shortens fixed export prompt waits while still forcing the "正在导出 PDF" message to paint before work starts.
+- Uses adaptive preview stabilization and image waits instead of long fixed waits for every note.
+- Reuses embedded image and SVG resources across PDF pages during selectable PDF export.
+
+### 0.3.30
+
+- Moves the output folder field near the top of the export options modal so it stays reachable when the mobile keyboard is open.
 
 ### 0.3.29
 

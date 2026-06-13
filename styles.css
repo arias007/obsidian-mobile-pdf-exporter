@@ -279,7 +279,7 @@
 
 .mobile-pdf-exporter-busy {
   position: fixed;
-  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  top: calc(env(safe-area-inset-top, 0px) + 38px);
   left: 50%;
   z-index: 2147483647;
   display: grid;

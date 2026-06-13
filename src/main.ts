@@ -10,7 +10,7 @@ import {
   TFile,
   normalizePath
 } from "obsidian";
-import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
+import type { Color, PDFDocument, PDFFont, PDFImage, PDFPage } from "pdf-lib";
 
 const NOTE_PDF_EXPORT_MODES = ["selectable", "image"] as const;
 type NotePdfExportMode = typeof NOTE_PDF_EXPORT_MODES[number];
@@ -46,6 +46,7 @@ interface RenderedPreview {
 
 interface ExportFileOptions {
   outputBaseName?: string;
+  busyPrompt?: PdfExportBusyPrompt;
 }
 
 interface TextFragment {
@@ -136,6 +137,11 @@ interface KeepBlockFragment {
   priority: number;
 }
 
+interface PdfResourceCaches {
+  images: WeakMap<HTMLImageElement, Promise<PDFImage | null>>;
+  svgs: WeakMap<SVGSVGElement, Promise<PDFImage | null>>;
+}
+
 interface PdfPageSizeMm {
   width: number;
   height: number;
@@ -216,6 +222,19 @@ interface NoteDoodleData {
 interface NoteDoodleOverlaySource {
   data: NoteDoodleData | null;
   canvas: HTMLCanvasElement | null;
+  surface: HTMLElement;
+  kind: "note-doodle" | "notedraw";
+  score: number;
+}
+
+interface LiveDrawingController {
+  file?: TFile;
+  doodleData?: unknown;
+  drawingData?: unknown;
+  canvas?: HTMLCanvasElement | null;
+  render?: () => void;
+  active?: boolean;
+  surfaceType?: string;
 }
 
 const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
@@ -253,8 +272,8 @@ const MAX_SVG_FRAGMENTS_PER_PAGE = 24;
 const SVG_IMAGE_LOAD_TIMEOUT_MS = 1800;
 const IMAGE_WAIT_TIMEOUT_MS = 2500;
 const PREVIEW_RENDER_TIMEOUT_MS = 12000;
-const EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS = 60000;
-const EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS = 30000;
+const EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS = 45000;
+const EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS = 15000;
 const EXCALIDRAW_MIN_EXPORT_SCALE = 0.5;
 const EXCALIDRAW_PREFERRED_MAX_PNG_BYTES = 24 * 1024 * 1024;
 const EXCALIDRAW_MAX_SLICE_WIDTH_PX = 4096;
@@ -262,7 +281,7 @@ const EXCALIDRAW_MAX_SLICE_HEIGHT_PX = 8192;
 const EXCALIDRAW_MAX_SLICE_PIXELS = 16_000_000;
 const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 12_000_000;
 const FRAME_WAIT_TIMEOUT_MS = 120;
-const BUSY_PROMPT_PAINT_WAIT_MS = 260;
+const BUSY_PROMPT_PAINT_WAIT_MS = 80;
 const PAGE_BREAK_PADDING_PX = 8;
 const PAGE_BREAK_MIN_ADVANCE_PX = 72;
 const NOTE_DOODLE_MAX_PEN_COUNT = 5;
@@ -285,6 +304,7 @@ interface PdfRuntime {
 
 let pdfRuntimePromise: Promise<PdfRuntime> | null = null;
 let pdfStringRuntime: PdfLibRuntime["PDFString"] | null = null;
+let exportableElementCache: WeakMap<Element, boolean> | null = null;
 let rgb: PdfLibRuntime["rgb"] = ((red: number, green: number, blue: number) => ({
   type: "RGB",
   red,
@@ -384,10 +404,19 @@ export default class MobilePdfExporterPlugin extends Plugin {
     new MobilePdfExportOptionsModal(this.app, this, file).open();
   }
 
+  warmupExportRuntime(): void {
+    void loadPdfRuntime().catch((error) => {
+      console.warn("Mobile PDF Exporter PDF runtime warmup failed", error);
+    });
+    void this.loadFontBytes().catch((error) => {
+      console.warn("Mobile PDF Exporter font warmup failed", error);
+    });
+  }
+
   async exportFile(file: TFile, exportSettings?: MobilePdfExporterSettings, options: ExportFileOptions = {}): Promise<void> {
     const previousSettings = this.settings;
     if (exportSettings) this.settings = cloneSettings(exportSettings);
-    const exportingPrompt = new PdfExportBusyPrompt(file.basename);
+    const exportingPrompt = options.busyPrompt ?? new PdfExportBusyPrompt(file.basename);
     let rendered: RenderedPreview | null = null;
 
     try {
@@ -441,7 +470,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     try {
       const exportSettings = lease.api.getExportSettings?.(true, true, false);
       const loader = lease.api.getEmbeddedFilesLoader?.(false);
-      const preferredScale = Math.min(3, Math.max(2, window.devicePixelRatio || 2));
+      const preferredScale = Math.min(2, Math.max(1.25, window.devicePixelRatio || 1.5));
       const scales = getExcalidrawExportScaleCandidates(preferredScale);
 
       // Prefer SVG so Excalidraw's own createPNG path does not show "PNG too large" notices.
@@ -453,12 +482,18 @@ export default class MobilePdfExporterPlugin extends Plugin {
             EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS
           );
           if (svg instanceof SVGSVGElement) {
+            const renderedScaleKeys = new Set<number>();
             for (const scale of scales) {
+              const actualScale = getSvgSafeRasterScale(svg, scale);
+              const scaleKey = Math.round(actualScale * 1000) / 1000;
+              if (renderedScaleKeys.has(scaleKey)) continue;
+              renderedScaleKeys.add(scaleKey);
+
               const pngBytes = await svgElementToPngBytes(svg, scale, EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS, this.settings.colorMode);
               if (!pngBytes || pngBytes.byteLength <= 0) continue;
-              if (pngBytes.byteLength > EXCALIDRAW_PREFERRED_MAX_PNG_BYTES && scale > EXCALIDRAW_MIN_EXPORT_SCALE) continue;
+              if (pngBytes.byteLength > EXCALIDRAW_PREFERRED_MAX_PNG_BYTES && actualScale > EXCALIDRAW_MIN_EXPORT_SCALE) continue;
 
-              const pdfBlob = await this.tryBuildExcalidrawImagePdf(file, pngBytes, `SVG ${scale}x`);
+              const pdfBlob = await this.tryBuildExcalidrawImagePdf(file, pngBytes, `SVG ${actualScale}x`);
               if (pdfBlob) return pdfBlob;
             }
           }
@@ -625,13 +660,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
         await waitForRenderedContent(markdownEl, 1000);
       }
 
-      await waitForRenderedContent(markdownEl, 1500);
-      await waitForPreviewDomStable(pageEl, 8000);
+      const previewWaitProfile = getPreviewWaitProfile(markdownEl);
+      await waitForRenderedContent(markdownEl, previewWaitProfile.renderedContentMs);
+      await waitForPreviewDomStable(pageEl, previewWaitProfile.initialStableMs);
       await waitForImages(pageEl, IMAGE_WAIT_TIMEOUT_MS);
-      await waitForPreviewDomStable(pageEl, 1800);
+      await waitForPreviewDomStable(pageEl, previewWaitProfile.finalStableMs);
       await this.injectNoteDoodleOverlay(file, markdownEl);
       tightenSeparatorTextNodes(pageEl);
-      await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
       await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
 
       const rect = pageEl.getBoundingClientRect();
@@ -711,7 +746,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private injectNoteDoodleOverlay(file: TFile, markdownEl: HTMLElement): void {
-    const overlay = getVisibleLiveNoteDoodleOverlay(file);
+    const overlay = getVisibleLiveDrawingOverlay(file);
     if (!overlay?.canvas && !overlay?.data?.strokes.length) return;
 
     const rect = markdownEl.getBoundingClientRect();
@@ -724,7 +759,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
     markdownEl.addClass("mobile-pdf-exporter-note-doodle-host");
     const canvas = appendElement(markdownEl, "canvas", {
-      cls: "mobile-pdf-exporter-note-doodle-canvas note-doodle-canvas"
+      cls: `mobile-pdf-exporter-note-doodle-canvas mobile-pdf-exporter-live-drawing-canvas note-doodle-canvas ${overlay.kind === "notedraw" ? "notedraw-canvas" : ""}`
     });
     canvas.width = Math.max(1, Math.ceil(width * ratio));
     canvas.height = Math.max(1, Math.ceil(height * ratio));
@@ -744,7 +779,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
 
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    if (overlay.canvas && drawLiveNoteDoodleCanvas(context, overlay.canvas, width, height)) return;
+    if (overlay.canvas && drawLiveDrawingCanvas(context, overlay.canvas, overlay.surface, markdownEl, width, height)) return;
     if (overlay.data?.strokes.length) drawNoteDoodleStrokes(context, overlay.data.strokes, width, height);
   }
 
@@ -766,6 +801,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
     pdfDoc.setSubject(PDF_SUBJECT);
     pdfDoc.registerFontkit(resolvePdfFontkit(fontkitModule));
     const font = await pdfDoc.embedFont(await this.loadFontBytes(), { subset: true });
+    const resourceCaches: PdfResourceCaches = {
+      images: new WeakMap(),
+      svgs: new WeakMap()
+    };
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       const pageTopPx = model.pageBreaks[index];
@@ -795,7 +834,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pageWidthPt: model.pageWidthPt,
         pageHeightPt: model.pageHeightPt,
         pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode
+        colorMode: this.settings.colorMode,
+        caches: resourceCaches
       });
 
       await drawSvgLayer(pdfDoc, pdfPage, model.svgFragments, {
@@ -804,7 +844,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pageWidthPt: model.pageWidthPt,
         pageHeightPt: model.pageHeightPt,
         pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode
+        colorMode: this.settings.colorMode,
+        caches: resourceCaches
       });
 
       drawDecorationLayer(pdfPage, model.decorationFragments, {
@@ -898,58 +939,60 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private capturePreviewPdfModel(pageEl: HTMLElement): PreviewPdfModel {
-    const pageSizeMm = getConfiguredPageSizeMm(this.settings);
-    const pageWidthPt = mmToPt(pageSizeMm.width);
-    const pageHeightPt = mmToPt(pageSizeMm.height);
-    const sourceWidthPx = Math.max(pageEl.getBoundingClientRect().width, 1);
-    const pxToPt = pageWidthPt / sourceWidthPx;
-    const pageHeightPx = pageHeightPt / pxToPt;
-    const boxFragments = captureBoxFragments(pageEl);
-    const textFragments = captureTextFragments(pageEl);
-    const imageFragments = captureImageFragments(pageEl);
-    const canvasFragments = captureCanvasFragments(pageEl);
-    const linkFragments = captureLinkFragments(pageEl);
-    const svgFragments = captureSvgFragments(pageEl);
-    const decorationFragments = captureDecorationFragments(pageEl);
-    const keepBlocks = captureKeepBlockFragments(
-      pageEl,
-      textFragments,
-      imageFragments,
-      canvasFragments,
-      boxFragments,
-      svgFragments,
-      decorationFragments
-    );
-    const contentHeightPx = measureExportContentHeight(
-      pageEl,
-      textFragments,
-      imageFragments,
-      canvasFragments,
-      boxFragments,
-      svgFragments,
-      decorationFragments,
-      keepBlocks
-    );
-    const pageBreaks = computePageBreaks(contentHeightPx, pageHeightPx, keepBlocks);
+    return withExportableElementCache(() => {
+      const pageSizeMm = getConfiguredPageSizeMm(this.settings);
+      const pageWidthPt = mmToPt(pageSizeMm.width);
+      const pageHeightPt = mmToPt(pageSizeMm.height);
+      const sourceWidthPx = Math.max(pageEl.getBoundingClientRect().width, 1);
+      const pxToPt = pageWidthPt / sourceWidthPx;
+      const pageHeightPx = pageHeightPt / pxToPt;
+      const boxFragments = captureBoxFragments(pageEl);
+      const textFragments = captureTextFragments(pageEl);
+      const imageFragments = captureImageFragments(pageEl);
+      const canvasFragments = captureCanvasFragments(pageEl);
+      const linkFragments = captureLinkFragments(pageEl);
+      const svgFragments = captureSvgFragments(pageEl);
+      const decorationFragments = captureDecorationFragments(pageEl);
+      const keepBlocks = captureKeepBlockFragments(
+        pageEl,
+        textFragments,
+        imageFragments,
+        canvasFragments,
+        boxFragments,
+        svgFragments,
+        decorationFragments
+      );
+      const contentHeightPx = measureExportContentHeight(
+        pageEl,
+        textFragments,
+        imageFragments,
+        canvasFragments,
+        boxFragments,
+        svgFragments,
+        decorationFragments,
+        keepBlocks
+      );
+      const pageBreaks = computePageBreaks(contentHeightPx, pageHeightPx, keepBlocks);
 
-    return {
-      pageWidthPt,
-      pageHeightPt,
-      sourceWidthPx,
-      pxToPt,
-      pageHeightPx,
-      background: parseCssColor(getComputedStyle(pageEl).backgroundColor) ?? rgb(1, 1, 1),
-      boxFragments,
-      textFragments,
-      imageFragments,
-      canvasFragments,
-      linkFragments,
-      svgFragments,
-      decorationFragments,
-      keepBlocks,
-      contentHeightPx,
-      pageBreaks
-    };
+      return {
+        pageWidthPt,
+        pageHeightPt,
+        sourceWidthPx,
+        pxToPt,
+        pageHeightPx,
+        background: parseCssColor(getComputedStyle(pageEl).backgroundColor) ?? rgb(1, 1, 1),
+        boxFragments,
+        textFragments,
+        imageFragments,
+        canvasFragments,
+        linkFragments,
+        svgFragments,
+        decorationFragments,
+        keepBlocks,
+        contentHeightPx,
+        pageBreaks
+      };
+    });
   }
 
   private async loadFontBytes(): Promise<ArrayBuffer> {
@@ -1050,6 +1093,7 @@ class MobilePdfExportOptionsModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("mobile-pdf-exporter-options-modal");
+    this.plugin.warmupExportRuntime();
 
     this.addActionToolbar(contentEl);
 
@@ -1058,6 +1102,8 @@ class MobilePdfExportOptionsModal extends Modal {
       cls: "mobile-pdf-exporter-options-subtitle",
       text: this.file.basename
     });
+
+    this.addOutputFolderSetting(contentEl);
 
     new Setting(contentEl)
       .setName("导出方式")
@@ -1161,18 +1207,6 @@ class MobilePdfExportOptionsModal extends Modal {
       });
 
     new Setting(contentEl)
-      .setName("输出文件夹")
-      .setDesc("PDF 保存到库里的这个文件夹。")
-      .addText((text) => {
-        text
-          .setPlaceholder(DEFAULT_SETTINGS.outputFolder)
-          .setValue(this.draft.outputFolder)
-          .onChange((value) => {
-            this.draft.outputFolder = value.trim() || DEFAULT_SETTINGS.outputFolder;
-          });
-      });
-
-    new Setting(contentEl)
       .setName("导出后打开")
       .addToggle((toggle) => {
         toggle
@@ -1205,6 +1239,20 @@ class MobilePdfExportOptionsModal extends Modal {
 
   }
 
+  private addOutputFolderSetting(parent: HTMLElement): void {
+    new Setting(parent)
+      .setName("输出文件夹")
+      .setDesc("PDF 保存到库里的这个文件夹。")
+      .addText((text) => {
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.outputFolder)
+          .setValue(this.draft.outputFolder)
+          .onChange((value) => {
+            this.draft.outputFolder = value.trim() || DEFAULT_SETTINGS.outputFolder;
+          });
+      });
+  }
+
   onClose(): void {
     this.contentEl.empty();
   }
@@ -1214,16 +1262,26 @@ class MobilePdfExportOptionsModal extends Modal {
     this.exporting = true;
     const exportSettings = cloneSettings(this.draft);
     const outputBaseName = sanitizePdfBaseName(this.outputBaseName) || defaultPdfBaseName(this.file);
-    this.close();
+    const exportingPrompt = new PdfExportBusyPrompt(this.file.basename);
 
-    if (this.saveAsDefault) {
-      this.plugin.settings = cloneSettings(exportSettings);
-      await this.plugin.saveSettings();
-      await this.plugin.exportFile(this.file, undefined, { outputBaseName });
-      return;
+    try {
+      await exportingPrompt.waitUntilPainted();
+      this.close();
+
+      if (this.saveAsDefault) {
+        this.plugin.settings = cloneSettings(exportSettings);
+        await this.plugin.saveSettings();
+        await this.plugin.exportFile(this.file, undefined, { outputBaseName, busyPrompt: exportingPrompt });
+        return;
+      }
+
+      await this.plugin.exportFile(this.file, exportSettings, { outputBaseName, busyPrompt: exportingPrompt });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      exportingPrompt.fail(message);
+      exportingPrompt.closeSoon();
+      throw error;
     }
-
-    await this.plugin.exportFile(this.file, exportSettings, { outputBaseName });
   }
 
   private addActionToolbar(parent: HTMLElement): void {
@@ -1287,6 +1345,7 @@ class PdfExportBusyPrompt {
   private closeTimer = 0;
   private closed = false;
   private failed = false;
+  private painted = false;
 
   constructor(noteName: string) {
     this.rootEl = appendElement(document.body, "div", {
@@ -1308,22 +1367,22 @@ class PdfExportBusyPrompt {
   }
 
   async waitUntilPainted(): Promise<void> {
-    if (this.closed) return;
-    this.rootEl.style.display = "flex";
+    if (this.closed || this.painted) return;
+    this.rootEl.style.display = "grid";
     this.rootEl.addClass("is-visible");
     this.rootEl.getBoundingClientRect();
     this.updateElapsed();
     await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
-    await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
     await delay(BUSY_PROMPT_PAINT_WAIT_MS);
-    await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
+    this.painted = true;
   }
 
   done(): void {
     if (this.closed) return;
     this.rootEl.addClass("is-complete");
-    this.titleEl.textContent = "PDF 导出完成";
-    this.updateElapsed();
+    this.titleEl.textContent = "导出完成";
+    this.elapsedEl.textContent = "完成";
+    window.clearInterval(this.timer);
   }
 
   fail(message: string): void {
@@ -1343,9 +1402,11 @@ class PdfExportBusyPrompt {
   private updateElapsed(): void {
     if (this.failed) return;
     const seconds = Math.max(0, Math.round((Date.now() - this.startedAt) / 1000));
-    this.elapsedEl.textContent = this.rootEl.classList.contains("is-complete")
-      ? "已完成，正在关闭提示。"
-      : seconds >= 8
+    if (this.rootEl.classList.contains("is-complete")) {
+      this.elapsedEl.textContent = "完成";
+      return;
+    }
+    this.elapsedEl.textContent = seconds >= 8
       ? `已用 ${seconds} 秒，仍在处理，请不要关闭 Obsidian。`
       : `已用 ${seconds} 秒`;
   }
@@ -1647,41 +1708,88 @@ function normalizeOutputFolder(folder: string): string {
   return normalizePath((folder.trim() || DEFAULT_SETTINGS.outputFolder).replace(/^\/+|\/+$/g, ""));
 }
 
-function getVisibleLiveNoteDoodleOverlay(file: TFile): NoteDoodleOverlaySource | null {
+function getVisibleLiveDrawingOverlay(file: TFile): NoteDoodleOverlaySource | null {
   const candidates: NoteDoodleOverlaySource[] = [];
 
-  for (const surface of Array.from(document.querySelectorAll<HTMLElement>(".note-doodle-shell"))) {
+  for (const surface of Array.from(document.querySelectorAll<HTMLElement>(".note-doodle-shell, .notedraw-shell"))) {
     if (surface.closest(".mobile-pdf-exporter-render-root")) continue;
-    const controller = (surface as unknown as {
-      _noteDoodleController?: {
-        file?: TFile;
-        doodleData?: unknown;
-        canvas?: HTMLCanvasElement | null;
-      };
-    })._noteDoodleController;
+    const kind = surface.classList.contains("notedraw-shell") ? "notedraw" : "note-doodle";
+    const controller = getLiveDrawingController(surface, kind);
     if (controller?.file?.path !== file.path) continue;
-    if (!isVisibleNoteDoodleSurface(surface)) continue;
+    if (!isVisibleLiveDrawingSurface(surface, kind)) continue;
 
-    const canvas = controller.canvas instanceof HTMLCanvasElement
-      ? controller.canvas
-      : surface.querySelector<HTMLCanvasElement>(".note-doodle-canvas");
-    if (!canvas || !isVisibleNoteDoodleCanvas(canvas)) continue;
+    try {
+      controller.render?.();
+    } catch (error) {
+      console.warn("Mobile PDF Exporter live drawing render refresh failed", error);
+    }
 
-    const data = normalizeNoteDoodleData(controller.doodleData, file);
-    if (data || canvas) candidates.push({ data, canvas });
+    const canvas = getLiveDrawingCanvas(surface, controller, kind);
+    if (!canvas || !isVisibleLiveDrawingCanvas(canvas)) continue;
+
+    const data = normalizeNoteDoodleData(
+      kind === "notedraw" ? controller.drawingData : controller.doodleData,
+      file
+    );
+    candidates.push({
+      data,
+      canvas,
+      surface,
+      kind,
+      score: scoreLiveDrawingOverlay(surface, canvas, controller)
+    });
   }
 
-  return candidates[0] ?? null;
+  return candidates.sort((a, b) => b.score - a.score)[0] ?? null;
 }
 
-function isVisibleNoteDoodleSurface(surface: HTMLElement): boolean {
-  if (!surface.isConnected || surface.classList.contains("is-doodle-hidden")) return false;
+function getLiveDrawingController(surface: HTMLElement, kind: "note-doodle" | "notedraw"): LiveDrawingController | null {
+  const holder = surface as unknown as {
+    _noteDoodleController?: LiveDrawingController;
+    _noteDrawController?: LiveDrawingController;
+  };
+  return kind === "notedraw"
+    ? holder._noteDrawController ?? null
+    : holder._noteDoodleController ?? null;
+}
+
+function getLiveDrawingCanvas(
+  surface: HTMLElement,
+  controller: LiveDrawingController,
+  kind: "note-doodle" | "notedraw"
+): HTMLCanvasElement | null {
+  if (controller.canvas instanceof HTMLCanvasElement) return controller.canvas;
+  return surface.querySelector<HTMLCanvasElement>(kind === "notedraw" ? ".notedraw-canvas" : ".note-doodle-canvas");
+}
+
+function isVisibleLiveDrawingSurface(surface: HTMLElement, kind: "note-doodle" | "notedraw"): boolean {
+  if (!surface.isConnected) return false;
+  if (kind === "notedraw" && surface.classList.contains("is-drawing-hidden")) return false;
+  if (kind === "note-doodle" && surface.classList.contains("is-doodle-hidden")) return false;
   return isScreenVisibleElement(surface);
 }
 
-function isVisibleNoteDoodleCanvas(canvas: HTMLCanvasElement): boolean {
+function isVisibleLiveDrawingCanvas(canvas: HTMLCanvasElement): boolean {
   if (canvas.width < 1 || canvas.height < 1) return false;
   return isScreenVisibleElement(canvas);
+}
+
+function scoreLiveDrawingOverlay(surface: HTMLElement, canvas: HTMLCanvasElement, controller: LiveDrawingController): number {
+  const rect = canvas.getBoundingClientRect();
+  const surfaceRect = surface.getBoundingClientRect();
+  const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || rect.width || 1);
+  const viewportHeight = Math.max(1, window.innerHeight || document.documentElement.clientHeight || rect.height || 1);
+  const visibleLeft = Math.max(0, Math.min(viewportWidth, rect.left));
+  const visibleRight = Math.max(0, Math.min(viewportWidth, rect.right));
+  const visibleTop = Math.max(0, Math.min(viewportHeight, rect.top));
+  const visibleBottom = Math.max(0, Math.min(viewportHeight, rect.bottom));
+  const visibleArea = Math.max(0, visibleRight - visibleLeft) * Math.max(0, visibleBottom - visibleTop);
+  const canvasArea = Math.max(1, rect.width * rect.height);
+  const surfaceArea = Math.max(1, surfaceRect.width * surfaceRect.height);
+  const visibleRatio = visibleArea / canvasArea;
+  const activeBonus = controller.active ? 10_000 : 0;
+  const sourceBonus = controller.surfaceType === "source" ? 400 : 0;
+  return activeBonus + sourceBonus + visibleRatio * 1000 + Math.min(surfaceArea, 2_000_000) / 10_000;
 }
 
 function isScreenVisibleElement(element: HTMLElement): boolean {
@@ -2485,27 +2593,49 @@ function getKeepBlockPriority(element: HTMLElement): number {
   return 2;
 }
 
+function withExportableElementCache<T>(callback: () => T): T {
+  const previousCache = exportableElementCache;
+  exportableElementCache = new WeakMap();
+  try {
+    return callback();
+  } finally {
+    exportableElementCache = previousCache;
+  }
+}
+
 function isExportableElement(element: Element): boolean {
+  const cached = exportableElementCache?.get(element);
+  if (cached !== undefined) return cached;
+
   if (
     element.closest(
       ".mobile-pdf-exporter-skip, .collapse-indicator, .heading-collapse-indicator, .markdown-embed-link, .copy-code-button, style, script"
     )
   ) {
+    exportableElementCache?.set(element, false);
     return false;
   }
 
-  if (element.matches("pre.language-compressed-json, code.language-compressed-json")) return false;
-  if (isExcalidrawSourceText(element.textContent ?? "")) return false;
+  if (element.matches("pre.language-compressed-json, code.language-compressed-json")) {
+    exportableElementCache?.set(element, false);
+    return false;
+  }
+  if (isExcalidrawSourceText(element.textContent ?? "")) {
+    exportableElementCache?.set(element, false);
+    return false;
+  }
 
   let current: Element | null = element;
   while (current) {
     const style = getComputedStyle(current);
     if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+      exportableElementCache?.set(element, false);
       return false;
     }
     current = current.parentElement;
   }
 
+  exportableElementCache?.set(element, true);
   return true;
 }
 
@@ -3023,15 +3153,28 @@ async function drawImageLayer(
     pageHeightPt: number;
     pxToPt: number;
     colorMode: PdfColorMode;
+    caches?: PdfResourceCaches;
   }
 ): Promise<void> {
   for (const imageFragment of images) {
     if (!shouldDrawMediaOnPage(imageFragment, options.pageTopPx, options.pageBottomPx)) continue;
 
-    const imageBytes = await imageElementToPngBytes(imageFragment.element, options.colorMode);
-    if (!imageBytes) continue;
+    let embeddedImage: PDFImage | null;
+    const cached = options.caches?.images.get(imageFragment.element);
+    if (cached) {
+      embeddedImage = await cached;
+    } else {
+      const imagePromise = imageElementToPngBytes(imageFragment.element, options.colorMode)
+        .then((imageBytes) => imageBytes ? pdfDoc.embedPng(imageBytes) : null)
+        .catch((error) => {
+          console.warn("Mobile PDF Exporter image layer prepare failed", error);
+          return null;
+        });
+      options.caches?.images.set(imageFragment.element, imagePromise);
+      embeddedImage = await imagePromise;
+    }
+    if (!embeddedImage) continue;
 
-    const embeddedImage = await pdfDoc.embedPng(imageBytes);
     const sourceX = clampNumber(imageFragment.left * options.pxToPt, 0, options.pageWidthPt - 4, 0);
     const localTop = imageFragment.top - options.pageTopPx;
     const localTopPt = Math.max(0, localTop * options.pxToPt);
@@ -3115,9 +3258,9 @@ async function drawSvgLayer(
     pageHeightPt: number;
     pxToPt: number;
     colorMode: PdfColorMode;
+    caches?: PdfResourceCaches;
   }
 ): Promise<void> {
-  const svgCache = new Map<string, Promise<Uint8Array | null>>();
   const visibleSvgs = svgs
     .filter((svgFragment) => shouldDrawSvgOnPage(svgFragment, options.pageTopPx, options.pageBottomPx))
     .filter((svgFragment) => {
@@ -3144,17 +3287,15 @@ async function drawSvgLayer(
     const x = sourceX + Math.max(0, Math.min(sourceWidth - width, (sourceWidth - width) / 2));
     const y = options.pageHeightPt - localTopPt - height;
 
-    const style = getComputedStyle(svgFragment.element);
-    const cacheKey = [
-      Math.round(svgFragment.right - svgFragment.left),
-      Math.round(svgFragment.bottom - svgFragment.top),
-      style.color,
-      svgFragment.element.outerHTML
-    ].join("|");
-    let imagePromise = svgCache.get(cacheKey);
+    let imagePromise = options.caches?.svgs.get(svgFragment.element);
     if (!imagePromise) {
-      imagePromise = svgElementToPngBytes(svgFragment.element, undefined, SVG_IMAGE_LOAD_TIMEOUT_MS, options.colorMode);
-      svgCache.set(cacheKey, imagePromise);
+      imagePromise = svgElementToPngBytes(svgFragment.element, undefined, SVG_IMAGE_LOAD_TIMEOUT_MS, options.colorMode)
+        .then((imageBytes) => imageBytes ? pdfDoc.embedPng(imageBytes) : null)
+        .catch((error) => {
+          console.warn("Mobile PDF Exporter SVG prepare failed", error);
+          return null;
+        });
+      options.caches?.svgs.set(svgFragment.element, imagePromise);
     }
     return { x, y, width, height, imagePromise };
   });
@@ -3162,16 +3303,15 @@ async function drawSvgLayer(
   const loaded = await Promise.all(
     prepared.map(async (item) => ({
       ...item,
-      imageBytes: await item.imagePromise.catch(() => null)
+      embeddedImage: await item.imagePromise.catch(() => null)
     }))
   );
 
   for (const item of loaded) {
-    if (!item.imageBytes) continue;
+    if (!item.embeddedImage) continue;
 
     try {
-      const embeddedImage = await pdfDoc.embedPng(item.imageBytes);
-      page.drawImage(embeddedImage, { x: item.x, y: item.y, width: item.width, height: item.height });
+      page.drawImage(item.embeddedImage, { x: item.x, y: item.y, width: item.width, height: item.height });
     } catch (error) {
       console.warn("Mobile PDF Exporter SVG draw failed", error);
     }
@@ -3706,14 +3846,8 @@ async function svgElementToPngBytes(
     const context = canvas.getContext("2d");
     if (!context) return null;
 
-    const requestedScale = preferredScale ?? Math.min(3, Math.max(1, window.devicePixelRatio || 1));
-    const maxSafeScale = Math.min(
-      requestedScale,
-      EXCALIDRAW_MAX_SLICE_WIDTH_PX / width,
-      EXCALIDRAW_MAX_SLICE_HEIGHT_PX / height,
-      Math.sqrt(EXCALIDRAW_MAX_SLICE_PIXELS / Math.max(1, width * height))
-    );
-    const scale = Math.max(Number.EPSILON, Math.min(requestedScale, maxSafeScale));
+    const requestedScale = preferredScale ?? Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const scale = getSvgSafeRasterScale(svg, requestedScale);
     canvas.width = Math.max(1, Math.ceil(width * scale));
     canvas.height = Math.max(1, Math.ceil(height * scale));
     context.setTransform(scale, 0, 0, scale, 0, 0);
@@ -3824,24 +3958,52 @@ function canvasElementSliceToPngBytes(
   return dataUrlToUint8Array(canvas.toDataURL("image/png"));
 }
 
-function drawLiveNoteDoodleCanvas(
+function drawLiveDrawingCanvas(
   context: CanvasRenderingContext2D,
   sourceCanvas: HTMLCanvasElement,
+  sourceSurface: HTMLElement,
+  targetSurface: HTMLElement,
   width: number,
   height: number
 ): boolean {
   if (sourceCanvas.width < 1 || sourceCanvas.height < 1) return false;
 
   try {
+    const sourceRect = sourceCanvas.getBoundingClientRect();
+    const surfaceRect = sourceSurface.getBoundingClientRect();
+    const targetRect = targetSurface.getBoundingClientRect();
+    const sourceCssWidth = Math.max(1, sourceRect.width || sourceCanvas.clientWidth || sourceCanvas.width);
+    const sourceCssHeight = Math.max(1, sourceRect.height || sourceCanvas.clientHeight || sourceCanvas.height);
+    const scaleX = sourceCanvas.width / sourceCssWidth;
+    const scaleY = sourceCanvas.height / sourceCssHeight;
+    const offsetLeftCss = Math.max(0, sourceRect.left - surfaceRect.left);
+    const offsetTopCss = Math.max(0, sourceRect.top - surfaceRect.top);
+    const copyWidthCss = Math.max(1, Math.min(sourceCssWidth, surfaceRect.width || sourceCssWidth));
+    const copyHeightCss = Math.max(1, Math.min(sourceCssHeight, surfaceRect.height || sourceCssHeight));
+    const cropX = Math.max(0, Math.min(Math.floor(offsetLeftCss * scaleX), sourceCanvas.width - 1));
+    const cropY = Math.max(0, Math.min(Math.floor(offsetTopCss * scaleY), sourceCanvas.height - 1));
+    const cropWidth = Math.max(1, Math.min(Math.ceil(copyWidthCss * scaleX), sourceCanvas.width - cropX));
+    const cropHeight = Math.max(1, Math.min(Math.ceil(copyHeightCss * scaleY), sourceCanvas.height - cropY));
+    const targetWidth = Math.max(1, width);
+    const targetHeight = Math.max(1, height);
+    const surfaceAspect = copyWidthCss / copyHeightCss;
+    const targetAspect = targetRect.width > 0 && targetRect.height > 0
+      ? targetRect.width / targetRect.height
+      : targetWidth / targetHeight;
+
     context.save();
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
-    context.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, 0, 0, width, height);
+    if (Math.abs(surfaceAspect - targetAspect) > 0.18) {
+      context.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, 0, 0, targetWidth, targetHeight);
+    } else {
+      context.drawImage(sourceCanvas, cropX, cropY, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight);
+    }
     context.restore();
     return true;
   } catch (error) {
     context.restore();
-    console.warn("Mobile PDF Exporter live doodle canvas draw failed", error);
+    console.warn("Mobile PDF Exporter live drawing canvas draw failed", error);
     return false;
   }
 }
@@ -3955,12 +4117,10 @@ function getNoteDoodlePenOffsets(count: number, width: number): Array<{ x: numbe
 function getExcalidrawExportScaleCandidates(preferredScale: number): number[] {
   const candidates = [
     preferredScale,
-    3,
-    2.5,
-    2,
     1.5,
+    1.25,
     1,
-    0.75,
+    0.7,
     EXCALIDRAW_MIN_EXPORT_SCALE
   ];
   return Array.from(
@@ -3975,8 +4135,8 @@ function getExcalidrawExportScaleCandidates(preferredScale: number): number[] {
 
 function getExcalidrawPngFallbackScaleCandidates(hasSvgApi: boolean): number[] {
   const candidates = hasSvgApi
-    ? [0.75, EXCALIDRAW_MIN_EXPORT_SCALE]
-    : [1, 0.75, EXCALIDRAW_MIN_EXPORT_SCALE];
+    ? [0.7, EXCALIDRAW_MIN_EXPORT_SCALE]
+    : [1, 0.7, EXCALIDRAW_MIN_EXPORT_SCALE];
   return Array.from(
     new Set(
       candidates
@@ -3985,6 +4145,17 @@ function getExcalidrawPngFallbackScaleCandidates(hasSvgApi: boolean): number[] {
         .map((scale) => Math.round(scale * 100) / 100)
     )
   ).sort((a, b) => b - a);
+}
+
+function getSvgSafeRasterScale(svg: SVGSVGElement, requestedScale: number): number {
+  const { width, height } = getSvgRasterSize(svg);
+  const maxSafeScale = Math.min(
+    requestedScale,
+    EXCALIDRAW_MAX_SLICE_WIDTH_PX / width,
+    EXCALIDRAW_MAX_SLICE_HEIGHT_PX / height,
+    Math.sqrt(EXCALIDRAW_MAX_SLICE_PIXELS / Math.max(1, width * height))
+  );
+  return Math.max(Number.EPSILON, Math.min(requestedScale, maxSafeScale));
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -4174,10 +4345,28 @@ async function waitForRenderedContent(container: HTMLElement, timeoutMs: number)
   console.warn(`Mobile PDF Exporter rendered content wait timed out after ${timeoutMs}ms.`);
 }
 
+function getPreviewWaitProfile(container: HTMLElement): {
+  renderedContentMs: number;
+  initialStableMs: number;
+  finalStableMs: number;
+} {
+  const imageCount = container.querySelectorAll("img").length;
+  const svgCount = container.querySelectorAll("svg").length;
+  const heavyBlockCount = container.querySelectorAll("table, pre, blockquote, .callout, .markdown-embed, .internal-embed").length;
+  const textLength = container.textContent?.length ?? 0;
+  const complexity = imageCount * 3 + svgCount * 3 + heavyBlockCount * 2 + Math.min(8, Math.floor(textLength / 2500));
+
+  return {
+    renderedContentMs: complexity > 8 ? 1200 : 520,
+    initialStableMs: complexity > 14 ? 5200 : complexity > 6 ? 2600 : 1100,
+    finalStableMs: complexity > 10 ? 1100 : 420
+  };
+}
+
 async function waitForPreviewDomStable(container: HTMLElement, timeoutMs: number): Promise<void> {
   const started = Date.now();
-  const minWaitMs = Math.min(700, Math.max(250, timeoutMs * 0.12));
-  const stableForMs = Math.min(900, Math.max(320, timeoutMs * 0.2));
+  const minWaitMs = Math.min(420, Math.max(120, timeoutMs * 0.08));
+  const stableForMs = Math.min(520, Math.max(180, timeoutMs * 0.16));
   let lastSignature = getPreviewDomSignature(container);
   let lastChangedAt = Date.now();
 
@@ -4223,8 +4412,7 @@ function getPreviewDomSignature(container: HTMLElement): string {
     container.querySelectorAll("svg").length,
     container.querySelectorAll("li, table, pre, blockquote, .callout, .markdown-embed, .internal-embed, .block-language-tasks").length,
     Math.round(container.scrollHeight),
-    Math.round(container.getBoundingClientRect().height),
-    container.innerHTML.length
+    Math.round(container.getBoundingClientRect().height)
   ].join("|");
 }
 
@@ -4252,10 +4440,12 @@ function hasExportableContent(container: HTMLElement): boolean {
 }
 
 async function waitForImages(container: HTMLElement, timeoutMs: number): Promise<void> {
-  const images = Array.from(container.querySelectorAll("img"));
+  const images = Array.from(container.querySelectorAll("img"))
+    .filter((image) => !image.complete);
+  if (!images.length) return;
+  const adaptiveTimeout = Math.min(timeoutMs, Math.max(360, images.length * 260));
   const imagePromise = Promise.all(
     images.map(async (image) => {
-      if (image.complete) return;
       await new Promise<void>((resolve) => {
         image.addEventListener("load", () => resolve(), { once: true });
         image.addEventListener("error", () => resolve(), { once: true });
@@ -4263,7 +4453,7 @@ async function waitForImages(container: HTMLElement, timeoutMs: number): Promise
     })
   );
 
-  await waitForPromiseOrTimeout(imagePromise, timeoutMs);
+  await waitForPromiseOrTimeout(imagePromise, adaptiveTimeout);
 }
 
 async function nextAnimationFrame(timeoutMs = FRAME_WAIT_TIMEOUT_MS): Promise<void> {

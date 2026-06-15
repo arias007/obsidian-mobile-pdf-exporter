@@ -104,25 +104,10 @@
 .mobile-pdf-exporter-page picture,
 .mobile-pdf-exporter-page svg,
 .mobile-pdf-exporter-page canvas,
-.mobile-pdf-exporter-page video,
-.mobile-pdf-exporter-page iframe,
-.mobile-pdf-exporter-page webview,
-.mobile-pdf-exporter-page object,
-.mobile-pdf-exporter-page embed {
+.mobile-pdf-exporter-page video {
   max-width: 100%;
   height: auto;
   object-fit: contain;
-}
-
-.mobile-pdf-exporter-page iframe,
-.mobile-pdf-exporter-page webview,
-.mobile-pdf-exporter-page object,
-.mobile-pdf-exporter-page embed {
-  display: block;
-  width: 100%;
-  min-height: 180px;
-  border: 1px solid var(--background-modifier-border);
-  background: var(--background-secondary);
 }
 
 .mobile-pdf-exporter-page img {

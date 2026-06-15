@@ -7,10 +7,10 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
-  SettingDefinitionItem,
   TFile,
   normalizePath
 } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 import type { Color, PDFDocument, PDFFont, PDFImage, PDFPage } from "pdf-lib";
 
 const UI_LANGUAGES = ["auto", "zh", "en"] as const;
@@ -95,19 +95,6 @@ interface CanvasFragment {
   bottom: number;
 }
 
-interface WebEmbedFragment {
-  element: HTMLElement;
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
-  background: Color | null;
-  border: Color | null;
-  href: string | null;
-  title: string;
-  text: string | null;
-}
-
 interface LinkFragment {
   href: string;
   left: number;
@@ -178,7 +165,6 @@ interface PreviewPdfModel {
   textFragments: TextFragment[];
   imageFragments: ImageFragment[];
   canvasFragments: CanvasFragment[];
-  webEmbedFragments: WebEmbedFragment[];
   linkFragments: LinkFragment[];
   svgFragments: SvgFragment[];
   decorationFragments: DecorationFragment[];
@@ -246,10 +232,6 @@ interface NoteDoodleOverlaySource {
   surface: HTMLElement;
   kind: "note-doodle" | "notedraw";
   score: number;
-}
-
-interface NoteDrawExportApi {
-  injectExportSnapshot?: (file: TFile, container: HTMLElement) => Promise<HTMLElement | null> | HTMLElement | null;
 }
 
 interface LiveDrawingController {
@@ -885,7 +867,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await waitForImages(pageEl, IMAGE_WAIT_TIMEOUT_MS);
       await waitForPreviewDomStable(pageEl, previewWaitProfile.finalStableMs);
       this.injectNoteDoodleOverlay(file, markdownEl);
-      await this.injectNoteDrawExportSnapshot(file, markdownEl);
       tightenSeparatorTextNodes(pageEl);
       await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
 
@@ -1007,17 +988,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (overlay.data?.strokes.length) drawNoteDoodleStrokes(context, overlay.data.strokes, width, height);
   }
 
-  private async injectNoteDrawExportSnapshot(file: TFile, markdownEl: HTMLElement): Promise<void> {
-    const api = (window as unknown as { NoteDraw?: NoteDrawExportApi }).NoteDraw;
-    if (!api?.injectExportSnapshot) return;
-
-    try {
-      await api.injectExportSnapshot(file, markdownEl);
-    } catch (error) {
-      console.warn("Mobile PDF Exporter NoteDraw export snapshot failed", error);
-    }
-  }
-
   private async renderPreviewToSelectablePdf(file: TFile, pageEl: HTMLElement): Promise<Blob> {
     const { PDFDocument: PDFDocumentRuntime, StandardFonts, fontkitModule } = await loadPdfRuntime();
     const model = this.capturePreviewPdfModel(pageEl);
@@ -1026,7 +996,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       model.textFragments.length === 0 &&
       model.imageFragments.length === 0 &&
       model.canvasFragments.length === 0 &&
-      model.webEmbedFragments.length === 0 &&
       model.svgFragments.length === 0
     ) {
       throw new Error(this.t("previewNoContentError"));
@@ -1056,16 +1025,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       });
 
       drawBoxLayer(pdfPage, model.boxFragments, {
-        pageTopPx,
-        pageBottomPx,
-        pageWidthPt: model.pageWidthPt,
-        pageHeightPt: model.pageHeightPt,
-        pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode
-      });
-
-      drawWebEmbedLayer(pdfPage, model.webEmbedFragments, {
-        font,
         pageTopPx,
         pageBottomPx,
         pageWidthPt: model.pageWidthPt,
@@ -1146,7 +1105,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       model.textFragments.length === 0 &&
       model.imageFragments.length === 0 &&
       model.canvasFragments.length === 0 &&
-      model.webEmbedFragments.length === 0 &&
       model.svgFragments.length === 0
     ) {
       throw new Error(this.t("previewNoContentError"));
@@ -1197,7 +1155,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const textFragments = captureTextFragments(pageEl);
       const imageFragments = captureImageFragments(pageEl);
       const canvasFragments = captureCanvasFragments(pageEl);
-      const webEmbedFragments = captureWebEmbedFragments(pageEl);
       const linkFragments = captureLinkFragments(pageEl);
       const svgFragments = captureSvgFragments(pageEl);
       const decorationFragments = captureDecorationFragments(pageEl);
@@ -1206,7 +1163,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
         textFragments,
         imageFragments,
         canvasFragments,
-        webEmbedFragments,
         boxFragments,
         svgFragments,
         decorationFragments
@@ -1216,7 +1172,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
         textFragments,
         imageFragments,
         canvasFragments,
-        webEmbedFragments,
         boxFragments,
         svgFragments,
         decorationFragments,
@@ -1236,7 +1191,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
         textFragments,
         imageFragments,
         canvasFragments,
-        webEmbedFragments,
         linkFragments,
         svgFragments,
         decorationFragments,
@@ -1699,9 +1653,7 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.replaceChildren();
     appendElement(containerEl, "h2", { text: "Mobile PDF Exporter" });
-    appendElement(containerEl, "p", {
-      text: this.plugin.t("settingsIntro")
-    });
+    appendElement(containerEl, "p", { text: this.plugin.t("settingsIntro") });
 
     appendElement(containerEl, "h3", { text: this.plugin.t("settingsGeneralHeading") });
 
@@ -1880,10 +1832,6 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
   }
 
   getSettingDefinitions(): SettingDefinitionItem[] {
-    return this.getDeclarativeSettingDefinitions();
-  }
-
-  private getDeclarativeSettingDefinitions(): SettingDefinitionItem[] {
     return [
       {
         name: "Mobile PDF Exporter",
@@ -2046,7 +1994,7 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
           {
             name: this.plugin.t("codesTitle"),
             desc: this.plugin.t("codesSubtitle"),
-            render: (setting: Setting) => {
+            render: (setting) => {
               const codesContainer = appendElement(setting.controlEl, "div", {
                 cls: "mobile-pdf-exporter-settings-codes"
               });
@@ -2604,76 +2552,6 @@ function captureCanvasFragments(pageEl: HTMLElement): CanvasFragment[] {
     .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
 }
 
-function captureWebEmbedFragments(pageEl: HTMLElement): WebEmbedFragment[] {
-  const pageRect = pageEl.getBoundingClientRect();
-  const selectors = [
-    "iframe",
-    "webview",
-    "object",
-    "embed",
-    ".markdown-rendered iframe",
-    ".markdown-preview-view iframe"
-  ].join(",");
-
-  return Array.from(pageEl.querySelectorAll<HTMLElement>(selectors))
-    .filter((element) => isExportableElement(element))
-    .map((element) => {
-      const rect = element.getBoundingClientRect();
-      const style = getComputedStyle(element);
-      return {
-        element,
-        left: rect.left - pageRect.left,
-        top: rect.top - pageRect.top,
-        right: rect.right - pageRect.left,
-        bottom: rect.bottom - pageRect.top,
-        background: parseCssColor(style.backgroundColor) ?? rgb(0.98, 0.98, 0.98),
-        border: parseCssColor(style.borderColor) ?? rgb(0.78, 0.78, 0.78),
-        href: resolveWebEmbedHref(element),
-        title: getWebEmbedTitle(element),
-        text: getSameOriginWebEmbedText(element)
-      };
-    })
-    .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
-}
-
-function resolveWebEmbedHref(element: HTMLElement): string | null {
-  const raw =
-    element.getAttribute("src") ??
-    element.getAttribute("data-src") ??
-    element.getAttribute("data-href") ??
-    element.getAttribute("href") ??
-    "";
-  return normalizePdfHref(raw);
-}
-
-function getWebEmbedTitle(element: HTMLElement): string {
-  const title =
-    element.getAttribute("title") ??
-    element.getAttribute("aria-label") ??
-    element.getAttribute("name") ??
-    "";
-  if (title.trim()) return normalizeLineText(title).slice(0, 120);
-
-  const href = resolveWebEmbedHref(element);
-  if (!href) return element.tagName.toLowerCase();
-  try {
-    const url = new URL(href);
-    return url.hostname || href;
-  } catch {
-    return href;
-  }
-}
-
-function getSameOriginWebEmbedText(element: HTMLElement): string | null {
-  if (!(element instanceof HTMLIFrameElement)) return null;
-  try {
-    const text = element.contentDocument?.body?.innerText?.trim() ?? "";
-    return text ? normalizeLineText(text).slice(0, 900) : null;
-  } catch {
-    return null;
-  }
-}
-
 function captureLinkFragments(pageEl: HTMLElement): LinkFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
   const fragments: LinkFragment[] = [];
@@ -2715,26 +2593,6 @@ function captureLinkFragments(pageEl: HTMLElement): LinkFragment[] {
     }
   }
 
-  for (const fragment of captureWebEmbedFragments(pageEl)) {
-    if (!fragment.href || !isPdfJumpHref(fragment.href)) continue;
-    const key = [
-      fragment.href,
-      Math.round(fragment.left),
-      Math.round(fragment.top),
-      Math.round(fragment.right),
-      Math.round(fragment.bottom)
-    ].join("|");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    fragments.push({
-      href: fragment.href,
-      left: fragment.left,
-      top: fragment.top,
-      right: fragment.right,
-      bottom: fragment.bottom
-    });
-  }
-
   return fragments;
 }
 
@@ -2747,10 +2605,6 @@ function captureBoxFragments(pageEl: HTMLElement): BoxFragment[] {
     ".callout",
     ".markdown-embed",
     ".internal-embed",
-    "iframe",
-    "webview",
-    "object",
-    "embed",
     ".HyperMD-codeblock",
     "hr"
   ].join(",");
@@ -2928,7 +2782,6 @@ function captureKeepBlockFragments(
   textFragments: TextFragment[],
   imageFragments: ImageFragment[],
   canvasFragments: CanvasFragment[],
-  webEmbedFragments: WebEmbedFragment[],
   boxFragments: BoxFragment[],
   svgFragments: SvgFragment[],
   decorationFragments: DecorationFragment[]
@@ -2938,10 +2791,6 @@ function captureKeepBlockFragments(
     "img",
     "picture",
     "figure",
-    "iframe",
-    "webview",
-    "object",
-    "embed",
     ".image-embed",
     "pre",
     "blockquote",
@@ -2979,7 +2828,6 @@ function captureKeepBlockFragments(
       blocks.push({ ...canvas, priority: 4 });
     }
   }
-  for (const webEmbed of webEmbedFragments) blocks.push({ ...webEmbed, priority: 6 });
   for (const box of boxFragments) blocks.push({ ...box, priority: 3 });
   for (const svg of svgFragments) blocks.push({ ...svg, priority: isLargeOrExcalidrawSvg(svg.element) ? 6 : 3 });
   for (const decoration of decorationFragments) blocks.push({ ...decoration, priority: 2 });
@@ -3210,7 +3058,6 @@ function parsePseudoContent(content: string): string | null {
 function getKeepBlockPriority(element: HTMLElement): number {
   const tag = element.tagName.toLowerCase();
   if (tag === "svg" && isLargeOrExcalidrawSvg(element as unknown as SVGSVGElement)) return 6;
-  if (tag === "iframe" || tag === "webview" || tag === "object" || tag === "embed") return 6;
   if (tag === "img" || tag === "picture" || tag === "figure" || element.matches(".image-embed")) return 6;
   if (tag === "pre" || tag === "table") return 4;
   if (tag === "blockquote" || element.matches(".callout, .markdown-embed, .internal-embed")) return 4;
@@ -3419,12 +3266,6 @@ function colorsEqual(left: Color, right: Color): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function getWebEmbedExcerpt(text: string): string {
-  const clean = normalizeLineText(text);
-  if (clean.length <= 180) return clean;
-  return `${clean.slice(0, 177).trim()}...`;
-}
-
 function resolveLinkHref(linkElement: Element | null): string | null {
   if (!linkElement) return null;
   const rawValues = [
@@ -3466,7 +3307,6 @@ function measureExportContentHeight(
   textFragments: TextFragment[],
   imageFragments: ImageFragment[],
   canvasFragments: CanvasFragment[],
-  webEmbedFragments: WebEmbedFragment[],
   boxFragments: BoxFragment[],
   svgFragments: SvgFragment[],
   decorationFragments: DecorationFragment[],
@@ -3475,7 +3315,6 @@ function measureExportContentHeight(
   const maxTextBottom = Math.max(0, ...textFragments.map((fragment) => fragment.bottom));
   const maxImageBottom = Math.max(0, ...imageFragments.map((fragment) => fragment.bottom));
   const maxCanvasBottom = Math.max(0, ...canvasFragments.map((fragment) => fragment.bottom));
-  const maxWebEmbedBottom = Math.max(0, ...webEmbedFragments.map((fragment) => fragment.bottom));
   const maxBoxBottom = Math.max(0, ...boxFragments.map((fragment) => fragment.bottom));
   const maxSvgBottom = Math.max(0, ...svgFragments.map((fragment) => fragment.bottom));
   const maxDecorationBottom = Math.max(0, ...decorationFragments.map((fragment) => fragment.bottom));
@@ -3484,7 +3323,6 @@ function measureExportContentHeight(
     maxTextBottom,
     maxImageBottom,
     maxCanvasBottom,
-    maxWebEmbedBottom,
     maxBoxBottom,
     maxSvgBottom,
     maxDecorationBottom,
@@ -3614,88 +3452,6 @@ function drawBoxLayer(
   }
 }
 
-function drawWebEmbedLayer(
-  page: PDFPage,
-  embeds: WebEmbedFragment[],
-  options: {
-    font: PDFFont;
-    pageTopPx: number;
-    pageBottomPx: number;
-    pageWidthPt: number;
-    pageHeightPt: number;
-    pxToPt: number;
-    colorMode: PdfColorMode;
-  }
-): void {
-  for (const embed of embeds) {
-    if (!shouldDrawMediaOnPage(embed, options.pageTopPx, options.pageBottomPx)) continue;
-
-    const sourceX = clampNumber(embed.left * options.pxToPt, 0, options.pageWidthPt - 4, 0);
-    const localTopPt = Math.max(0, (embed.top - options.pageTopPx) * options.pxToPt);
-    const sourceWidth = Math.max(1, (embed.right - embed.left) * options.pxToPt);
-    const sourceHeight = Math.max(1, (embed.bottom - embed.top) * options.pxToPt);
-    const maxWidth = Math.max(8, options.pageWidthPt - sourceX);
-    const maxHeight = Math.max(8, options.pageHeightPt - localTopPt - 4);
-    const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
-    const width = sourceWidth * scale;
-    const height = sourceHeight * scale;
-    const x = sourceX + Math.max(0, Math.min(sourceWidth - width, (sourceWidth - width) / 2));
-    const y = options.pageHeightPt - localTopPt - height;
-    const background = outputColor(embed.background ?? rgb(0.98, 0.98, 0.98), options.colorMode);
-    const border = outputColor(embed.border ?? rgb(0.72, 0.72, 0.72), options.colorMode);
-    const muted = outputColor(rgb(0.4, 0.4, 0.4), options.colorMode);
-    const normal = outputColor(rgb(0.12, 0.12, 0.12), options.colorMode);
-
-    page.drawRectangle({
-      x,
-      y,
-      width,
-      height,
-      color: background,
-      borderColor: border,
-      borderWidth: 0.75
-    });
-
-    const padding = Math.min(10, Math.max(4, height * 0.08));
-    const titleSize = Math.max(5, Math.min(10, height * 0.16));
-    const bodySize = Math.max(4.5, Math.min(7.5, height * 0.11));
-    const textX = x + padding;
-    const textMaxWidth = Math.max(4, width - padding * 2);
-    const titleY = y + height - padding - titleSize;
-    const title = embed.title || "iframe";
-    const titleDrawn = drawSafeText(page, title, {
-      x: textX,
-      y: titleY,
-      size: titleSize,
-      font: options.font,
-      color: normal,
-      maxWidth: textMaxWidth
-    });
-
-    const meta = embed.href ?? embed.element.tagName.toLowerCase();
-    drawSafeText(page, meta, {
-      x: textX,
-      y: titleY - titleDrawn.size * 1.25,
-      size: bodySize,
-      font: options.font,
-      color: muted,
-      maxWidth: textMaxWidth
-    });
-
-    if (embed.text && height > titleSize * 4.5) {
-      const excerpt = getWebEmbedExcerpt(embed.text);
-      drawSafeText(page, excerpt, {
-        x: textX,
-        y: titleY - titleDrawn.size * 2.55,
-        size: bodySize,
-        font: options.font,
-        color: normal,
-        maxWidth: textMaxWidth
-      });
-    }
-  }
-}
-
 function drawTextLayer(
   page: PDFPage,
   fragments: TextFragment[],
@@ -3719,7 +3475,7 @@ function drawTextLayer(
     const x = clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
     const baselineY = pageHeightPt - (localTop + fragment.fontSizePx * 0.86) * pxToPt;
     const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt);
-    const maxWidth = Math.max(8, pageWidthPt - x - 2);
+    const maxWidth = Math.max(8, Math.min(pageWidthPt - x - 2, measuredWidth + 2));
 
     const drawn = drawSafeText(page, fragment.text, {
       x,
@@ -3730,7 +3486,7 @@ function drawTextLayer(
       maxWidth
     });
 
-    const inkWidth = Math.min(maxWidth, measuredWidth + 2, Math.max(1, drawn.width));
+    const inkWidth = Math.min(maxWidth, Math.max(1, drawn.width));
     if (fragment.underline && inkWidth > 1) {
       const underlineY = baselineY - Math.max(0.55, drawn.size * 0.12);
       page.drawLine({
@@ -4208,13 +3964,6 @@ async function renderPreviewPageToPngBytes(
     pageBottomPx,
     colorMode: "color"
   });
-  drawCanvasWebEmbedLayer(context, model.webEmbedFragments, {
-    pageTopPx,
-    pageBottomPx,
-    sourceWidthPx: model.sourceWidthPx,
-    pageHeightPx: model.pageHeightPx,
-    colorMode: "color"
-  });
   await drawCanvasImageLayer(context, model.imageFragments, {
     pageTopPx,
     pageBottomPx,
@@ -4288,78 +4037,6 @@ function drawCanvasBoxLayer(
       context.strokeStyle = colorToCss(box.border, options.colorMode);
       context.lineWidth = 1;
       context.strokeRect(x, y, width, height);
-    }
-  }
-}
-
-function drawCanvasWebEmbedLayer(
-  context: CanvasRenderingContext2D,
-  embeds: WebEmbedFragment[],
-  options: {
-    pageTopPx: number;
-    pageBottomPx: number;
-    sourceWidthPx: number;
-    pageHeightPx: number;
-    colorMode: PdfColorMode;
-  }
-): void {
-  for (const embed of embeds) {
-    if (!shouldDrawMediaOnPage(embed, options.pageTopPx, options.pageBottomPx)) continue;
-
-    const sourceX = clampNumber(embed.left, 0, options.sourceWidthPx - 4, 0);
-    const localTop = Math.max(0, embed.top - options.pageTopPx);
-    const sourceWidth = Math.max(1, embed.right - embed.left);
-    const sourceHeight = Math.max(1, embed.bottom - embed.top);
-    const maxWidth = Math.max(8, options.sourceWidthPx - sourceX);
-    const maxHeight = Math.max(8, options.pageHeightPx - localTop - 4);
-    const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
-    const width = sourceWidth * scale;
-    const height = sourceHeight * scale;
-    const x = sourceX + Math.max(0, Math.min(sourceWidth - width, (sourceWidth - width) / 2));
-    const y = localTop;
-    const background = colorToCss(embed.background ?? rgb(0.98, 0.98, 0.98), options.colorMode);
-    const border = colorToCss(embed.border ?? rgb(0.72, 0.72, 0.72), options.colorMode);
-    const normal = rgb(0.12, 0.12, 0.12);
-    const muted = rgb(0.4, 0.4, 0.4);
-
-    context.fillStyle = background;
-    context.fillRect(x, y, width, height);
-    context.strokeStyle = border;
-    context.lineWidth = 1;
-    context.strokeRect(x, y, width, height);
-
-    const padding = Math.min(12, Math.max(5, height * 0.08));
-    const titleSize = Math.max(8, Math.min(13, height * 0.16));
-    const bodySize = Math.max(7, Math.min(10, height * 0.11));
-    const textX = x + padding;
-    const maxTextWidth = Math.max(4, width - padding * 2);
-    const titleY = y + padding + titleSize;
-    drawCanvasText(context, embed.title || "iframe", {
-      x: textX,
-      y: titleY,
-      size: titleSize,
-      color: normal,
-      maxWidth: maxTextWidth,
-      colorMode: options.colorMode
-    });
-    drawCanvasText(context, embed.href ?? embed.element.tagName.toLowerCase(), {
-      x: textX,
-      y: titleY + titleSize * 1.35,
-      size: bodySize,
-      color: muted,
-      maxWidth: maxTextWidth,
-      colorMode: options.colorMode
-    });
-
-    if (embed.text && height > titleSize * 4.5) {
-      drawCanvasText(context, getWebEmbedExcerpt(embed.text), {
-        x: textX,
-        y: titleY + titleSize * 2.7,
-        size: bodySize,
-        color: normal,
-        maxWidth: maxTextWidth,
-        colorMode: options.colorMode
-      });
     }
   }
 }
@@ -4591,7 +4268,7 @@ function drawCanvasTextLayer(
     const x = clampNumber(fragment.left, 0, options.sourceWidthPx - 4, 0);
     const y = fragment.top - options.pageTopPx + fragment.fontSizePx * 0.86;
     const measuredWidth = Math.max(1, fragment.right - fragment.left);
-    const maxWidth = Math.max(8, options.sourceWidthPx - x - 2);
+    const maxWidth = Math.max(8, Math.min(options.sourceWidthPx - x - 2, measuredWidth + 2));
     const drawn = drawCanvasText(context, fragment.text, {
       x,
       y,
@@ -4607,7 +4284,7 @@ function drawCanvasTextLayer(
       context.lineWidth = Math.max(0.65, drawn.size * 0.055);
       context.beginPath();
       context.moveTo(x, underlineY);
-      context.lineTo(x + Math.min(maxWidth, measuredWidth + 2, drawn.width), underlineY);
+      context.lineTo(x + Math.min(maxWidth, drawn.width), underlineY);
       context.stroke();
     }
   }
@@ -5187,7 +4864,7 @@ function getPreviewWaitProfile(container: HTMLElement): {
 } {
   const imageCount = container.querySelectorAll("img").length;
   const svgCount = container.querySelectorAll("svg").length;
-  const heavyBlockCount = container.querySelectorAll("table, pre, blockquote, iframe, webview, object, embed, .callout, .markdown-embed, .internal-embed").length;
+  const heavyBlockCount = container.querySelectorAll("table, pre, blockquote, .callout, .markdown-embed, .internal-embed").length;
   const textLength = container.textContent?.length ?? 0;
   const complexity = imageCount * 3 + svgCount * 3 + heavyBlockCount * 2 + Math.min(8, Math.floor(textLength / 2500));
 
@@ -5245,7 +4922,7 @@ function getPreviewDomSignature(container: HTMLElement): string {
     container.textContent?.length ?? 0,
     container.querySelectorAll("img").length,
     container.querySelectorAll("svg").length,
-    container.querySelectorAll("li, table, pre, blockquote, iframe, webview, object, embed, .callout, .markdown-embed, .internal-embed, .block-language-tasks").length,
+    container.querySelectorAll("li, table, pre, blockquote, .callout, .markdown-embed, .internal-embed, .block-language-tasks").length,
     Math.round(container.scrollHeight),
     Math.round(container.getBoundingClientRect().height)
   ].join("|");
@@ -5253,7 +4930,7 @@ function getPreviewDomSignature(container: HTMLElement): string {
 
 function hasRenderedContent(container: HTMLElement): boolean {
   if (container.textContent?.trim()) return true;
-  return !!container.querySelector("img, svg, canvas, iframe, webview, object, embed, table, li, pre, blockquote, .callout, .markdown-embed, .internal-embed");
+  return !!container.querySelector("img, svg, canvas, table, li, pre, blockquote, .callout, .markdown-embed, .internal-embed");
 }
 
 function hasExportableContent(container: HTMLElement): boolean {
@@ -5269,7 +4946,7 @@ function hasExportableContent(container: HTMLElement): boolean {
 
   if (walker.nextNode()) return true;
   return Boolean(
-    Array.from(container.querySelectorAll<HTMLElement | SVGSVGElement>("img, svg, canvas, iframe, webview, object, embed, table, li, blockquote, .callout, .markdown-embed, .internal-embed"))
+    Array.from(container.querySelectorAll<HTMLElement | SVGSVGElement>("img, svg, canvas, table, li, blockquote, .callout, .markdown-embed, .internal-embed"))
       .some((element) => isExportableElement(element))
   );
 }

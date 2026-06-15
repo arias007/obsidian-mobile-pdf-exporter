@@ -419,6 +419,8 @@ const FRAME_WAIT_TIMEOUT_MS = 120;
 const BUSY_PROMPT_PAINT_WAIT_MS = 80;
 const PAGE_BREAK_PADDING_PX = 8;
 const PAGE_BREAK_MIN_ADVANCE_PX = 72;
+const SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE = 2;
+const SELECTABLE_TEXT_LAYER_OPACITY = 0.003;
 const NOTE_DOODLE_MAX_PEN_COUNT = 5;
 const NOTE_DOODLE_DEFAULT_OPACITY = 1;
 const NOTE_DOODLE_WATERCOLOR = "watercolor";
@@ -1006,61 +1008,21 @@ export default class MobilePdfExporterPlugin extends Plugin {
     pdfDoc.setSubject(PDF_SUBJECT);
     const exportFont = await this.loadExportFont(pdfDoc, fontkitModule, StandardFonts.Helvetica);
     const { font } = exportFont;
-    const resourceCaches: PdfResourceCaches = {
-      images: new WeakMap(),
-      svgs: new WeakMap()
-    };
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       const pageTopPx = model.pageBreaks[index];
       const pageBottomPx = model.pageBreaks[index + 1];
       const pdfPage = pdfDoc.addPage([model.pageWidthPt, model.pageHeightPt]);
-
-      pdfPage.drawRectangle({
+      const pngBytes = await renderPreviewPageToPngBytes(model, index, {
+        colorMode: this.settings.colorMode,
+        rasterScale: Math.max(this.settings.imageRasterScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE)
+      });
+      const pageImage = await pdfDoc.embedPng(pngBytes);
+      pdfPage.drawImage(pageImage, {
         x: 0,
         y: 0,
         width: model.pageWidthPt,
-        height: model.pageHeightPt,
-        color: outputColor(model.background, this.settings.colorMode)
-      });
-
-      drawBoxLayer(pdfPage, model.boxFragments, {
-        pageTopPx,
-        pageBottomPx,
-        pageWidthPt: model.pageWidthPt,
-        pageHeightPt: model.pageHeightPt,
-        pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode
-      });
-
-      await drawImageLayer(pdfDoc, pdfPage, model.imageFragments, {
-        pageTopPx,
-        pageBottomPx,
-        pageWidthPt: model.pageWidthPt,
-        pageHeightPt: model.pageHeightPt,
-        pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode,
-        caches: resourceCaches
-      });
-
-      await drawSvgLayer(pdfDoc, pdfPage, model.svgFragments, {
-        pageTopPx,
-        pageBottomPx,
-        pageWidthPt: model.pageWidthPt,
-        pageHeightPt: model.pageHeightPt,
-        pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode,
-        caches: resourceCaches
-      });
-
-      drawDecorationLayer(pdfPage, model.decorationFragments, {
-        font,
-        pageTopPx,
-        pageBottomPx,
-        pageWidthPt: model.pageWidthPt,
-        pageHeightPt: model.pageHeightPt,
-        pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode
+        height: model.pageHeightPt
       });
 
       drawTextLayer(pdfPage, model.textFragments, {
@@ -1070,16 +1032,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pageWidthPt: model.pageWidthPt,
         pageHeightPt: model.pageHeightPt,
         pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode
-      });
-
-      await drawCanvasLayer(pdfDoc, pdfPage, model.canvasFragments, {
-        pageTopPx,
-        pageBottomPx,
-        pageWidthPt: model.pageWidthPt,
-        pageHeightPt: model.pageHeightPt,
-        pxToPt: model.pxToPt,
-        colorMode: this.settings.colorMode
+        colorMode: this.settings.colorMode,
+        opacity: SELECTABLE_TEXT_LAYER_OPACITY,
+        drawUnderlines: false
       });
 
       drawLinkAnnotationLayer(pdfPage, model.linkFragments, {
@@ -3463,9 +3418,13 @@ function drawTextLayer(
     pageHeightPt: number;
     pxToPt: number;
     colorMode: PdfColorMode;
+    opacity?: number;
+    drawUnderlines?: boolean;
   }
 ): void {
   const { font, pageTopPx, pageBottomPx, pageWidthPt, pageHeightPt, pxToPt } = options;
+  const opacity = options.opacity ?? 1;
+  const drawUnderlines = options.drawUnderlines ?? true;
 
   for (const fragment of fragments) {
     if (fragment.bottom < pageTopPx || fragment.top > pageBottomPx) continue;
@@ -3483,11 +3442,12 @@ function drawTextLayer(
       size: fontSize,
       font,
       color: outputColor(fragment.color, options.colorMode),
-      maxWidth
+      maxWidth,
+      opacity
     });
 
     const inkWidth = Math.min(maxWidth, Math.max(1, drawn.width));
-    if (fragment.underline && inkWidth > 1) {
+    if (drawUnderlines && fragment.underline && inkWidth > 1) {
       const underlineY = baselineY - Math.max(0.55, drawn.size * 0.12);
       page.drawLine({
         start: { x, y: underlineY },
@@ -3509,6 +3469,7 @@ function drawSafeText(
     font: PDFFont;
     color: Color;
     maxWidth: number;
+    opacity?: number;
   }
 ): { text: string; size: number; width: number } {
   const clean = getEncodablePdfText(options.font, stripProblematicPdfChars(compactSeparatorSpacing(text)));
@@ -3523,7 +3484,8 @@ function drawSafeText(
     y: options.y,
     size: fitSize,
     font: options.font,
-    color: options.color
+    color: options.color,
+    opacity: options.opacity
   };
 
   try {
@@ -4302,15 +4264,15 @@ function drawCanvasText(
     colorMode: PdfColorMode;
   }
 ): { text: string; size: number; width: number } {
-  const clean = stripProblematicPdfChars(compactSeparatorSpacing(text));
+  const clean = compactSeparatorSpacing(text);
   if (!clean) return { text: "", size: options.size, width: 0 };
 
   let size = options.size;
-  context.font = `${size}px "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif`;
+  context.font = `${size}px "Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
   let width = context.measureText(clean).width;
   if (width > options.maxWidth) {
     size = Math.max(5, size * (options.maxWidth / width));
-    context.font = `${size}px "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif`;
+    context.font = `${size}px "Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
     width = context.measureText(clean).width;
   }
 

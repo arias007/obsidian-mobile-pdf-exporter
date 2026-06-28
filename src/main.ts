@@ -11,9 +11,6 @@ import {
   normalizePath
 } from "obsidian";
 import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
-import embeddedCjkFontBase64 from "../fonts/NotoSansSC-Regular.gb2312-subset.ttf";
-import supportCode1Base64 from "./generated/support-code-1.jpg";
-import supportCode2Base64 from "./generated/support-code-2.png";
 
 const UI_LANGUAGES = ["auto", "zh", "en"] as const;
 type UiLanguage = typeof UI_LANGUAGES[number];
@@ -429,8 +426,8 @@ const NOTE_DOODLE_MAX_PEN_COUNT = 5;
 const NOTE_DOODLE_DEFAULT_OPACITY = 1;
 const NOTE_DOODLE_WATERCOLOR = "watercolor";
 const SETTINGS_EXTRA_CODE_ASSETS = [
-  { src: `data:image/jpeg;base64,${supportCode1Base64}`, label: "给我买咖啡 / Buy me a coffee", fileName: "buy-me-a-coffee.jpg" },
-  { src: `data:image/png;base64,${supportCode2Base64}`, label: "支持继续维护 / Support this tool", fileName: "support-this-tool.png" }
+  { path: "extras/code-1.jpg", label: "给我买咖啡 / Buy me a coffee" },
+  { path: "extras/code-2.png", label: "支持继续维护 / Support this tool" }
 ] as const;
 
 function resolveUiLanguage(language: UiLanguage): ResolvedUiLanguage {
@@ -489,7 +486,6 @@ interface ExportFont {
 let pdfRuntimePromise: Promise<PdfRuntime> | null = null;
 let pdfStringRuntime: PdfLibRuntime["PDFString"] | null = null;
 let exportableElementCache: WeakMap<Element, boolean> | null = null;
-let embeddedCjkFontBytesPromise: Promise<ArrayBuffer> | null = null;
 const pdfCharEncodingCache = new WeakMap<PDFFont, Map<string, boolean>>();
 let rgb: PdfLibRuntime["rgb"] = ((red: number, green: number, blue: number) => ({
   type: "RGB",
@@ -521,22 +517,6 @@ function getPdfStringRuntime(): PdfLibRuntime["PDFString"] {
     throw new Error("PDF 引擎尚未加载。");
   }
   return pdfStringRuntime;
-}
-
-async function loadEmbeddedCjkFontBytes(): Promise<ArrayBuffer> {
-  if (!embeddedCjkFontBytesPromise) {
-    embeddedCjkFontBytesPromise = Promise.resolve(base64ToArrayBuffer(embeddedCjkFontBase64));
-  }
-  return embeddedCjkFontBytesPromise;
-}
-
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes.buffer;
 }
 
 export default class MobilePdfExporterPlugin extends Plugin {
@@ -1179,7 +1159,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       this.fontBytesPromise = this.app.vault.adapter
         .readBinary(this.getPluginAssetPath("fonts/SimHei.ttf"))
         .catch(() => this.app.vault.adapter.readBinary(this.getPluginAssetPath("fonts/NotoSansSC-Regular.otf")))
-        .catch(() => loadEmbeddedCjkFontBytes())
         .catch(() => {
           throw new Error(this.t("fontMissingError"));
         });
@@ -1802,10 +1781,24 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
     const codesContainer = appendElement(containerEl, "div", {
       cls: "mobile-pdf-exporter-settings-codes"
     });
-    this.renderExtraCodes(codesContainer);
+    void this.renderExtraCodes(codesContainer);
   }
 
-  private renderExtraCodes(containerEl: HTMLElement): void {
+  private async renderExtraCodes(containerEl: HTMLElement): Promise<void> {
+    const codeItems = (
+      await Promise.all(
+        SETTINGS_EXTRA_CODE_ASSETS.map(async (asset) => {
+          const src = await this.plugin.getOptionalAssetResourcePath(asset.path);
+          return src ? { ...asset, src } : null;
+        })
+      )
+    ).filter((item): item is NonNullable<typeof item> => item !== null);
+
+    if (codeItems.length === 0) {
+      containerEl.remove();
+      return;
+    }
+
     appendElement(containerEl, "div", {
       cls: "mobile-pdf-exporter-settings-codes-title",
       text: this.plugin.t("codesTitle")
@@ -1819,25 +1812,16 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
       cls: "mobile-pdf-exporter-settings-codes-grid"
     });
 
-    for (const item of SETTINGS_EXTRA_CODE_ASSETS) {
+    for (const item of codeItems) {
       const codeEl = appendElement(gridEl, "div", {
         cls: "mobile-pdf-exporter-settings-code"
       });
-      const linkEl = appendElement(codeEl, "a", {
-        cls: "mobile-pdf-exporter-settings-code-link"
-      });
-      linkEl.href = item.src;
-      linkEl.target = "_blank";
-      linkEl.rel = "noopener";
-      linkEl.setAttribute("download", item.fileName);
-      linkEl.setAttribute("aria-label", item.label);
-      const imageEl = appendElement(linkEl, "img", {
+      const imageEl = appendElement(codeEl, "img", {
         cls: "mobile-pdf-exporter-settings-code-image"
       });
       imageEl.src = item.src;
       imageEl.alt = item.label;
       imageEl.loading = "lazy";
-      imageEl.decoding = "async";
       appendElement(codeEl, "div", {
         cls: "mobile-pdf-exporter-settings-code-label",
         text: item.label

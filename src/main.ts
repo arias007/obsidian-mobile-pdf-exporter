@@ -77,6 +77,7 @@ interface TextFragment {
   fontStyle: string;
   color: Color;
   underline: boolean;
+  lineThrough: boolean;
   href: string | null;
   mergeScope: Element;
 }
@@ -93,6 +94,7 @@ interface TextLineDraft {
   fontStyle: string;
   color: Color;
   underline: boolean;
+  lineThrough: boolean;
   href: string | null;
   mergeScope: Element;
 }
@@ -121,13 +123,22 @@ interface LinkFragment {
   bottom: number;
 }
 
+interface CssBorderFragment {
+  color: string;
+  widthPx: number;
+}
+
 interface BoxFragment {
   left: number;
   top: number;
   right: number;
   bottom: number;
-  background: Color | null;
-  border: Color | null;
+  background: string | null;
+  borderTop: CssBorderFragment | null;
+  borderRight: CssBorderFragment | null;
+  borderBottom: CssBorderFragment | null;
+  borderLeft: CssBorderFragment | null;
+  borderRadiusPx: number;
   keepTogether: boolean;
 }
 
@@ -428,7 +439,7 @@ const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   pageOrientation: "portrait",
   colorMode: "color",
   contentScalePercent: 100,
-  imageRasterScale: 1.5
+  imageRasterScale: 3
 };
 
 const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
@@ -1349,7 +1360,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
     try {
       pdfDoc.registerFontkit(resolvePdfFontkit(fontkitModule));
       return {
-        font: await pdfDoc.embedFont(await this.loadFontBytes(), { subset: true }),
+        font: await pdfDoc.embedFont(await this.loadFontBytes(), {
+          subset: false,
+          features: { locl: false }
+        }),
         supportsUnicode: true
       };
     } catch (error) {
@@ -2621,37 +2635,66 @@ function captureLinkFragments(pageEl: HTMLElement): LinkFragment[] {
 
 function captureBoxFragments(pageEl: HTMLElement): BoxFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
-  const selectors = [
-    "pre",
-    "blockquote",
-    "table",
-    "th",
-    "td",
-    ".callout",
-    ".markdown-embed",
-    ".internal-embed",
-    ".HyperMD-codeblock",
-    "hr"
-  ].join(",");
+  const fragments: BoxFragment[] = [];
 
-  return Array.from(pageEl.querySelectorAll<HTMLElement>(selectors))
-    .filter((element) => isExportableElement(element))
-    .map((element) => {
-      const rect = element.getBoundingClientRect();
-      const style = getComputedStyle(element);
-      const background = parseCssColor(style.backgroundColor);
-      const border = parseCssColor(style.borderColor);
-      return {
+  for (const element of Array.from(pageEl.querySelectorAll<HTMLElement>("*"))) {
+    if (!isExportableElement(element)) continue;
+
+    const style = getComputedStyle(element);
+    const background = normalizeVisibleCssColor(style.backgroundColor);
+    const borderTop = captureCssBorder(style.borderTopColor, style.borderTopWidth, style.borderTopStyle);
+    const borderRight = captureCssBorder(style.borderRightColor, style.borderRightWidth, style.borderRightStyle);
+    const borderBottom = captureCssBorder(style.borderBottomColor, style.borderBottomWidth, style.borderBottomStyle);
+    const borderLeft = captureCssBorder(style.borderLeftColor, style.borderLeftWidth, style.borderLeftStyle);
+    if (!background && !borderTop && !borderRight && !borderBottom && !borderLeft) continue;
+
+    const borderRadiusPx = clampNumber(parseFloat(style.borderRadius), 0, 64, 0);
+    const keepTogether = element.matches(
+      "pre, blockquote, table, .callout, .markdown-embed, .internal-embed, .HyperMD-codeblock"
+    );
+
+    for (const rect of Array.from(element.getClientRects())) {
+      if (rect.width <= 0.5 || rect.height <= 0.5) continue;
+      fragments.push({
         left: rect.left - pageRect.left,
         top: rect.top - pageRect.top,
         right: rect.right - pageRect.left,
         bottom: rect.bottom - pageRect.top,
         background,
-        border,
-        keepTogether: !element.matches("th, td")
-      };
-    })
-    .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
+        borderTop,
+        borderRight,
+        borderBottom,
+        borderLeft,
+        borderRadiusPx,
+        keepTogether
+      });
+    }
+  }
+
+  return fragments;
+}
+
+function captureCssBorder(color: string, width: string, style: string): CssBorderFragment | null {
+  if (!style || style === "none" || style === "hidden") return null;
+  const widthPx = parseFloat(width);
+  const visibleColor = normalizeVisibleCssColor(color);
+  if (!visibleColor || !Number.isFinite(widthPx) || widthPx <= 0) return null;
+  return { color: visibleColor, widthPx: clampNumber(widthPx, 0.5, 24, 1) };
+}
+
+function normalizeVisibleCssColor(value: string): string | null {
+  const clean = value.trim();
+  if (!clean || clean === "transparent") return null;
+
+  const alphaMatch = clean.match(/(?:rgba?\([^)]*[,/]\s*|color\([^)]*\/\s*)([\d.]+%?)\s*\)$/iu);
+  if (alphaMatch) {
+    const alpha = alphaMatch[1].endsWith("%")
+      ? Number.parseFloat(alphaMatch[1]) / 100
+      : Number.parseFloat(alphaMatch[1]);
+    if (Number.isFinite(alpha) && alpha <= 0.001) return null;
+  }
+
+  return clean;
 }
 
 function captureSvgFragments(pageEl: HTMLElement): SvgFragment[] {
@@ -3162,6 +3205,10 @@ function measureTextNode(textNode: Text, parent: HTMLElement, pageRect: DOMRect)
     style.textDecorationLine.includes("underline") ||
     style.textDecoration.includes("underline")
   );
+  const lineThrough = Boolean(
+    style.textDecorationLine.includes("line-through") ||
+    style.textDecoration.includes("line-through")
+  );
   const text = textNode.nodeValue ?? "";
   const range = textNode.ownerDocument.createRange();
   const fragments: TextFragment[] = [];
@@ -3184,6 +3231,7 @@ function measureTextNode(textNode: Text, parent: HTMLElement, pageRect: DOMRect)
         fontStyle: current.fontStyle,
         color: current.color,
         underline: current.underline,
+        lineThrough: current.lineThrough,
         href: current.href,
         mergeScope: current.mergeScope
       });
@@ -3239,6 +3287,7 @@ function measureTextNode(textNode: Text, parent: HTMLElement, pageRect: DOMRect)
         fontStyle: style.fontStyle || "normal",
         color,
         underline,
+        lineThrough,
         href,
         mergeScope
       };
@@ -3299,6 +3348,7 @@ function mergeAdjacentFragments(fragments: TextFragment[]): TextFragment[] {
       Math.abs(previous.top - fragment.top) <= Math.max(2.5, fragment.fontSizePx * 0.35) &&
       fragment.left >= previous.right - fragment.fontSizePx * 0.5 &&
       previous.underline === fragment.underline &&
+      previous.lineThrough === fragment.lineThrough &&
       previous.href === fragment.href &&
       previous.mergeScope === fragment.mergeScope &&
       previous.fontFamily === fragment.fontFamily &&
@@ -3417,8 +3467,9 @@ function computePageBreaks(
         const startsOnThisPage = fragment.top > pageTop + PAGE_BREAK_MIN_ADVANCE_PX;
         const crossesBreak = fragment.bottom > nextBreak - PAGE_BREAK_PADDING_PX;
         const remainingHeight = Math.max(0, nextBreak - fragment.top);
-        const preferredHeight = Math.min(height, pageHeightPx * 0.92);
-        return startsOnThisPage && crossesBreak && remainingHeight < preferredHeight * 0.88;
+        const fitsOnOnePage = height <= pageHeightPx * 0.94;
+        if (fitsOnOnePage) return startsOnThisPage && crossesBreak;
+        return startsOnThisPage && crossesBreak && remainingHeight < pageHeightPx * 0.28;
       })
       .sort((a, b) => a.top - b.top)[0];
 
@@ -3795,16 +3846,11 @@ function shouldDrawMediaOnPage(
   pageTopPx: number,
   pageBottomPx: number
 ): boolean {
-  if (fragment.bottom <= pageTopPx || fragment.top >= pageBottomPx) return false;
-  if (fragment.top < pageTopPx - 1) return false;
-  return fragment.top < pageBottomPx - PAGE_BREAK_PADDING_PX;
+  return fragment.bottom > pageTopPx && fragment.top < pageBottomPx;
 }
 
 function shouldDrawSvgOnPage(fragment: SvgFragment, pageTopPx: number, pageBottomPx: number): boolean {
-  if (isLargeOrExcalidrawSvg(fragment.element)) {
-    return shouldDrawMediaOnPage(fragment, pageTopPx, pageBottomPx);
-  }
-  return fragment.bottom >= pageTopPx && fragment.top <= pageBottomPx;
+  return shouldDrawMediaOnPage(fragment, pageTopPx, pageBottomPx);
 }
 
 function isLargeOrExcalidrawSvg(svg: SVGSVGElement): boolean {
@@ -3977,23 +4023,74 @@ function drawCanvasBoxLayer(
 ): void {
   for (const box of boxes) {
     if (box.bottom < options.pageTopPx || box.top > options.pageBottomPx) continue;
-    if (!box.background && !box.border) continue;
+    if (!box.background && !box.borderTop && !box.borderRight && !box.borderBottom && !box.borderLeft) continue;
 
     const x = Math.max(0, box.left);
     const y = box.top - options.pageTopPx;
     const width = Math.max(1, box.right - box.left);
     const height = Math.max(1, box.bottom - box.top);
+    const radius = Math.min(box.borderRadiusPx, width / 2, height / 2);
 
+    context.save();
     if (box.background) {
-      context.fillStyle = colorToCss(box.background, options.colorMode);
-      context.fillRect(x, y, width, height);
+      context.fillStyle = box.background;
+      if (radius > 0.5) {
+        roundedRectPath(context, x, y, width, height, radius);
+        context.fill();
+      } else {
+        context.fillRect(x, y, width, height);
+      }
     }
-    if (box.border) {
-      context.strokeStyle = colorToCss(box.border, options.colorMode);
-      context.lineWidth = 1;
-      context.strokeRect(x, y, width, height);
+
+    const uniformBorder = getUniformCssBorder(box);
+    if (uniformBorder) {
+      const inset = uniformBorder.widthPx / 2;
+      context.strokeStyle = uniformBorder.color;
+      context.lineWidth = uniformBorder.widthPx;
+      roundedRectPath(
+        context,
+        x + inset,
+        y + inset,
+        Math.max(0.5, width - uniformBorder.widthPx),
+        Math.max(0.5, height - uniformBorder.widthPx),
+        Math.max(0, radius - inset)
+      );
+      context.stroke();
+    } else {
+      drawCanvasBorderSide(context, box.borderTop, x, y, x + width, y);
+      drawCanvasBorderSide(context, box.borderRight, x + width, y, x + width, y + height);
+      drawCanvasBorderSide(context, box.borderBottom, x + width, y + height, x, y + height);
+      drawCanvasBorderSide(context, box.borderLeft, x, y + height, x, y);
     }
+    context.restore();
   }
+}
+
+function getUniformCssBorder(box: BoxFragment): CssBorderFragment | null {
+  const borders = [box.borderTop, box.borderRight, box.borderBottom, box.borderLeft];
+  if (borders.some((border) => !border)) return null;
+  const first = borders[0] as CssBorderFragment;
+  return borders.every((border) => border?.color === first.color && Math.abs(border.widthPx - first.widthPx) < 0.01)
+    ? first
+    : null;
+}
+
+function drawCanvasBorderSide(
+  context: CanvasRenderingContext2D,
+  border: CssBorderFragment | null,
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number
+): void {
+  if (!border) return;
+  context.strokeStyle = border.color;
+  context.lineWidth = border.widthPx;
+  context.lineCap = "butt";
+  context.beginPath();
+  context.moveTo(startX, startY);
+  context.lineTo(endX, endY);
+  context.stroke();
 }
 
 async function drawCanvasImageLayer(
@@ -4009,23 +4106,16 @@ async function drawCanvasImageLayer(
   for (const imageFragment of images) {
     if (!shouldDrawMediaOnPage(imageFragment, options.pageTopPx, options.pageBottomPx)) continue;
 
-    const imageBytes = await imageElementToPngBytes(imageFragment.element, "color");
-    if (!imageBytes) continue;
-
     try {
-      const image = await imageBytesToHtmlImage(imageBytes);
-      const sourceX = clampNumber(imageFragment.left, 0, options.sourceWidthPx - 4, 0);
-      const localTop = Math.max(0, imageFragment.top - options.pageTopPx);
-      const sourceWidth = Math.max(1, imageFragment.right - imageFragment.left);
-      const sourceHeight = Math.max(1, imageFragment.bottom - imageFragment.top);
-      const maxWidth = Math.max(8, options.sourceWidthPx - sourceX);
-      const maxHeight = Math.max(8, options.pageHeightPx - localTop - 4);
-      const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
-      const width = sourceWidth * scale;
-      const height = sourceHeight * scale;
-      const x = sourceX + Math.max(0, Math.min(sourceWidth - width, (sourceWidth - width) / 2));
-      const y = localTop;
-      context.drawImage(image, x, y, width, height);
+      const slice = getMediaPageSlice(imageFragment, options);
+      if (!slice) continue;
+
+      const naturalHeight = Math.max(1, imageFragment.element.naturalHeight);
+      const sourceY = (slice.offsetTopPx / slice.fragmentHeightPx) * naturalHeight;
+      const sourceHeight = (slice.height / slice.fragmentHeightPx) * naturalHeight;
+      const sliceBytes = await imageSliceToPngBytes(imageFragment.element, sourceY, sourceHeight, "color");
+      const sliceImage = await imageBytesToHtmlImage(sliceBytes);
+      context.drawImage(sliceImage, slice.x, slice.y, slice.width, slice.height);
     } catch (error) {
       console.warn("Mobile PDF Exporter canvas image draw failed", error);
     }
@@ -4054,24 +4144,67 @@ async function drawCanvasSvgLayer(
       const imageBytes = await svgElementToPngBytes(svgFragment.element, options.rasterScale, SVG_IMAGE_LOAD_TIMEOUT_MS, "color");
       if (!imageBytes) continue;
       const image = await imageBytesToHtmlImage(imageBytes);
-      const sourceX = clampNumber(svgFragment.left, 0, options.sourceWidthPx - 4, 0);
-      const localTop = Math.max(0, svgFragment.top - options.pageTopPx);
-      const sourceWidth = Math.max(1, svgFragment.right - svgFragment.left);
-      const sourceHeight = Math.max(1, svgFragment.bottom - svgFragment.top);
-      const maxWidth = Math.max(8, options.sourceWidthPx - sourceX);
-      const maxHeight = Math.max(8, options.pageHeightPx - localTop - 4);
-      const scale = isLargeOrExcalidrawSvg(svgFragment.element)
-        ? Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight)
-        : 1;
-      const width = Math.min(sourceWidth * scale, maxWidth);
-      const height = Math.min(sourceHeight * scale, maxHeight);
-      const x = sourceX + Math.max(0, Math.min(sourceWidth - width, (sourceWidth - width) / 2));
-      const y = localTop;
-      context.drawImage(image, x, y, width, height);
+      const slice = getMediaPageSlice(svgFragment, options);
+      if (!slice) continue;
+
+      const rasterHeight = Math.max(1, image.naturalHeight || image.height);
+      const rasterWidth = Math.max(1, image.naturalWidth || image.width);
+      const sourceY = (slice.offsetTopPx / slice.fragmentHeightPx) * rasterHeight;
+      const sourceHeight = Math.max(1, (slice.height / slice.fragmentHeightPx) * rasterHeight);
+      context.drawImage(
+        image,
+        0,
+        sourceY,
+        rasterWidth,
+        Math.min(sourceHeight, rasterHeight - sourceY),
+        slice.x,
+        slice.y,
+        slice.width,
+        slice.height
+      );
     } catch (error) {
       console.warn("Mobile PDF Exporter canvas SVG draw failed", error);
     }
   }
+}
+
+interface MediaPageSlice {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  offsetTopPx: number;
+  fragmentHeightPx: number;
+}
+
+function getMediaPageSlice(
+  fragment: { left: number; top: number; right: number; bottom: number },
+  options: {
+    pageTopPx: number;
+    pageBottomPx: number;
+    sourceWidthPx: number;
+    pageHeightPx: number;
+  }
+): MediaPageSlice | null {
+  const visibleTop = Math.max(fragment.top, options.pageTopPx);
+  const visibleBottom = Math.min(fragment.bottom, options.pageBottomPx);
+  if (visibleBottom <= visibleTop) return null;
+
+  const fragmentWidthPx = Math.max(1, fragment.right - fragment.left);
+  const fragmentHeightPx = Math.max(1, fragment.bottom - fragment.top);
+  const x = clampNumber(fragment.left, 0, options.sourceWidthPx - 1, 0);
+  const y = Math.max(0, visibleTop - options.pageTopPx);
+  const width = Math.max(1, Math.min(fragmentWidthPx, options.sourceWidthPx - x));
+  const height = Math.max(1, Math.min(visibleBottom - visibleTop, options.pageHeightPx - y));
+
+  return {
+    x,
+    y,
+    width,
+    height,
+    offsetTopPx: visibleTop - fragment.top,
+    fragmentHeightPx
+  };
 }
 
 function drawCanvasBitmapLayer(
@@ -4236,13 +4369,24 @@ function drawCanvasTextLayer(
       colorMode: options.colorMode
     });
 
-    if (fragment.underline && drawn.width > 1) {
+    const decorationWidth = Math.min(maxWidth, measuredWidth + 2, drawn.width);
+    if (fragment.underline && decorationWidth > 1) {
       const underlineY = y + Math.max(0.75, drawn.size * 0.12);
       context.strokeStyle = colorToCss(fragment.color, options.colorMode);
       context.lineWidth = Math.max(0.65, drawn.size * 0.055);
       context.beginPath();
       context.moveTo(x, underlineY);
-      context.lineTo(x + Math.min(maxWidth, measuredWidth + 2, drawn.width), underlineY);
+      context.lineTo(x + decorationWidth, underlineY);
+      context.stroke();
+    }
+
+    if (fragment.lineThrough && decorationWidth > 1) {
+      const strikeY = y - drawn.size * 0.31;
+      context.strokeStyle = colorToCss(fragment.color, options.colorMode);
+      context.lineWidth = Math.max(0.75, drawn.size * 0.06);
+      context.beginPath();
+      context.moveTo(x, strikeY);
+      context.lineTo(x + decorationWidth, strikeY);
       context.stroke();
     }
   }

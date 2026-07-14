@@ -40,18 +40,33 @@ test("external and internal links produce PDF URI annotations", async () => {
   assert.match(source, /URI:\s*getPdfStringRuntime\(\)\.of\(target\)/);
 });
 
-test("live capture avoids virtual-scroll ghosting and never cuts a page through a text line", async () => {
+test("live capture avoids virtual-scroll loss, blank trailing pages, and split text lines", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
+  assert.match(source, /liveSurface\?\.mode === "source"/);
+  assert.match(source, /this\.captureMarkdownEditorSourcePdfModel\(file, markdown, liveSurface\)/);
+  assert.match(source, /private captureMarkdownEditorSourcePdfModel\(/);
+  assert.match(source, /buildMarkdownEditorSourceCapture\(markdown,/);
+  assert.match(source, /function buildMarkdownEditorSourceCapture\(/);
+  assert.match(source, /function extractEditorSourceHrefs/);
+  assert.match(source, /function buildLivePreviewCaptureScrollPositions/);
+  assert.match(source, /for \(const scrollTop of buildLivePreviewCaptureScrollPositions/);
+  assert.match(source, /function measureVisibleCapturedSurfaceBottom/);
+  assert.match(source, /const capturedBottomPx = measureVisibleCapturedSurfaceBottom\(transformed\)/);
+  assert.match(source, /capturedBottomPx \|\| \(surface\.mode === "preview" \? contentHeightPx \* surfaceScale : 0\)/);
   assert.match(source, /surface\.mode === "preview"/);
   assert.doesNotMatch(source, /const maxSegments = Math\.min\(512/);
   assert.doesNotMatch(source, /actualTop <= previousActualTop \+ 0\.5/);
-  assert.match(source, /captureSurfaceFragments\(rootEl, linkContext\),\s*0,\s*0,/);
-  assert.match(source, /contentHeightPx = Math\.max\(1, measureCapturedSurfaceBottom\(captured\)\)/);
-  assert.match(source, /surface\.mode === "preview" \? contentHeightPx \* surfaceScale : 0/);
   assert.match(source, /captured\.textFragments = dedupeOverlappingLiveTextFragments/);
   assert.match(source, /function areOverlappingDuplicateTextFragments/);
+  assert.match(source, /nextBreak = moveBreakOutsideTextLines\(pageTop, nextBreak, pageHeightPx, sortedBlocks\)/);
+  assert.match(source, /function moveBreakOutsideTextLines/);
   assert.match(source, /const crossingTextLine = sortedBlocks/);
   assert.match(source, /fragment\.priority === 1/);
-  assert.match(source, /crossingTextLine\.bottom \+ PAGE_BREAK_PADDING_PX/);
+  assert.match(source, /const beforeLine = crossingTextLine\.top/);
+  assert.match(source, /const afterLine = crossingTextLine\.bottom/);
+  assert.match(source, /fragment\.bottom <= pageTopPx \+ 0\.5 \|\| fragment\.top >= pageBottomPx - 0\.5/);
+  assert.match(source, /fragment\.bottom <= options\.pageTopPx \+ 0\.5 \|\| fragment\.top >= options\.pageBottomPx - 0\.5/);
+  assert.doesNotMatch(source, /const maxBoxBottom/);
+  assert.doesNotMatch(source, /const maxKeepBottom/);
 });

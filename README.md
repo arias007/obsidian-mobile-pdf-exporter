@@ -66,9 +66,16 @@ The interface language can be set to Auto, Chinese, or English in the plugin set
 
 Markor creates PDF through Android WebView printing, so its preview PDF text is selectable. Obsidian plugins do not expose Android native printing, so this plugin uses the closest available browser-side approach: render the Obsidian preview layout, then write real PDF text and images at matching positions.
 
-The exporter walks the active reading or editing surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. It scrolls virtualized editing views in bounded steps and restores the original position after capture. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
+The exporter walks the active reading surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. Editing view exports use a complete editor-source text model so CodeMirror virtual scrolling cannot drop off-screen lines or duplicate remounted text. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
 
 ## Changelog
+
+### 0.3.62
+
+- Rebuilds the fix on top of the 0.3.61 rollback baseline.
+- Fixes editing-view exports losing long quotes or off-screen text by exporting a complete editor-source text model instead of the virtualized CodeMirror viewport.
+- Improves reading-view capture by sampling the live preview while scrolling, so lazy-rendered content is less likely to be missed.
+- Snaps page breaks to text-line boundaries and ignores non-content background/keep boxes for page height, reducing clipped text and trailing blank pages.
 
 ### 0.3.61
 

@@ -1,11 +1,12 @@
 {
   "name": "obsidian-mobile-pdf-exporter",
-  "version": "0.3.59",
+  "version": "0.3.60",
   "description": "One-click selectable preview PDF export plugin.",
   "main": "main.js",
   "scripts": {
     "build": "node esbuild.config.mjs production",
-    "dev": "node esbuild.config.mjs"
+    "dev": "node esbuild.config.mjs",
+    "test": "node --test tests/*.test.mjs"
   },
   "keywords": [
     "obsidian",

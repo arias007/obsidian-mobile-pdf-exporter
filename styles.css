@@ -273,7 +273,7 @@
   left: 50%;
   z-index: 2147483647;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   width: min(560px, calc(100vw - 20px));
@@ -281,7 +281,7 @@
   padding: 9px 12px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;
-  pointer-events: none;
+  pointer-events: auto;
   background: var(--modal-background, var(--background-primary));
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
   color: var(--text-normal);
@@ -311,12 +311,54 @@
   white-space: nowrap;
 }
 
+.mobile-pdf-exporter-busy-cancel {
+  min-width: 76px;
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.mobile-pdf-exporter-busy-cancel:hover {
+  background: var(--interactive-hover);
+}
+
 .mobile-pdf-exporter-busy.is-complete .mobile-pdf-exporter-busy-title {
   color: var(--text-success, #2f9e44);
 }
 
 .mobile-pdf-exporter-busy.is-error .mobile-pdf-exporter-busy-title {
   color: var(--text-error, #d9480f);
+}
+
+.mobile-pdf-exporter-busy.is-cancelled .mobile-pdf-exporter-busy-title {
+  color: var(--text-muted);
+}
+
+@media (max-width: 520px) {
+  .mobile-pdf-exporter-busy {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .mobile-pdf-exporter-busy-file {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .mobile-pdf-exporter-busy-elapsed {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .mobile-pdf-exporter-busy-cancel {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+  }
 }
 
 .mobile-pdf-exporter-settings-codes {

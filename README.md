@@ -13,12 +13,12 @@ One-click preview-style PDF export for Obsidian mobile and desktop.
 - Saves beside the current note by default, with a combined export-location control for switching to a custom vault folder.
 - Uses selectable/editable-text PDF and the highest `3x` image quality by default on new installations.
 - Opens the finished PDF by default for viewing or printing, and remembers the last export options by default; both behaviors can be disabled.
-- Uses the rendered Obsidian preview DOM as the layout source.
+- Uses the active Obsidian reading or editing surface as the primary layout source, so the two modes keep their real visible differences; hidden Markdown rendering is only a fallback when the file has no active view.
 - Draws a high-resolution visual layer plus a matching real PDF text layer, keeping the preview appearance while text remains selectable.
 - Preserves common rendered Markdown styling, including bold, italic, strikethrough, text color, highlights, inline-code backgrounds, tags, links, borders, tables, lists, tasks, quotes, callouts, code blocks, math/SVG, and embeds.
 - Keeps short images together when they fit, while tall images retain their readable width and are cropped into continuous vertical page slices instead of being squeezed into one page.
 - Draws link color/underlines, task checkboxes, list bullets, ordered-list markers, and small SVG icons from the rendered preview.
-- Avoids page breaks inside images, list items, paragraphs, code blocks, tables, quotes, embeds, and callouts when they can fit on one page.
+- Keeps short images, rows, list items, paragraphs, code blocks, tables, quotes, embeds, and callouts together when doing so does not leave a mostly empty page; long blocks and media are sliced continuously instead of being forced onto one page.
 - Exports direct `.excalidraw.md` files as pure image PDFs through the Excalidraw runtime, with automatic lower-resolution retries and page slicing for large drawings.
 - Keeps the startup bundle small for Obsidian mobile. Full CJK text export is available when a local font file is installed.
 
@@ -66,9 +66,20 @@ The interface language can be set to Auto, Chinese, or English in the plugin set
 
 Markor creates PDF through Android WebView printing, so its preview PDF text is selectable. Obsidian plugins do not expose Android native printing, so this plugin uses the closest available browser-side approach: render the Obsidian preview layout, then write real PDF text and images at matching positions.
 
-The exporter uses the rendered preview DOM as the layout source, then writes a real PDF text layer. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
+The exporter walks the active reading or editing surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. It scrolls virtualized editing views in bounded steps and restores the original position after capture. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
 
 ## Changelog
+
+### 0.3.60
+
+- Exports the active reading or editing surface instead of normalizing both modes through one hidden reading preview.
+- Captures virtualized Live Preview content in bounded scroll steps and restores the original scroll position after export.
+- Preserves live NoteDraw static/dynamic canvases, floating text/image/file embeds, and other visible content inside the active note surface.
+- Prevents medium or long list items and containers from being moved wholesale to a new page when that would leave a large blank area.
+- Aligns task checkboxes to their real DOM geometry and preserves their theme border width, radius, background, accent color, and checked state.
+- Removes overlapping duplicate text from segmented live capture and keeps every line of long quotes when they continue across pages.
+- Restores clickable external URLs and resolves internal note links to `obsidian://open` targets in the current vault.
+- Adds a real cancel action to the export progress prompt and removes a just-written output if cancellation arrives during saving.
 
 ### 0.3.59
 

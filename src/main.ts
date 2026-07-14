@@ -2,6 +2,7 @@ import {
   App,
   Component,
   MarkdownRenderer,
+  MarkdownView,
   Modal,
   Notice,
   Plugin,
@@ -60,9 +61,33 @@ interface RenderedPreview {
   renderComponent: Component;
 }
 
+interface LiveMarkdownSurface {
+  rootEl: HTMLElement;
+  scrollEl: HTMLElement;
+  mode: "source" | "preview";
+}
+
+interface CapturedSurfaceFragments {
+  boxFragments: BoxFragment[];
+  textFragments: TextFragment[];
+  imageFragments: ImageFragment[];
+  canvasFragments: CanvasFragment[];
+  linkFragments: LinkFragment[];
+  svgFragments: SvgFragment[];
+  decorationFragments: DecorationFragment[];
+  keepBlocks: KeepBlockFragment[];
+}
+
 interface ExportFileOptions {
   outputBaseName?: string;
   busyPrompt?: PdfExportBusyPrompt;
+  signal?: AbortSignal;
+}
+
+interface PdfLinkContext {
+  app: App;
+  sourcePath: string;
+  vaultName: string;
 }
 
 interface TextFragment {
@@ -160,6 +185,9 @@ interface DecorationFragment {
   bottom: number;
   color: Color;
   border: Color | null;
+  background?: Color | null;
+  borderWidthPx?: number;
+  borderRadiusPx?: number;
   checked?: boolean;
   text?: string;
   fontSizePx: number;
@@ -323,6 +351,9 @@ const UI_TEXT = {
     exportPdfButton: "导出 PDF",
     cancelButton: "取消",
     busyExporting: "正在导出 PDF",
+    busyCancelButton: "取消导出",
+    busyCancelledTitle: "已取消导出",
+    busyCancelledStatus: "未保存 PDF。",
     busyCompleteTitle: "导出完成",
     busyCompleteStatus: "完成",
     busyFailedTitle: "PDF 导出失败",
@@ -393,6 +424,9 @@ const UI_TEXT = {
     exportPdfButton: "Export PDF",
     cancelButton: "Cancel",
     busyExporting: "Exporting PDF",
+    busyCancelButton: "Cancel export",
+    busyCancelledTitle: "Export cancelled",
+    busyCancelledStatus: "No PDF was saved.",
     busyCompleteTitle: "Export complete",
     busyCompleteStatus: "Done",
     busyFailedTitle: "PDF export failed",
@@ -479,7 +513,6 @@ const HEADER_FOOTER_MIN_BAND_MM = 8;
 const HEADER_FOOTER_FONT_SIZE_PX = 10;
 const SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE = 2;
 const SELECTABLE_TEXT_LAYER_OPACITY = 0.003;
-const TASK_CHECKBOX_VERTICAL_SHIFT_EM = 0.22;
 const NOTE_DOODLE_MAX_PEN_COUNT = 5;
 const NOTE_DOODLE_DEFAULT_OPACITY = 1;
 const NOTE_DOODLE_WATERCOLOR = "watercolor";
@@ -496,6 +529,25 @@ const SETTINGS_EXTRA_CODE_ASSETS = [
   { src: `data:image/jpeg;base64,${supportCode1Base64}`, label: "给我买咖啡 / Buy me a coffee", fileName: "buy-me-a-coffee.jpg" },
   { src: `data:image/png;base64,${supportCode2Base64}`, label: "支持继续维护 / Support this tool", fileName: "support-this-tool.png" }
 ] as const;
+
+class ExportCancelledError extends Error {
+  constructor() {
+    super("PDF export cancelled");
+    this.name = "AbortError";
+  }
+}
+
+function throwIfExportCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new ExportCancelledError();
+}
+
+function isExportCancelledError(error: unknown): boolean {
+  return error instanceof ExportCancelledError || (
+    error instanceof DOMException && error.name === "AbortError"
+  ) || (
+    error instanceof Error && error.name === "AbortError"
+  );
+}
 
 function resolveUiLanguage(language: UiLanguage): ResolvedUiLanguage {
   if (language === "zh" || language === "en") return language;
@@ -682,36 +734,63 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const previousSettings = this.settings;
     if (exportSettings) this.settings = cloneSettings(exportSettings);
     const exportingPrompt = options.busyPrompt ?? new PdfExportBusyPrompt(file.basename, this.getResolvedLanguage());
+    const signal = options.signal ?? exportingPrompt.signal;
     let rendered: RenderedPreview | null = null;
+    let writtenOutputPath: string | null = null;
 
     try {
       await exportingPrompt.waitUntilPainted();
+      throwIfExportCancelled(signal);
       cleanupRenderRoots();
       const markdown = await this.app.vault.cachedRead(file);
+      throwIfExportCancelled(signal);
       let pdfBlob: Blob;
       if (isExcalidrawMarkdownFile(file, markdown)) {
-        pdfBlob = await this.renderExcalidrawToImagePdf(file);
+        pdfBlob = await this.renderExcalidrawToImagePdf(file, signal);
       } else {
-        rendered = await this.renderMarkdownPreview(file, markdown);
+        const liveSurface = this.getActiveMarkdownSurface(file);
+        let model: PreviewPdfModel;
+        if (liveSurface) {
+          model = await this.captureLiveViewPdfModel(file, liveSurface, signal);
+        } else {
+          rendered = await this.renderMarkdownPreview(file, markdown);
+          throwIfExportCancelled(signal);
+          model = this.capturePreviewPdfModel(file, rendered.pageEl);
+        }
         pdfBlob = this.settings.noteExportMode === "image"
-          ? await this.renderPreviewToImagePdf(file, rendered.pageEl)
-          : await this.renderPreviewToSelectablePdf(file, rendered.pageEl);
+          ? await this.renderPreviewToImagePdf(file, model, signal)
+          : await this.renderPreviewToSelectablePdf(file, model, signal);
       }
 
+      throwIfExportCancelled(signal);
       const outputFolder = resolveOutputFolder(file, this.settings);
       await this.ensureFolderExists(outputFolder);
+      throwIfExportCancelled(signal);
       const outputPath = await this.getAvailableOutputPath(file, outputFolder, options.outputBaseName);
+      throwIfExportCancelled(signal);
       await this.app.vault.adapter.writeBinary(outputPath, await pdfBlob.arrayBuffer());
+      writtenOutputPath = outputPath;
+      throwIfExportCancelled(signal);
 
       if (this.settings.openAfterExport) {
         await this.app.workspace.openLinkText(outputPath, file.path, true);
       }
 
+      throwIfExportCancelled(signal);
       if (this.settings.shareAfterExport) {
         await this.sharePdfIfAvailable(pdfBlob, outputPath);
       }
       exportingPrompt.done();
     } catch (error) {
+      if (isExportCancelledError(error)) {
+        if (writtenOutputPath && await this.app.vault.adapter.exists(writtenOutputPath)) {
+          await this.app.vault.adapter.remove(writtenOutputPath).catch((cleanupError) => {
+            console.warn("Mobile PDF Exporter could not remove a cancelled export", cleanupError);
+          });
+        }
+        exportingPrompt.markCancelled();
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       console.error("Mobile PDF Exporter failed", error);
       exportingPrompt.fail(message);
@@ -725,7 +804,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
   }
 
-  private async renderExcalidrawToImagePdf(file: TFile): Promise<Blob> {
+  private async renderExcalidrawToImagePdf(file: TFile, signal?: AbortSignal): Promise<Blob> {
+    throwIfExportCancelled(signal);
     const lease = this.getExcalidrawAutomateLease();
     if (!lease) {
       throw new Error(this.t("excalidrawApiMissingError"));
@@ -742,14 +822,17 @@ export default class MobilePdfExporterPlugin extends Plugin {
       // Prefer SVG so Excalidraw's own createPNG path does not show "PNG too large" notices.
       if (lease.api.createSVG) {
         try {
+          throwIfExportCancelled(signal);
           lease.api.reset?.();
           const svg = await waitForPromiseOrTimeout(
             lease.api.createSVG(file.path, false, exportSettings, loader, "light", 12, true, true),
             EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS
           );
+          throwIfExportCancelled(signal);
           if (svg instanceof SVGSVGElement) {
             const renderedScaleKeys = new Set<number>();
             for (const scale of scales) {
+              throwIfExportCancelled(signal);
               const actualScale = getSvgSafeRasterScale(svg, scale);
               const scaleKey = Math.round(actualScale * 1000) / 1000;
               if (renderedScaleKeys.has(scaleKey)) continue;
@@ -759,11 +842,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
               if (!pngBytes || pngBytes.byteLength <= 0) continue;
               if (pngBytes.byteLength > EXCALIDRAW_PREFERRED_MAX_PNG_BYTES && actualScale > EXCALIDRAW_MIN_EXPORT_SCALE) continue;
 
-              const pdfBlob = await this.tryBuildExcalidrawImagePdf(file, pngBytes, `SVG ${actualScale}x`);
+              const pdfBlob = await this.tryBuildExcalidrawImagePdf(file, pngBytes, `SVG ${actualScale}x`, signal);
               if (pdfBlob) return pdfBlob;
             }
           }
         } catch (error) {
+          if (isExportCancelledError(error)) throw error;
           errors.push(formatErrorMessage(error));
           console.warn("Mobile PDF Exporter Excalidraw SVG fallback failed", error);
         }
@@ -772,19 +856,22 @@ export default class MobilePdfExporterPlugin extends Plugin {
       if (lease.api.createPNG) {
         for (const scale of getExcalidrawPngFallbackScaleCandidates(Boolean(lease.api.createSVG))) {
           try {
+            throwIfExportCancelled(signal);
             lease.api.reset?.();
             const pngBlob = await waitForPromiseOrTimeout(
               lease.api.createPNG(file.path, scale, exportSettings, loader, "light", 12),
               EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS
             );
+            throwIfExportCancelled(signal);
             if (!pngBlob || pngBlob.size <= 0) {
               errors.push(`PNG ${scale}x 没有返回图片。`);
               continue;
             }
 
-            const pdfBlob = await this.tryBuildExcalidrawImagePdf(file, await blobToUint8Array(pngBlob), `PNG ${scale}x`);
+            const pdfBlob = await this.tryBuildExcalidrawImagePdf(file, await blobToUint8Array(pngBlob), `PNG ${scale}x`, signal);
             if (pdfBlob) return pdfBlob;
           } catch (error) {
+            if (isExportCancelledError(error)) throw error;
             errors.push(formatErrorMessage(error));
             console.warn(`Mobile PDF Exporter Excalidraw PNG ${scale}x failed`, error);
           }
@@ -800,16 +887,27 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
   }
 
-  private async tryBuildExcalidrawImagePdf(file: TFile, imageBytes: Uint8Array, label: string): Promise<Blob | null> {
+  private async tryBuildExcalidrawImagePdf(
+    file: TFile,
+    imageBytes: Uint8Array,
+    label: string,
+    signal?: AbortSignal
+  ): Promise<Blob | null> {
     try {
-      return await this.imageBytesToSlicedExcalidrawPdf(file, imageBytes);
+      return await this.imageBytesToSlicedExcalidrawPdf(file, imageBytes, signal);
     } catch (error) {
+      if (isExportCancelledError(error)) throw error;
       console.warn(`Mobile PDF Exporter Excalidraw PDF build failed for ${label}`, error);
       return null;
     }
   }
 
-  private async imageBytesToSlicedExcalidrawPdf(file: TFile, imageBytes: Uint8Array): Promise<Blob> {
+  private async imageBytesToSlicedExcalidrawPdf(
+    file: TFile,
+    imageBytes: Uint8Array,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    throwIfExportCancelled(signal);
     const { PDFDocument: PDFDocumentRuntime, StandardFonts, fontkitModule } = await loadPdfRuntime();
     const sourceImage = await imageBytesToHtmlImage(imageBytes);
     const sourceWidthPx = Math.max(1, sourceImage.naturalWidth || sourceImage.width);
@@ -838,6 +936,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     let pageIndex = 0;
 
     while (sourceY < sourceHeightPx) {
+      throwIfExportCancelled(signal);
       const sourceSliceHeightPx = Math.min(fullPageSourceHeightPx, sourceHeightPx - sourceY);
       const sliceBytes = await imageSliceToPngBytes(sourceImage, sourceY, sourceSliceHeightPx, this.settings.colorMode);
       const sliceImage = await pdfDoc.embedPng(sliceBytes);
@@ -873,7 +972,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await nextAnimationFrame();
     }
 
+    throwIfExportCancelled(signal);
     const pdfBytes = await pdfDoc.save({ useObjectStreams: true });
+    throwIfExportCancelled(signal);
     const pdfBuffer = new ArrayBuffer(pdfBytes.byteLength);
     new Uint8Array(pdfBuffer).set(pdfBytes);
     return new Blob([pdfBuffer], { type: "application/pdf" });
@@ -883,6 +984,147 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension.toLowerCase() !== "md") return null;
     return file;
+  }
+
+  private getActiveMarkdownSurface(file: TFile): LiveMarkdownSurface | null {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view?.file || view.file.path !== file.path) return null;
+
+    const mode = view.getMode();
+    if (mode === "source") {
+      const scrollEl = view.containerEl.querySelector<HTMLElement>(".markdown-source-view .cm-scroller");
+      if (!scrollEl || !isScreenVisibleElement(scrollEl)) return null;
+      return { rootEl: scrollEl, scrollEl, mode: "source" };
+    }
+
+    const previewCandidates = Array.from(
+      view.containerEl.querySelectorAll<HTMLElement>(".markdown-reading-view > .markdown-preview-view, .markdown-preview-view")
+    ).filter((element) => isScreenVisibleElement(element));
+    const rootEl = previewCandidates
+      .sort((left, right) => getVisibleElementScore(right) - getVisibleElementScore(left))[0];
+    if (!rootEl) return null;
+    return { rootEl, scrollEl: rootEl, mode: "preview" };
+  }
+
+  private async captureLiveViewPdfModel(
+    file: TFile,
+    surface: LiveMarkdownSurface,
+    signal?: AbortSignal
+  ): Promise<PreviewPdfModel> {
+    throwIfExportCancelled(signal);
+    const { rootEl, scrollEl } = surface;
+    const rootRect = rootEl.getBoundingClientRect();
+    const liveWidthPx = Math.max(1, scrollEl.clientWidth || rootRect.width);
+    const originalScrollTop = scrollEl.scrollTop;
+    const originalScrollLeft = scrollEl.scrollLeft;
+    const captured = createEmptySurfaceCapture();
+    const seen = createSurfaceCaptureSeenState();
+    const linkContext = createPdfLinkContext(this.app, file);
+    let contentHeightPx = Math.max(1, scrollEl.scrollHeight, rootEl.scrollHeight, rootRect.height);
+
+    try {
+      scrollEl.scrollLeft = 0;
+      const viewportHeight = Math.max(160, scrollEl.clientHeight || rootRect.height || 640);
+      if (surface.mode === "preview") {
+        refreshLiveDrawingSurface(rootEl);
+        await nextAnimationFrame();
+        await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 900));
+        throwIfExportCancelled(signal);
+        appendSurfaceCapture(
+          captured,
+          captureSurfaceFragments(rootEl, linkContext),
+          scrollEl.scrollTop,
+          scrollEl.scrollLeft,
+          seen
+        );
+        contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
+      } else {
+        const captureStep = Math.max(160, viewportHeight * 0.72);
+        let captureTop = 0;
+        let previousActualTop = -1;
+        let segmentCount = 0;
+        const maxSegments = Math.min(512, Math.max(2, Math.ceil(contentHeightPx / captureStep) + 6));
+
+        while (segmentCount < maxSegments) {
+          throwIfExportCancelled(signal);
+          const maxScrollTop = Math.max(0, scrollEl.scrollHeight - viewportHeight);
+          scrollEl.scrollTop = Math.min(captureTop, maxScrollTop);
+          refreshLiveDrawingSurface(rootEl);
+          await nextAnimationFrame();
+          await nextAnimationFrame();
+          await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 900));
+          throwIfExportCancelled(signal);
+
+          const actualTop = scrollEl.scrollTop;
+          appendSurfaceCapture(
+            captured,
+            captureSurfaceFragments(rootEl, linkContext),
+            actualTop,
+            scrollEl.scrollLeft,
+            seen
+          );
+          contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
+          segmentCount += 1;
+
+          if (actualTop >= Math.max(0, contentHeightPx - viewportHeight) - 1) break;
+          if (previousActualTop >= 0 && actualTop <= previousActualTop + 0.5 && captureTop > actualTop + 0.5) break;
+
+          previousActualTop = actualTop;
+          const nextTop = Math.min(actualTop + captureStep, Math.max(0, contentHeightPx - viewportHeight));
+          if (nextTop <= actualTop + 0.5) break;
+          captureTop = nextTop;
+        }
+      }
+    } finally {
+      scrollEl.scrollTop = originalScrollTop;
+      scrollEl.scrollLeft = originalScrollLeft;
+      refreshLiveDrawingSurface(rootEl);
+      await nextAnimationFrame();
+    }
+
+    throwIfExportCancelled(signal);
+    captured.textFragments = dedupeOverlappingLiveTextFragments(captured.textFragments);
+
+    const pageSizeMm = getConfiguredPageSizeMm(this.settings);
+    const pageWidthPt = mmToPt(pageSizeMm.width);
+    const pageHeightPt = mmToPt(pageSizeMm.height);
+    const sourceWidthPx = mmToPx(pageSizeMm.width);
+    const pxToPt = pageWidthPt / sourceWidthPx;
+    const pageHeightPx = pageHeightPt / pxToPt;
+    const { bodyTopInsetPx, bodyBottomInsetPx, bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
+    const horizontalInsetPx = mmToPx(this.settings.marginMm);
+    const usableWidthPx = Math.max(24, sourceWidthPx - horizontalInsetPx * 2);
+    const surfaceScale = (usableWidthPx / liveWidthPx) * (this.settings.contentScalePercent / 100);
+    const transformed = transformSurfaceCapture(captured, horizontalInsetPx, surfaceScale);
+    const transformedContentHeight = Math.max(
+      1,
+      contentHeightPx * surfaceScale,
+      measureCapturedSurfaceBottom(transformed)
+    );
+    const pageBreaks = computePageBreaks(transformedContentHeight, bodyHeightPx, transformed.keepBlocks);
+    const rootStyle = getComputedStyle(rootEl);
+
+    return {
+      ownerDocument: rootEl.ownerDocument,
+      pageWidthPt,
+      pageHeightPt,
+      sourceWidthPx,
+      pxToPt,
+      pageHeightPx,
+      bodyTopInsetPx,
+      bodyBottomInsetPx,
+      bodyHeightPx,
+      horizontalInsetPx,
+      background: findOpaqueBackgroundColor(rootEl) ?? rgb(1, 1, 1),
+      foreground: parseCssColor(rootStyle.color) ?? rgb(0.12, 0.12, 0.12),
+      ...transformed,
+      contentHeightPx: transformedContentHeight,
+      pageBreaks,
+      title: file.basename,
+      headerText: this.settings.headerText,
+      footerText: this.settings.footerText,
+      exportDate: formatExportDate(new Date())
+    };
   }
 
   private async renderMarkdownPreview(file: TFile, markdown: string): Promise<RenderedPreview> {
@@ -1075,9 +1317,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (overlay.data?.strokes.length) drawNoteDoodleStrokes(context, overlay.data.strokes, width, height);
   }
 
-  private async renderPreviewToSelectablePdf(file: TFile, pageEl: HTMLElement): Promise<Blob> {
+  private async renderPreviewToSelectablePdf(
+    file: TFile,
+    model: PreviewPdfModel,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    throwIfExportCancelled(signal);
     const { PDFDocument: PDFDocumentRuntime, StandardFonts, fontkitModule } = await loadPdfRuntime();
-    const model = this.capturePreviewPdfModel(file, pageEl);
 
     if (
       model.textFragments.length === 0 &&
@@ -1095,6 +1341,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const { font } = exportFont;
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
+      throwIfExportCancelled(signal);
       const pageTopPx = model.pageBreaks[index];
       const pageBottomPx = model.pageBreaks[index + 1];
       const pdfPage = pdfDoc.addPage([model.pageWidthPt, model.pageHeightPt]);
@@ -1102,6 +1349,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         colorMode: this.settings.colorMode,
         rasterScale: Math.max(this.settings.imageRasterScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE)
       });
+      throwIfExportCancelled(signal);
       const pageImage = await pdfDoc.embedPng(pngBytes);
       pdfPage.drawImage(pageImage, {
         x: 0,
@@ -1133,15 +1381,21 @@ export default class MobilePdfExporterPlugin extends Plugin {
       });
     }
 
+    throwIfExportCancelled(signal);
     const pdfBytes = await pdfDoc.save({ useObjectStreams: true });
+    throwIfExportCancelled(signal);
     const pdfBuffer = new ArrayBuffer(pdfBytes.byteLength);
     new Uint8Array(pdfBuffer).set(pdfBytes);
     return new Blob([pdfBuffer], { type: "application/pdf" });
   }
 
-  private async renderPreviewToImagePdf(file: TFile, pageEl: HTMLElement): Promise<Blob> {
+  private async renderPreviewToImagePdf(
+    file: TFile,
+    model: PreviewPdfModel,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    throwIfExportCancelled(signal);
     const { PDFDocument: PDFDocumentRuntime } = await loadPdfRuntime();
-    const model = this.capturePreviewPdfModel(file, pageEl);
 
     if (
       model.textFragments.length === 0 &&
@@ -1157,10 +1411,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
+      throwIfExportCancelled(signal);
       const pngBytes = await renderPreviewPageToPngBytes(model, index, {
         colorMode: this.settings.colorMode,
         rasterScale: this.settings.imageRasterScale
       });
+      throwIfExportCancelled(signal);
       const pageImage = await pdfDoc.embedPng(pngBytes);
       const pdfPage = pdfDoc.addPage([model.pageWidthPt, model.pageHeightPt]);
       pdfPage.drawImage(pageImage, {
@@ -1180,7 +1436,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
       });
     }
 
+    throwIfExportCancelled(signal);
     const pdfBytes = await pdfDoc.save({ useObjectStreams: true });
+    throwIfExportCancelled(signal);
     const pdfBuffer = new ArrayBuffer(pdfBytes.byteLength);
     new Uint8Array(pdfBuffer).set(pdfBytes);
     return new Blob([pdfBuffer], { type: "application/pdf" });
@@ -1188,6 +1446,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
   private capturePreviewPdfModel(file: TFile, pageEl: HTMLElement): PreviewPdfModel {
     return withExportableElementCache(() => {
+      const linkContext = createPdfLinkContext(this.app, file);
       const pageSizeMm = getConfiguredPageSizeMm(this.settings);
       const pageWidthPt = mmToPt(pageSizeMm.width);
       const pageHeightPt = mmToPt(pageSizeMm.height);
@@ -1196,10 +1455,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const pageHeightPx = pageHeightPt / pxToPt;
       const { bodyTopInsetPx, bodyBottomInsetPx, bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
       const boxFragments = captureBoxFragments(pageEl);
-      const textFragments = captureTextFragments(pageEl);
+      const textFragments = captureTextFragments(pageEl, linkContext);
       const imageFragments = captureImageFragments(pageEl);
       const canvasFragments = captureCanvasFragments(pageEl);
-      const linkFragments = captureLinkFragments(pageEl);
+      const linkFragments = captureLinkFragments(pageEl, linkContext);
       const svgFragments = captureSvgFragments(pageEl);
       const decorationFragments = captureDecorationFragments(pageEl);
       const keepBlocks = captureKeepBlockFragments(
@@ -1750,12 +2009,16 @@ class PdfExportBusyPrompt {
   private readonly rootEl: HTMLElement;
   private readonly titleEl: HTMLElement;
   private readonly elapsedEl: HTMLElement;
+  private readonly cancelButtonEl: HTMLButtonElement;
+  private readonly abortController = new AbortController();
   private readonly startedAt = Date.now();
   private readonly timer: number;
   private closeTimer = 0;
   private closed = false;
   private failed = false;
+  private cancelled = false;
   private painted = false;
+  readonly signal = this.abortController.signal;
 
   constructor(noteName: string, private readonly language: ResolvedUiLanguage) {
     this.rootEl = appendElement(activeDocument.body, "div", {
@@ -1773,6 +2036,12 @@ class PdfExportBusyPrompt {
       cls: "mobile-pdf-exporter-busy-elapsed",
       text: formatBusyElapsed(this.language, 0)
     });
+    this.cancelButtonEl = appendElement(this.rootEl, "button", {
+      cls: "mobile-pdf-exporter-busy-cancel",
+      text: translate(this.language, "busyCancelButton")
+    });
+    this.cancelButtonEl.type = "button";
+    this.cancelButtonEl.addEventListener("click", () => this.requestCancel());
     this.timer = window.setInterval(() => this.updateElapsed(), 1000);
   }
 
@@ -1788,35 +2057,56 @@ class PdfExportBusyPrompt {
   }
 
   done(): void {
-    if (this.closed) return;
+    if (this.closed || this.cancelled) return;
     this.rootEl.addClass("is-complete");
     this.titleEl.textContent = translate(this.language, "busyCompleteTitle");
     this.elapsedEl.textContent = translate(this.language, "busyCompleteStatus");
+    this.cancelButtonEl.disabled = true;
+    this.cancelButtonEl.setCssStyles({ display: "none" });
     window.clearInterval(this.timer);
   }
 
   fail(message: string): void {
-    if (this.closed) return;
+    if (this.closed || this.cancelled) return;
     this.failed = true;
     this.rootEl.addClass("is-error");
     this.titleEl.textContent = translate(this.language, "busyFailedTitle");
     this.elapsedEl.textContent = message;
+    this.cancelButtonEl.disabled = true;
+    this.cancelButtonEl.setCssStyles({ display: "none" });
     this.updateElapsed();
+  }
+
+  markCancelled(): void {
+    if (this.closed || this.cancelled) return;
+    this.cancelled = true;
+    this.rootEl.addClass("is-cancelled");
+    this.titleEl.textContent = translate(this.language, "busyCancelledTitle");
+    this.elapsedEl.textContent = translate(this.language, "busyCancelledStatus");
+    this.cancelButtonEl.disabled = true;
+    this.cancelButtonEl.setCssStyles({ display: "none" });
+    window.clearInterval(this.timer);
   }
 
   closeSoon(): void {
     if (this.closed || this.closeTimer) return;
-    this.closeTimer = window.setTimeout(() => this.close(), this.failed ? 5200 : 1400);
+    this.closeTimer = window.setTimeout(() => this.close(), this.failed ? 5200 : this.cancelled ? 1800 : 1400);
   }
 
   private updateElapsed(): void {
-    if (this.failed) return;
+    if (this.failed || this.cancelled) return;
     const seconds = Math.max(0, Math.round((Date.now() - this.startedAt) / 1000));
     if (this.rootEl.classList.contains("is-complete")) {
       this.elapsedEl.textContent = translate(this.language, "busyCompleteStatus");
       return;
     }
     this.elapsedEl.textContent = formatBusyElapsed(this.language, seconds);
+  }
+
+  private requestCancel(): void {
+    if (this.closed || this.cancelled || this.signal.aborted) return;
+    this.abortController.abort();
+    this.markCancelled();
   }
 
   private close(): void {
@@ -2531,7 +2821,297 @@ function isExcalidrawSourceText(text: string): boolean {
   );
 }
 
-function captureTextFragments(pageEl: HTMLElement): TextFragment[] {
+interface SurfaceCaptureSeenState {
+  boxes: Set<string>;
+  text: Set<string>;
+  images: Set<string>;
+  canvases: Set<string>;
+  links: Set<string>;
+  svgs: Set<string>;
+  decorations: Set<string>;
+  keepBlocks: Set<string>;
+}
+
+function createEmptySurfaceCapture(): CapturedSurfaceFragments {
+  return {
+    boxFragments: [],
+    textFragments: [],
+    imageFragments: [],
+    canvasFragments: [],
+    linkFragments: [],
+    svgFragments: [],
+    decorationFragments: [],
+    keepBlocks: []
+  };
+}
+
+function createSurfaceCaptureSeenState(): SurfaceCaptureSeenState {
+  return {
+    boxes: new Set(),
+    text: new Set(),
+    images: new Set(),
+    canvases: new Set(),
+    links: new Set(),
+    svgs: new Set(),
+    decorations: new Set(),
+    keepBlocks: new Set()
+  };
+}
+
+function captureSurfaceFragments(rootEl: HTMLElement, linkContext: PdfLinkContext): CapturedSurfaceFragments {
+  return withExportableElementCache(() => {
+    const boxFragments = captureBoxFragments(rootEl);
+    const textFragments = captureTextFragments(rootEl, linkContext);
+    const imageFragments = captureImageFragments(rootEl);
+    const canvasFragments = captureCanvasFragments(rootEl);
+    const linkFragments = captureLinkFragments(rootEl, linkContext);
+    const svgFragments = captureSvgFragments(rootEl);
+    const decorationFragments = captureDecorationFragments(rootEl);
+    const keepBlocks = captureKeepBlockFragments(
+      rootEl,
+      textFragments,
+      imageFragments,
+      canvasFragments,
+      boxFragments,
+      svgFragments,
+      decorationFragments
+    );
+    return {
+      boxFragments,
+      textFragments,
+      imageFragments,
+      canvasFragments,
+      linkFragments,
+      svgFragments,
+      decorationFragments,
+      keepBlocks
+    };
+  });
+}
+
+function appendSurfaceCapture(
+  target: CapturedSurfaceFragments,
+  snapshot: CapturedSurfaceFragments,
+  scrollTop: number,
+  scrollLeft: number,
+  seen: SurfaceCaptureSeenState
+): void {
+  const offsetRect = <T extends { left: number; top: number; right: number; bottom: number }>(fragment: T): T => ({
+    ...fragment,
+    left: fragment.left + scrollLeft,
+    right: fragment.right + scrollLeft,
+    top: fragment.top + scrollTop,
+    bottom: fragment.bottom + scrollTop
+  });
+  const geometryKey = (fragment: { left: number; top: number; right: number; bottom: number }): string =>
+    [fragment.left, fragment.top, fragment.right, fragment.bottom].map((value) => Math.round(value * 10) / 10).join("|");
+  const appendUnique = <T>(items: T[], source: T[], keys: Set<string>, keyFor: (item: T) => string): void => {
+    for (const item of source) {
+      const key = keyFor(item);
+      if (keys.has(key)) continue;
+      keys.add(key);
+      items.push(item);
+    }
+  };
+
+  const boxes = snapshot.boxFragments.map(offsetRect);
+  appendUnique(target.boxFragments, boxes, seen.boxes, (fragment) => [
+    geometryKey(fragment),
+    fragment.background ?? "",
+    fragment.borderTop?.color ?? "",
+    fragment.borderRight?.color ?? "",
+    fragment.borderBottom?.color ?? "",
+    fragment.borderLeft?.color ?? ""
+  ].join("|"));
+
+  const text = snapshot.textFragments.map(offsetRect);
+  appendUnique(target.textFragments, text, seen.text, (fragment) => [
+    geometryKey(fragment),
+    fragment.text,
+    fragment.fontFamily,
+    fragment.fontWeight,
+    fragment.fontStyle,
+    JSON.stringify(fragment.color)
+  ].join("|"));
+
+  const images = snapshot.imageFragments.map(offsetRect);
+  appendUnique(target.imageFragments, images, seen.images, (fragment) => [
+    geometryKey(fragment),
+    fragment.element.currentSrc || fragment.element.src,
+    fragment.element.naturalWidth,
+    fragment.element.naturalHeight
+  ].join("|"));
+
+  const canvases = snapshot.canvasFragments.map(offsetRect);
+  appendUnique(target.canvasFragments, canvases, seen.canvases, (fragment) => [
+    geometryKey(fragment),
+    fragment.element.className,
+    fragment.element.width,
+    fragment.element.height
+  ].join("|"));
+
+  const links = snapshot.linkFragments.map(offsetRect);
+  appendUnique(target.linkFragments, links, seen.links, (fragment) => `${geometryKey(fragment)}|${fragment.href}`);
+
+  const svgs = snapshot.svgFragments.map(offsetRect);
+  appendUnique(target.svgFragments, svgs, seen.svgs, (fragment) => [
+    geometryKey(fragment),
+    fragment.element.getAttribute("viewBox") ?? "",
+    fragment.element.classList.value
+  ].join("|"));
+
+  const decorations = snapshot.decorationFragments.map(offsetRect);
+  appendUnique(target.decorationFragments, decorations, seen.decorations, (fragment) => [
+    geometryKey(fragment),
+    fragment.kind,
+    fragment.text ?? "",
+    fragment.checked ? "1" : "0",
+    JSON.stringify(fragment.color)
+  ].join("|"));
+
+  const keepBlocks = snapshot.keepBlocks.map(offsetRect);
+  appendUnique(target.keepBlocks, keepBlocks, seen.keepBlocks, (fragment) => `${geometryKey(fragment)}|${fragment.priority}`);
+}
+
+function dedupeOverlappingLiveTextFragments(fragments: TextFragment[]): TextFragment[] {
+  const kept: TextFragment[] = [];
+  const byAppearance = new Map<string, TextFragment[]>();
+
+  for (const fragment of fragments) {
+    const key = [
+      normalizeLineText(fragment.text),
+      fragment.fontFamily,
+      fragment.fontWeight,
+      fragment.fontStyle,
+      fragment.href ?? "",
+      fragment.underline ? "u" : "",
+      fragment.lineThrough ? "s" : "",
+      JSON.stringify(fragment.color)
+    ].join("|");
+    const candidates = byAppearance.get(key) ?? [];
+    if (candidates.some((candidate) => areOverlappingDuplicateTextFragments(candidate, fragment))) continue;
+
+    candidates.push(fragment);
+    byAppearance.set(key, candidates);
+    kept.push(fragment);
+  }
+
+  return kept;
+}
+
+function areOverlappingDuplicateTextFragments(left: TextFragment, right: TextFragment): boolean {
+  const overlapWidth = Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
+  const overlapHeight = Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+  const minWidth = Math.max(0.5, Math.min(left.right - left.left, right.right - right.left));
+  const minHeight = Math.max(0.5, Math.min(left.bottom - left.top, right.bottom - right.top));
+  const horizontalRatio = overlapWidth / minWidth;
+  const verticalRatio = overlapHeight / minHeight;
+  const nearlyAligned = (
+    Math.abs(left.left - right.left) <= 2.5 &&
+    Math.abs(left.top - right.top) <= 3.5 &&
+    Math.abs(left.right - right.right) <= 5 &&
+    Math.abs(left.bottom - right.bottom) <= 4
+  );
+  return nearlyAligned || (horizontalRatio >= 0.82 && verticalRatio >= 0.72);
+}
+
+function transformSurfaceCapture(
+  capture: CapturedSurfaceFragments,
+  offsetLeftPx: number,
+  scale: number
+): CapturedSurfaceFragments {
+  const transformRect = <T extends { left: number; top: number; right: number; bottom: number }>(fragment: T): T => ({
+    ...fragment,
+    left: offsetLeftPx + fragment.left * scale,
+    right: offsetLeftPx + fragment.right * scale,
+    top: fragment.top * scale,
+    bottom: fragment.bottom * scale
+  });
+  const transformBorder = (border: CssBorderFragment | null): CssBorderFragment | null =>
+    border ? { ...border, widthPx: Math.max(0.5, border.widthPx * scale) } : null;
+
+  const boxFragments = capture.boxFragments.map((fragment) => ({
+    ...transformRect(fragment),
+    borderTop: transformBorder(fragment.borderTop),
+    borderRight: transformBorder(fragment.borderRight),
+    borderBottom: transformBorder(fragment.borderBottom),
+    borderLeft: transformBorder(fragment.borderLeft),
+    borderRadiusPx: fragment.borderRadiusPx * scale
+  }));
+  const textFragments = mergeAdjacentFragments(capture.textFragments.map((fragment) => ({
+    ...transformRect(fragment),
+    fontSizePx: fragment.fontSizePx * scale
+  })));
+  const imageFragments = capture.imageFragments.map(transformRect);
+  const canvasFragments = capture.canvasFragments.map(transformRect);
+  const linkFragments = capture.linkFragments.map(transformRect);
+  const svgFragments = capture.svgFragments.map(transformRect);
+  const decorationFragments = capture.decorationFragments.map((fragment) => ({
+    ...transformRect(fragment),
+    fontSizePx: fragment.fontSizePx * scale,
+    borderWidthPx: fragment.borderWidthPx === undefined ? undefined : fragment.borderWidthPx * scale,
+    borderRadiusPx: fragment.borderRadiusPx === undefined ? undefined : fragment.borderRadiusPx * scale
+  }));
+  const keepBlocks = capture.keepBlocks.map(transformRect);
+
+  return {
+    boxFragments,
+    textFragments,
+    imageFragments,
+    canvasFragments,
+    linkFragments,
+    svgFragments,
+    decorationFragments,
+    keepBlocks
+  };
+}
+
+function measureCapturedSurfaceBottom(capture: CapturedSurfaceFragments): number {
+  return Math.max(
+    0,
+    ...capture.boxFragments.map((fragment) => fragment.bottom),
+    ...capture.textFragments.map((fragment) => fragment.bottom),
+    ...capture.imageFragments.map((fragment) => fragment.bottom),
+    ...capture.canvasFragments.map((fragment) => fragment.bottom),
+    ...capture.svgFragments.map((fragment) => fragment.bottom),
+    ...capture.decorationFragments.map((fragment) => fragment.bottom),
+    ...capture.keepBlocks.map((fragment) => fragment.bottom)
+  );
+}
+
+function refreshLiveDrawingSurface(rootEl: HTMLElement): void {
+  for (const surface of Array.from(rootEl.matches(".note-doodle-shell, .notedraw-shell")
+    ? [rootEl]
+    : rootEl.querySelectorAll<HTMLElement>(".note-doodle-shell, .notedraw-shell"))) {
+    const kind = surface.classList.contains("notedraw-shell") ? "notedraw" : "note-doodle";
+    try {
+      getLiveDrawingController(surface, kind)?.render?.();
+    } catch (error) {
+      console.warn("Mobile PDF Exporter live surface refresh failed", error);
+    }
+  }
+}
+
+function getVisibleElementScore(element: HTMLElement): number {
+  const rect = element.getBoundingClientRect();
+  const ownerWindow = element.ownerDocument.defaultView ?? window;
+  const visibleWidth = Math.max(0, Math.min(rect.right, ownerWindow.innerWidth) - Math.max(rect.left, 0));
+  const visibleHeight = Math.max(0, Math.min(rect.bottom, ownerWindow.innerHeight) - Math.max(rect.top, 0));
+  return visibleWidth * visibleHeight + Math.min(element.scrollHeight, 1_000_000);
+}
+
+function findOpaqueBackgroundColor(element: HTMLElement): Color | null {
+  let current: HTMLElement | null = element;
+  while (current) {
+    const value = normalizeVisibleCssColor(getComputedStyle(current).backgroundColor);
+    const color = value ? parseCssColor(value) : null;
+    if (color) return color;
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function captureTextFragments(pageEl: HTMLElement, linkContext?: PdfLinkContext): TextFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
   const fragments: TextFragment[] = [];
   const walker = pageEl.ownerDocument.createTreeWalker(pageEl, NodeFilter.SHOW_TEXT, {
@@ -2548,7 +3128,7 @@ function captureTextFragments(pageEl: HTMLElement): TextFragment[] {
   while (node) {
     const textNode = node as Text;
     const parent = textNode.parentElement;
-    if (parent) fragments.push(...measureTextNode(textNode, parent, pageRect));
+    if (parent) fragments.push(...measureTextNode(textNode, parent, pageRect, linkContext));
     node = walker.nextNode();
   }
 
@@ -2589,7 +3169,7 @@ function captureCanvasFragments(pageEl: HTMLElement): CanvasFragment[] {
     .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
 }
 
-function captureLinkFragments(pageEl: HTMLElement): LinkFragment[] {
+function captureLinkFragments(pageEl: HTMLElement, linkContext?: PdfLinkContext): LinkFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
   const fragments: LinkFragment[] = [];
   const seen = new Set<string>();
@@ -2602,7 +3182,7 @@ function captureLinkFragments(pageEl: HTMLElement): LinkFragment[] {
 
   for (const element of Array.from(pageEl.querySelectorAll<HTMLElement>(selectors))) {
     if (!isExportableElement(element)) continue;
-    const href = resolveLinkHref(element);
+    const href = resolveLinkHref(element, linkContext);
     if (!href || !isPdfJumpHref(href)) continue;
 
     for (const rect of Array.from(element.getClientRects())) {
@@ -2726,15 +3306,15 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
     if (rect.width <= 0 || rect.height <= 0) continue;
     const item = checkbox.closest<HTMLElement>("li");
     if (item) itemsWithVisibleCheckbox.add(item);
-    const textRect = item ? firstTextRectInside(item) : null;
     const itemStyle = item ? getComputedStyle(item) : style;
     const fontSizePx = parseFloat(itemStyle.fontSize) || parseFloat(style.fontSize) || 16;
-    const size = Math.max(8, Math.min(rect.width, rect.height, fontSizePx * 0.88));
-    const centerY = textRect
-      ? textRect.top - pageRect.top + textRect.height * 0.48
-      : rect.top - pageRect.top + rect.height / 2;
+    const size = Math.max(7, Math.min(rect.width, rect.height));
     const left = rect.left - pageRect.left + Math.max(0, (rect.width - size) / 2);
-    const top = centerY - size / 2 - fontSizePx * TASK_CHECKBOX_VERTICAL_SHIFT_EM;
+    const top = rect.top - pageRect.top + Math.max(0, (rect.height - size) / 2);
+    const visibleBackground = normalizeVisibleCssColor(style.backgroundColor);
+    const background = visibleBackground ? parseCssColor(visibleBackground) : null;
+    const borderWidthPx = Math.max(0.75, Math.min(3, parseFloat(style.borderTopWidth) || 1));
+    const borderRadiusPx = Math.max(0, Math.min(size / 2, parseFloat(style.borderRadius) || size * 0.18));
 
     decorations.push({
       kind: "checkbox",
@@ -2744,6 +3324,9 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
       bottom: top + size,
       color: parseCssColor(style.accentColor) ?? parseCssColor(style.color) ?? rgb(0.12, 0.12, 0.12),
       border: parseCssColor(style.borderColor) ?? parseCssColor(style.color) ?? rgb(0.35, 0.35, 0.35),
+      background,
+      borderWidthPx,
+      borderRadiusPx,
       checked: checkbox.checked,
       text: getTaskStatusText(checkbox),
       fontSizePx
@@ -2759,7 +3342,7 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
     const fontSizePx = parseFloat(style.fontSize) || 16;
     const size = Math.max(9, Math.min(16, fontSizePx * 0.88));
     const textLeft = firstRect.left - pageRect.left;
-    const top = firstRect.top - pageRect.top + firstRect.height * 0.48 - size / 2 - fontSizePx * TASK_CHECKBOX_VERTICAL_SHIFT_EM;
+    const top = firstRect.top - pageRect.top + firstRect.height * 0.5 - size / 2;
     const left = Math.max(0, textLeft - fontSizePx * 1.55);
     const checkbox = item.querySelector<HTMLInputElement>("input[type='checkbox']");
     const status = getTaskStatusFromElement(checkbox ?? item);
@@ -2780,6 +3363,11 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
       bottom: top + size,
       color,
       border,
+      background: normalizeVisibleCssColor(style.backgroundColor)
+        ? parseCssColor(style.backgroundColor)
+        : null,
+      borderWidthPx: Math.max(0.75, Math.min(3, parseFloat(style.borderTopWidth) || 1)),
+      borderRadiusPx: Math.max(0, Math.min(size / 2, parseFloat(style.borderRadius) || size * 0.18)),
       checked: isTaskChecked(item, checkbox, status),
       text: getTaskStatusTextFromStatus(status, item),
       fontSizePx
@@ -2873,6 +3461,7 @@ function captureKeepBlockFragments(
     "pre",
     "blockquote",
     "table",
+    "tr",
     ".callout",
     ".markdown-embed",
     ".internal-embed",
@@ -3140,6 +3729,7 @@ function getKeepBlockPriority(element: HTMLElement): number {
   if (tag === "svg" && isLargeOrExcalidrawSvg(element as unknown as SVGSVGElement)) return 6;
   if (tag === "img" || tag === "picture" || tag === "figure" || element.matches(".image-embed")) return 6;
   if (tag === "pre" || tag === "table") return 4;
+  if (tag === "tr") return 4;
   if (tag === "blockquote" || element.matches(".callout, .markdown-embed, .internal-embed")) return 4;
   if (tag === "li") return 3;
   if (/^h[1-6]$/u.test(tag)) return 3;
@@ -3162,7 +3752,7 @@ function isExportableElement(element: Element): boolean {
 
   if (
     element.closest(
-      ".mobile-pdf-exporter-skip, .collapse-indicator, .heading-collapse-indicator, .markdown-embed-link, .copy-code-button, style, script"
+      ".mobile-pdf-exporter-skip, .collapse-indicator, .heading-collapse-indicator, .markdown-embed-link, .copy-code-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-format-toolbar, .notedraw-selection-menu, .notedraw-fallback-button, .notedraw-header-button, style, script"
     )
   ) {
     exportableElementCache?.set(element, false);
@@ -3192,12 +3782,17 @@ function isExportableElement(element: Element): boolean {
   return true;
 }
 
-function measureTextNode(textNode: Text, parent: HTMLElement, pageRect: DOMRect): TextFragment[] {
+function measureTextNode(
+  textNode: Text,
+  parent: HTMLElement,
+  pageRect: DOMRect,
+  linkContext?: PdfLinkContext
+): TextFragment[] {
   const style = getComputedStyle(parent);
   const mergeScope = getTextMergeScope(parent);
   const fontSizePx = parseFloat(style.fontSize) || 16;
   const linkElement = parent.closest("a, .internal-link, .external-link");
-  const href = resolveLinkHref(linkElement);
+  const href = resolveLinkHref(linkElement, linkContext);
   const color = parseCssColor(style.color) ??
     (linkElement ? rgb(0.08, 0.36, 0.72) : rgb(0.08, 0.08, 0.08));
   const underline = Boolean(
@@ -3378,13 +3973,21 @@ function colorsEqual(left: Color, right: Color): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function resolveLinkHref(linkElement: Element | null): string | null {
+function createPdfLinkContext(app: App, file: TFile): PdfLinkContext {
+  return {
+    app,
+    sourcePath: file.path,
+    vaultName: app.vault.getName()
+  };
+}
+
+function resolveLinkHref(linkElement: Element | null, context?: PdfLinkContext): string | null {
   if (!linkElement) return null;
+  const hrefValue = linkElement.getAttribute("href") ?? "";
+  const dataHrefValue = linkElement.getAttribute("data-href") ?? "";
   const rawValues = [
-    linkElement.getAttribute("href") ??
-      "",
-    linkElement.getAttribute("data-href") ??
-      "",
+    hrefValue,
+    dataHrefValue,
     linkElement.getAttribute("aria-label") ??
       "",
     linkElement.getAttribute("title") ??
@@ -3398,7 +4001,74 @@ function resolveLinkHref(linkElement: Element | null): string | null {
     if (href) return href;
   }
 
+  if (context && (linkElement.classList.contains("internal-link") || dataHrefValue)) {
+    return resolveInternalPdfHref(dataHrefValue || hrefValue || linkElement.textContent || "", context);
+  }
+
   return null;
+}
+
+function resolveInternalPdfHref(raw: string, context: PdfLinkContext): string | null {
+  let clean = raw.trim();
+  if (!clean) return null;
+  try {
+    clean = decodeURIComponent(clean);
+  } catch {
+    // Keep the original text when it is not URI-encoded.
+  }
+
+  clean = clean.replace(/^app:\/\/obsidian\.md\//iu, "").replace(/^\.\//u, "");
+  const hashIndex = clean.indexOf("#");
+  const linkPath = (hashIndex >= 0 ? clean.slice(0, hashIndex) : clean).trim();
+  const subpath = hashIndex >= 0 ? clean.slice(hashIndex) : "";
+  const relativePath = linkPath ? resolveRelativeMarkdownLinkPath(linkPath, context.sourcePath) : context.sourcePath;
+  const relativeFile = relativePath ? context.app.vault.getAbstractFileByPath(relativePath) : null;
+  const resolvedFile = linkPath && !relativeFile
+    ? context.app.metadataCache.getFirstLinkpathDest(linkPath, context.sourcePath)
+    : relativeFile;
+  const targetPath = resolvedFile instanceof TFile ? resolvedFile.path : (relativePath || linkPath || context.sourcePath);
+  if (!targetPath) return null;
+
+  const vault = encodeURIComponent(context.vaultName);
+  const file = encodeURIComponent(`${targetPath}${subpath}`);
+  return `obsidian://open?vault=${vault}&file=${file}`;
+}
+
+function resolveRelativeMarkdownLinkPath(linkPath: string, sourcePath: string): string | null {
+  const cleanPath = linkPath.trim().replace(/\\/gu, "/");
+  if (!cleanPath) return null;
+  if (!isPathLikeMarkdownLink(cleanPath)) return null;
+
+  const sourceDir = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/")) : "";
+  const rootedPath = cleanPath.startsWith("/")
+    ? cleanPath.slice(1)
+    : sourceDir
+      ? `${sourceDir}/${cleanPath}`
+      : cleanPath;
+  return collapseVaultPathSegments(normalizePath(rootedPath));
+}
+
+function isPathLikeMarkdownLink(linkPath: string): boolean {
+  return (
+    linkPath.startsWith("/") ||
+    linkPath.startsWith("./") ||
+    linkPath.startsWith("../") ||
+    linkPath.includes("/") ||
+    /\.md$/iu.test(linkPath)
+  );
+}
+
+function collapseVaultPathSegments(path: string): string {
+  const segments: string[] = [];
+  for (const segment of path.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return segments.join("/");
 }
 
 function normalizePdfHref(raw: string): string | null {
@@ -3482,7 +4152,8 @@ function computePageBreaks(
       .filter((fragment) => {
         const height = fragment.bottom - fragment.top;
         const startsOnThisPage = fragment.top > pageTop + PAGE_BREAK_MIN_ADVANCE_PX;
-        const fitsOnOnePage = height < pageHeightPx * 0.96;
+        const maxKeepRatio = fragment.priority >= 6 ? 0.94 : fragment.priority >= 4 ? 0.62 : 0.44;
+        const fitsOnOnePage = height < pageHeightPx * maxKeepRatio;
         const crossesBreak = fragment.top < nextBreak - 2 && fragment.bottom > nextBreak + 2;
         return startsOnThisPage && fitsOnOnePage && crossesBreak;
       })
@@ -3490,7 +4161,23 @@ function computePageBreaks(
 
     if (crossing) {
       const candidate = crossing.top - PAGE_BREAK_PADDING_PX;
-      if (candidate > pageTop + pageHeightPx * 0.22) nextBreak = candidate;
+      const minimumFilledRatio = crossing.priority >= 6 ? 0.18 : crossing.priority >= 4 ? 0.48 : 0.62;
+      if (candidate > pageTop + pageHeightPx * minimumFilledRatio) nextBreak = candidate;
+    }
+
+    const crossingTextLine = sortedBlocks
+      .filter((fragment) => (
+        fragment.priority === 1 &&
+        fragment.top < nextBreak - 0.5 &&
+        fragment.bottom > nextBreak + 0.5
+      ))
+      .sort((a, b) => a.top - b.top)[0];
+    if (crossingTextLine) {
+      const beforeLine = crossingTextLine.top - PAGE_BREAK_PADDING_PX;
+      const afterLine = crossingTextLine.bottom + PAGE_BREAK_PADDING_PX;
+      nextBreak = beforeLine > pageTop + PAGE_BREAK_MIN_ADVANCE_PX
+        ? beforeLine
+        : Math.min(pageTop + pageHeightPx, Math.max(pageTop + PAGE_BREAK_MIN_ADVANCE_PX, afterLine));
     }
 
     if (nextBreak <= pageTop + PAGE_BREAK_MIN_ADVANCE_PX) nextBreak = pageTop + pageHeightPx;
@@ -4319,24 +5006,37 @@ function drawCanvasCheckbox(
   const offsetY = y + (height - size) / 2;
   const border = colorToCss(decoration.border ?? decoration.color, colorMode);
   const fill = colorToCss(decoration.color, colorMode);
+  const background = decoration.background ? colorToCss(decoration.background, colorMode) : null;
+  const radius = Math.max(0, Math.min(size / 2, decoration.borderRadiusPx ?? size * 0.18));
 
-  context.lineWidth = Math.max(1, size * 0.08);
+  context.save();
+  context.lineWidth = Math.max(0.75, decoration.borderWidthPx ?? size * 0.065);
   context.strokeStyle = border;
+  roundedRectPath(context, offsetX, offsetY, size, size, radius);
   if (decoration.checked) {
     context.fillStyle = fill;
-    context.fillRect(offsetX, offsetY, size, size);
+    context.fill();
+  } else if (background) {
+    context.fillStyle = background;
+    context.fill();
   }
-  context.strokeRect(offsetX, offsetY, size, size);
+  context.stroke();
 
-  if (!decoration.checked) return;
+  if (!decoration.checked) {
+    context.restore();
+    return;
+  }
 
   context.strokeStyle = "#fff";
   context.lineWidth = Math.max(1, size * 0.11);
+  context.lineCap = "round";
+  context.lineJoin = "round";
   context.beginPath();
   context.moveTo(offsetX + size * 0.22, offsetY + size * 0.48);
   context.lineTo(offsetX + size * 0.43, offsetY + size * 0.7);
   context.lineTo(offsetX + size * 0.78, offsetY + size * 0.28);
   context.stroke();
+  context.restore();
 }
 
 function drawCanvasTextLayer(

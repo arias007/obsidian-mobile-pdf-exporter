@@ -70,6 +70,12 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.3.61
+
+- Fixes editing-view exports that produced leading/trailing blank pages or repeated, offset ghost text.
+- Captures the current visible editor frame directly instead of stitching CodeMirror virtual-scroll segments that can remount the same text at different coordinates.
+- Keeps reading-view exports on the full rendered document path, so long-note full export should be done from Reading view while Editing view stays true to the current screen.
+
 ### 0.3.60
 
 - Exports the active reading or editing surface instead of normalizing both modes through one hidden reading preview.

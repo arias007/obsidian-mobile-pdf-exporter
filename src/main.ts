@@ -1023,9 +1023,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
     let contentHeightPx = Math.max(1, scrollEl.scrollHeight, rootEl.scrollHeight, rootRect.height);
 
     try {
-      scrollEl.scrollLeft = 0;
       const viewportHeight = Math.max(160, scrollEl.clientHeight || rootRect.height || 640);
       if (surface.mode === "preview") {
+        scrollEl.scrollLeft = 0;
         refreshLiveDrawingSurface(rootEl);
         await nextAnimationFrame();
         await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 900));
@@ -1039,41 +1039,19 @@ export default class MobilePdfExporterPlugin extends Plugin {
         );
         contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
       } else {
-        const captureStep = Math.max(160, viewportHeight * 0.72);
-        let captureTop = 0;
-        let previousActualTop = -1;
-        let segmentCount = 0;
-        const maxSegments = Math.min(512, Math.max(2, Math.ceil(contentHeightPx / captureStep) + 6));
-
-        while (segmentCount < maxSegments) {
-          throwIfExportCancelled(signal);
-          const maxScrollTop = Math.max(0, scrollEl.scrollHeight - viewportHeight);
-          scrollEl.scrollTop = Math.min(captureTop, maxScrollTop);
-          refreshLiveDrawingSurface(rootEl);
-          await nextAnimationFrame();
-          await nextAnimationFrame();
-          await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 900));
-          throwIfExportCancelled(signal);
-
-          const actualTop = scrollEl.scrollTop;
-          appendSurfaceCapture(
-            captured,
-            captureSurfaceFragments(rootEl, linkContext),
-            actualTop,
-            scrollEl.scrollLeft,
-            seen
-          );
-          contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
-          segmentCount += 1;
-
-          if (actualTop >= Math.max(0, contentHeightPx - viewportHeight) - 1) break;
-          if (previousActualTop >= 0 && actualTop <= previousActualTop + 0.5 && captureTop > actualTop + 0.5) break;
-
-          previousActualTop = actualTop;
-          const nextTop = Math.min(actualTop + captureStep, Math.max(0, contentHeightPx - viewportHeight));
-          if (nextTop <= actualTop + 0.5) break;
-          captureTop = nextTop;
-        }
+        refreshLiveDrawingSurface(rootEl);
+        await nextAnimationFrame();
+        await nextAnimationFrame();
+        await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 900));
+        throwIfExportCancelled(signal);
+        appendSurfaceCapture(
+          captured,
+          captureSurfaceFragments(rootEl, linkContext),
+          0,
+          0,
+          seen
+        );
+        contentHeightPx = Math.max(1, measureCapturedSurfaceBottom(captured));
       }
     } finally {
       scrollEl.scrollTop = originalScrollTop;
@@ -1096,10 +1074,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const usableWidthPx = Math.max(24, sourceWidthPx - horizontalInsetPx * 2);
     const surfaceScale = (usableWidthPx / liveWidthPx) * (this.settings.contentScalePercent / 100);
     const transformed = transformSurfaceCapture(captured, horizontalInsetPx, surfaceScale);
+    const capturedBottomPx = measureCapturedSurfaceBottom(transformed);
     const transformedContentHeight = Math.max(
       1,
-      contentHeightPx * surfaceScale,
-      measureCapturedSurfaceBottom(transformed)
+      capturedBottomPx,
+      surface.mode === "preview" ? contentHeightPx * surfaceScale : 0
     );
     const pageBreaks = computePageBreaks(transformedContentHeight, bodyHeightPx, transformed.keepBlocks);
     const rootStyle = getComputedStyle(rootEl);

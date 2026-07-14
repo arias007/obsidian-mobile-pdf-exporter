@@ -40,12 +40,15 @@ test("external and internal links produce PDF URI annotations", async () => {
   assert.match(source, /URI:\s*getPdfStringRuntime\(\)\.of\(target\)/);
 });
 
-test("live capture deduplicates text and never cuts a page through a text line", async () => {
+test("live capture avoids virtual-scroll ghosting and never cuts a page through a text line", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /surface\.mode === "preview"/);
-  assert.match(source, /const maxSegments = Math\.min\(512/);
-  assert.match(source, /actualTop <= previousActualTop \+ 0\.5/);
+  assert.doesNotMatch(source, /const maxSegments = Math\.min\(512/);
+  assert.doesNotMatch(source, /actualTop <= previousActualTop \+ 0\.5/);
+  assert.match(source, /captureSurfaceFragments\(rootEl, linkContext\),\s*0,\s*0,/);
+  assert.match(source, /contentHeightPx = Math\.max\(1, measureCapturedSurfaceBottom\(captured\)\)/);
+  assert.match(source, /surface\.mode === "preview" \? contentHeightPx \* surfaceScale : 0/);
   assert.match(source, /captured\.textFragments = dedupeOverlappingLiveTextFragments/);
   assert.match(source, /function areOverlappingDuplicateTextFragments/);
   assert.match(source, /const crossingTextLine = sortedBlocks/);

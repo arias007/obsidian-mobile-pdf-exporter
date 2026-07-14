@@ -32,11 +32,18 @@ type PdfOrientation = typeof PDF_ORIENTATIONS[number];
 const PDF_COLOR_MODES = ["color", "grayscale"] as const;
 type PdfColorMode = typeof PDF_COLOR_MODES[number];
 
+const OUTPUT_LOCATIONS = ["current", "folder"] as const;
+type OutputLocation = typeof OUTPUT_LOCATIONS[number];
+
 interface MobilePdfExporterSettings {
   language: UiLanguage;
+  outputLocation: OutputLocation;
   outputFolder: string;
   marginMm: number;
   includeTitle: boolean;
+  headerText: string;
+  footerText: string;
+  rememberLastExportOptions: boolean;
   shareAfterExport: boolean;
   openAfterExport: boolean;
   noteExportMode: NotePdfExportMode;
@@ -71,6 +78,7 @@ interface TextFragment {
   color: Color;
   underline: boolean;
   href: string | null;
+  mergeScope: Element;
 }
 
 interface TextLineDraft {
@@ -86,6 +94,7 @@ interface TextLineDraft {
   color: Color;
   underline: boolean;
   href: string | null;
+  mergeScope: Element;
 }
 
 interface ImageFragment {
@@ -119,6 +128,7 @@ interface BoxFragment {
   bottom: number;
   background: Color | null;
   border: Color | null;
+  keepTogether: boolean;
 }
 
 interface SvgFragment {
@@ -164,7 +174,12 @@ interface PreviewPdfModel {
   sourceWidthPx: number;
   pxToPt: number;
   pageHeightPx: number;
+  bodyTopInsetPx: number;
+  bodyBottomInsetPx: number;
+  bodyHeightPx: number;
+  horizontalInsetPx: number;
   background: Color;
+  foreground: Color;
   boxFragments: BoxFragment[];
   textFragments: TextFragment[];
   imageFragments: ImageFragment[];
@@ -175,6 +190,10 @@ interface PreviewPdfModel {
   keepBlocks: KeepBlockFragment[];
   contentHeightPx: number;
   pageBreaks: number[];
+  title: string;
+  headerText: string;
+  footerText: string;
+  exportDate: string;
 }
 
 interface ExcalidrawAutomateRuntime {
@@ -274,12 +293,21 @@ const UI_TEXT = {
     imageQualityHigh: "高清",
     imageQualityUltra: "超清 / 大文件",
     includeTitleName: "包含笔记标题",
-    openAfterExportName: "导出后打开",
+    headerTextName: "页眉",
+    headerTextDesc: "留空关闭；支持 {title}、{page}、{pages}、{date}。",
+    footerTextName: "页脚",
+    footerTextDesc: "留空关闭；支持 {title}、{page}、{pages}、{date}。",
+    openAfterExportName: "导出后打开 PDF（用于打印）",
+    openAfterExportDesc: "默认开启。导出完成后直接打开 PDF，可继续打印或查看。",
     shareAfterExportName: "导出后分享",
-    saveAsDefaultName: "保存为默认",
-    saveAsDefaultDesc: "勾选后，本次选项会写入插件设置，作为下次默认值。",
-    outputFolderName: "输出文件夹",
-    outputFolderDesc: "PDF 保存到库里的这个文件夹。",
+    rememberLastExportOptionsName: "使用上次导出选项",
+    rememberLastExportOptionsDesc: "默认开启。每次成功开始导出时保存本次选项，供下次直接使用。",
+    outputLocationName: "导出位置",
+    outputLocationCurrent: "当前笔记文件夹（默认）",
+    outputLocationFolder: "指定文件夹",
+    outputLocationCurrentDesc: "PDF 保存到当前笔记所在文件夹。",
+    outputLocationFolderDesc: "PDF 保存到库内指定文件夹；不存在时自动创建。",
+    outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF 名称",
     exportPdfButton: "导出 PDF",
     cancelButton: "取消",
@@ -335,12 +363,21 @@ const UI_TEXT = {
     imageQualityHigh: "High",
     imageQualityUltra: "Ultra / large file",
     includeTitleName: "Include note title",
-    openAfterExportName: "Open PDF after export",
+    headerTextName: "Header",
+    headerTextDesc: "Leave blank to disable. Supports {title}, {page}, {pages}, and {date}.",
+    footerTextName: "Footer",
+    footerTextDesc: "Leave blank to disable. Supports {title}, {page}, {pages}, and {date}.",
+    openAfterExportName: "Open PDF after export for printing",
+    openAfterExportDesc: "Enabled by default. Opens the finished PDF so it can be viewed or printed.",
     shareAfterExportName: "Show mobile share sheet",
-    saveAsDefaultName: "Save as default",
-    saveAsDefaultDesc: "Save these choices as the default plugin settings.",
-    outputFolderName: "Output folder",
-    outputFolderDesc: "Save PDFs to this folder inside the vault.",
+    rememberLastExportOptionsName: "Use last export options",
+    rememberLastExportOptionsDesc: "Enabled by default. Saves the options used for this export for next time.",
+    outputLocationName: "Export location",
+    outputLocationCurrent: "Current note folder (default)",
+    outputLocationFolder: "Custom folder",
+    outputLocationCurrentDesc: "Save the PDF beside the current note.",
+    outputLocationFolderDesc: "Save the PDF to a custom vault folder, creating it when needed.",
+    outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF name",
     exportPdfButton: "Export PDF",
     cancelButton: "Cancel",
@@ -377,11 +414,15 @@ type TranslationKey = keyof typeof UI_TEXT.en;
 
 const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   language: "auto",
+  outputLocation: "current",
   outputFolder: "PDF Exports",
   marginMm: 7,
   includeTitle: true,
+  headerText: "",
+  footerText: "",
+  rememberLastExportOptions: true,
   shareAfterExport: true,
-  openAfterExport: false,
+  openAfterExport: true,
   noteExportMode: "selectable",
   pagePreset: "mobile",
   pageOrientation: "portrait",
@@ -423,6 +464,8 @@ const FRAME_WAIT_TIMEOUT_MS = 120;
 const BUSY_PROMPT_PAINT_WAIT_MS = 80;
 const PAGE_BREAK_PADDING_PX = 8;
 const PAGE_BREAK_MIN_ADVANCE_PX = 72;
+const HEADER_FOOTER_MIN_BAND_MM = 8;
+const HEADER_FOOTER_FONT_SIZE_PX = 10;
 const SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE = 2;
 const SELECTABLE_TEXT_LAYER_OPACITY = 0.003;
 const TASK_CHECKBOX_VERTICAL_SHIFT_EM = 0.22;
@@ -644,8 +687,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
           : await this.renderPreviewToSelectablePdf(file, rendered.pageEl);
       }
 
-      await this.ensureFolderExists(this.settings.outputFolder);
-      const outputPath = await this.getAvailableOutputPath(file, this.settings.outputFolder, options.outputBaseName);
+      const outputFolder = resolveOutputFolder(file, this.settings);
+      await this.ensureFolderExists(outputFolder);
+      const outputPath = await this.getAvailableOutputPath(file, outputFolder, options.outputBaseName);
       await this.app.vault.adapter.writeBinary(outputPath, await pdfBlob.arrayBuffer());
 
       if (this.settings.openAfterExport) {
@@ -755,7 +799,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private async imageBytesToSlicedExcalidrawPdf(file: TFile, imageBytes: Uint8Array): Promise<Blob> {
-    const { PDFDocument: PDFDocumentRuntime } = await loadPdfRuntime();
+    const { PDFDocument: PDFDocumentRuntime, StandardFonts, fontkitModule } = await loadPdfRuntime();
     const sourceImage = await imageBytesToHtmlImage(imageBytes);
     const sourceWidthPx = Math.max(1, sourceImage.naturalWidth || sourceImage.width);
     const sourceHeightPx = Math.max(1, sourceImage.naturalHeight || sourceImage.height);
@@ -766,22 +810,28 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const pageSizeMm = getConfiguredPageSizeMm(this.settings);
     const pageWidthPt = mmToPt(pageSizeMm.width);
     const fixedPageHeightPt = mmToPt(pageSizeMm.height);
-    const pageMarginPt = mmToPt(2);
+    const pageMarginPt = mmToPt(this.settings.marginMm);
+    const { topMm, bottomMm } = getPageBodyInsetsMm(this.settings);
+    const pageTopInsetPt = mmToPt(topMm);
+    const pageBottomInsetPt = mmToPt(bottomMm);
     const usableWidthPt = Math.max(24, pageWidthPt - pageMarginPt * 2);
-    const usableHeightPt = Math.max(24, fixedPageHeightPt - pageMarginPt * 2);
+    const usableHeightPt = Math.max(24, fixedPageHeightPt - pageTopInsetPt - pageBottomInsetPt);
     const pxToPt = usableWidthPt / sourceWidthPx;
     const fullPageSourceHeightPx = Math.max(1, Math.floor(usableHeightPt / pxToPt));
-    const singlePage = sourceHeightPx <= fullPageSourceHeightPx;
+    const pageCount = Math.max(1, Math.ceil(sourceHeightPx / fullPageSourceHeightPx));
+    const exportDate = formatExportDate(new Date());
+    const pageChromeFont = this.settings.headerText || this.settings.footerText
+      ? (await this.loadExportFont(pdfDoc, fontkitModule, StandardFonts.Helvetica)).font
+      : null;
     let sourceY = 0;
+    let pageIndex = 0;
 
     while (sourceY < sourceHeightPx) {
       const sourceSliceHeightPx = Math.min(fullPageSourceHeightPx, sourceHeightPx - sourceY);
       const sliceBytes = await imageSliceToPngBytes(sourceImage, sourceY, sourceSliceHeightPx, this.settings.colorMode);
       const sliceImage = await pdfDoc.embedPng(sliceBytes);
       const drawHeightPt = Math.min(usableHeightPt, sourceSliceHeightPx * pxToPt);
-      const pageHeightPt = singlePage
-        ? Math.max(mmToPt(20), drawHeightPt + pageMarginPt * 2)
-        : fixedPageHeightPt;
+      const pageHeightPt = fixedPageHeightPt;
       const page = pdfDoc.addPage([pageWidthPt, pageHeightPt]);
 
       page.drawRectangle({
@@ -793,12 +843,22 @@ export default class MobilePdfExporterPlugin extends Plugin {
       });
       page.drawImage(sliceImage, {
         x: (pageWidthPt - usableWidthPt) / 2,
-        y: pageHeightPt - pageMarginPt - drawHeightPt,
+        y: pageHeightPt - pageTopInsetPt - drawHeightPt,
         width: usableWidthPt,
         height: drawHeightPt
       });
 
+      if (pageChromeFont) {
+        drawPdfHeaderFooter(page, pageChromeFont, this.settings, {
+          title: file.basename,
+          pageNumber: pageIndex + 1,
+          pageCount,
+          exportDate
+        });
+      }
+
       sourceY += sourceSliceHeightPx;
+      pageIndex += 1;
       await nextAnimationFrame();
     }
 
@@ -818,6 +878,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const pageSizeMm = getConfiguredPageSizeMm(this.settings);
     const renderWidthPx = mmToPx(pageSizeMm.width);
     const paddingPx = mmToPx(this.settings.marginMm);
+    const pageHeightPx = mmToPx(pageSizeMm.height);
+    const { bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
     const isExcalidrawFile = isExcalidrawMarkdownFile(file, markdown);
     const markdownToRender = isExcalidrawFile
       ? sanitizeExcalidrawMarkdownForPreview(markdown)
@@ -834,7 +896,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       rootEl.setCssProps({
         "--mobile-pdf-exporter-width": `${renderWidthPx}px`,
         "--mobile-pdf-exporter-padding": `${paddingPx}px`,
-        "--mobile-pdf-exporter-page-height": `${mmToPx(pageSizeMm.height)}px`,
+        "--mobile-pdf-exporter-page-height": `${pageHeightPx}px`,
+        "--mobile-pdf-exporter-body-height": `${bodyHeightPx}px`,
         "--mobile-pdf-exporter-font-scale": String(this.settings.contentScalePercent / 100)
       });
 
@@ -1003,7 +1066,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
   private async renderPreviewToSelectablePdf(file: TFile, pageEl: HTMLElement): Promise<Blob> {
     const { PDFDocument: PDFDocumentRuntime, StandardFonts, fontkitModule } = await loadPdfRuntime();
-    const model = this.capturePreviewPdfModel(pageEl);
+    const model = this.capturePreviewPdfModel(file, pageEl);
 
     if (
       model.textFragments.length === 0 &&
@@ -1043,6 +1106,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pageWidthPt: model.pageWidthPt,
         pageHeightPt: model.pageHeightPt,
         pxToPt: model.pxToPt,
+        contentTopInsetPx: model.bodyTopInsetPx,
         colorMode: this.settings.colorMode,
         opacity: SELECTABLE_TEXT_LAYER_OPACITY,
         drawUnderlines: false
@@ -1053,7 +1117,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pageBottomPx,
         pageWidthPt: model.pageWidthPt,
         pageHeightPt: model.pageHeightPt,
-        pxToPt: model.pxToPt
+        pxToPt: model.pxToPt,
+        contentTopInsetPx: model.bodyTopInsetPx
       });
     }
 
@@ -1065,7 +1130,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
   private async renderPreviewToImagePdf(file: TFile, pageEl: HTMLElement): Promise<Blob> {
     const { PDFDocument: PDFDocumentRuntime } = await loadPdfRuntime();
-    const model = this.capturePreviewPdfModel(pageEl);
+    const model = this.capturePreviewPdfModel(file, pageEl);
 
     if (
       model.textFragments.length === 0 &&
@@ -1099,7 +1164,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pageBottomPx: model.pageBreaks[index + 1],
         pageWidthPt: model.pageWidthPt,
         pageHeightPt: model.pageHeightPt,
-        pxToPt: model.pxToPt
+        pxToPt: model.pxToPt,
+        contentTopInsetPx: model.bodyTopInsetPx
       });
     }
 
@@ -1109,7 +1175,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     return new Blob([pdfBuffer], { type: "application/pdf" });
   }
 
-  private capturePreviewPdfModel(pageEl: HTMLElement): PreviewPdfModel {
+  private capturePreviewPdfModel(file: TFile, pageEl: HTMLElement): PreviewPdfModel {
     return withExportableElementCache(() => {
       const pageSizeMm = getConfiguredPageSizeMm(this.settings);
       const pageWidthPt = mmToPt(pageSizeMm.width);
@@ -1117,6 +1183,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const sourceWidthPx = Math.max(pageEl.getBoundingClientRect().width, 1);
       const pxToPt = pageWidthPt / sourceWidthPx;
       const pageHeightPx = pageHeightPt / pxToPt;
+      const { bodyTopInsetPx, bodyBottomInsetPx, bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
       const boxFragments = captureBoxFragments(pageEl);
       const textFragments = captureTextFragments(pageEl);
       const imageFragments = captureImageFragments(pageEl);
@@ -1143,7 +1210,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         decorationFragments,
         keepBlocks
       );
-      const pageBreaks = computePageBreaks(contentHeightPx, pageHeightPx, keepBlocks);
+      const pageBreaks = computePageBreaks(contentHeightPx, bodyHeightPx, keepBlocks);
 
       return {
         ownerDocument: pageEl.ownerDocument,
@@ -1152,7 +1219,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
         sourceWidthPx,
         pxToPt,
         pageHeightPx,
+        bodyTopInsetPx,
+        bodyBottomInsetPx,
+        bodyHeightPx,
+        horizontalInsetPx: mmToPx(this.settings.marginMm),
         background: parseCssColor(getComputedStyle(pageEl).backgroundColor) ?? rgb(1, 1, 1),
+        foreground: parseCssColor(getComputedStyle(pageEl).color) ?? rgb(0.12, 0.12, 0.12),
         boxFragments,
         textFragments,
         imageFragments,
@@ -1162,7 +1234,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
         decorationFragments,
         keepBlocks,
         contentHeightPx,
-        pageBreaks
+        pageBreaks,
+        title: file.basename,
+        headerText: this.settings.headerText,
+        footerText: this.settings.footerText,
+        exportDate: formatExportDate(new Date())
       };
     });
   }
@@ -1297,7 +1373,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private async getAvailableOutputPath(file: TFile, outputFolder: string, requestedBaseName?: string): Promise<string> {
-    const folder = normalizeOutputFolder(outputFolder);
+    const folder = normalizeVaultFolderPath(outputFolder);
     const date = new Date();
     const stamp = [
       date.getFullYear(),
@@ -1308,7 +1384,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
     for (let index = 0; index < 1000; index += 1) {
       const suffix = index === 0 ? "" : `-${index + 1}`;
-      const path = normalizePath(`${folder}/${baseName}${suffix}.pdf`);
+      const path = normalizePath(`${folder ? `${folder}/` : ""}${baseName}${suffix}.pdf`);
       if (!(await this.app.vault.adapter.exists(path))) return path;
     }
 
@@ -1316,7 +1392,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private async ensureFolderExists(outputFolder: string): Promise<void> {
-    const folder = normalizeOutputFolder(outputFolder);
+    const folder = normalizeVaultFolderPath(outputFolder);
+    if (!folder) return;
     const parts = folder.split("/").filter(Boolean);
     let current = "";
 
@@ -1353,7 +1430,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
 class MobilePdfExportOptionsModal extends Modal {
   private draft: MobilePdfExporterSettings;
-  private saveAsDefault = false;
   private exporting = false;
   private outputBaseName: string;
 
@@ -1381,7 +1457,7 @@ class MobilePdfExportOptionsModal extends Modal {
       text: this.file.basename
     });
 
-    this.addOutputFolderSetting(contentEl);
+    this.addOutputLocationSetting(contentEl);
 
     new Setting(contentEl)
       .setName(this.plugin.t("exportModeName"))
@@ -1484,8 +1560,12 @@ class MobilePdfExportOptionsModal extends Modal {
           });
       });
 
+    this.addHeaderFooterSetting(contentEl, "headerText");
+    this.addHeaderFooterSetting(contentEl, "footerText");
+
     new Setting(contentEl)
       .setName(this.plugin.t("openAfterExportName"))
+      .setDesc(this.plugin.t("openAfterExportDesc"))
       .addToggle((toggle) => {
         toggle
           .setValue(this.draft.openAfterExport)
@@ -1505,29 +1585,62 @@ class MobilePdfExportOptionsModal extends Modal {
       });
 
     new Setting(contentEl)
-      .setName(this.plugin.t("saveAsDefaultName"))
-      .setDesc(this.plugin.t("saveAsDefaultDesc"))
+      .setName(this.plugin.t("rememberLastExportOptionsName"))
+      .setDesc(this.plugin.t("rememberLastExportOptionsDesc"))
       .addToggle((toggle) => {
         toggle
-          .setValue(this.saveAsDefault)
+          .setValue(this.draft.rememberLastExportOptions)
           .onChange((value) => {
-            this.saveAsDefault = value;
+            this.draft.rememberLastExportOptions = value;
           });
       });
 
   }
 
-  private addOutputFolderSetting(parent: HTMLElement): void {
+  private addOutputLocationSetting(parent: HTMLElement): void {
+    const setting = new Setting(parent).setName(this.plugin.t("outputLocationName"));
+    let refreshFolderInput = (): void => undefined;
+
+    setting.addDropdown((dropdown) => {
+      dropdown
+        .addOption("current", this.plugin.t("outputLocationCurrent"))
+        .addOption("folder", this.plugin.t("outputLocationFolder"))
+        .setValue(this.draft.outputLocation)
+        .onChange((value) => {
+          this.draft.outputLocation = normalizeChoice(value, OUTPUT_LOCATIONS, DEFAULT_SETTINGS.outputLocation);
+          refreshFolderInput();
+        });
+    });
+
+    setting.addText((text) => {
+      text
+        .setPlaceholder(this.plugin.t("outputFolderPlaceholder"))
+        .setValue(this.draft.outputFolder)
+        .onChange((value) => {
+          this.draft.outputFolder = value;
+        });
+      refreshFolderInput = () => {
+        const usesCustomFolder = this.draft.outputLocation === "folder";
+        text.setDisabled(!usesCustomFolder);
+        setting.setDesc(this.plugin.t(usesCustomFolder ? "outputLocationFolderDesc" : "outputLocationCurrentDesc"));
+      };
+      refreshFolderInput();
+    });
+  }
+
+  private addHeaderFooterSetting(parent: HTMLElement, field: "headerText" | "footerText"): void {
+    const isHeader = field === "headerText";
     new Setting(parent)
-      .setName(this.plugin.t("outputFolderName"))
-      .setDesc(this.plugin.t("outputFolderDesc"))
+      .setName(this.plugin.t(isHeader ? "headerTextName" : "footerTextName"))
+      .setDesc(this.plugin.t(isHeader ? "headerTextDesc" : "footerTextDesc"))
       .addText((text) => {
         text
-          .setPlaceholder(DEFAULT_SETTINGS.outputFolder)
-          .setValue(this.draft.outputFolder)
+          .setPlaceholder(isHeader ? "{title}" : "{page} / {pages}")
+          .setValue(this.draft[field])
           .onChange((value) => {
-            this.draft.outputFolder = value.trim() || DEFAULT_SETTINGS.outputFolder;
+            this.draft[field] = value;
           });
+        text.inputEl.maxLength = 240;
       });
   }
 
@@ -1546,11 +1659,16 @@ class MobilePdfExportOptionsModal extends Modal {
       await exportingPrompt.waitUntilPainted();
       this.close();
 
-      if (this.saveAsDefault) {
+      if (exportSettings.rememberLastExportOptions) {
         this.plugin.settings = cloneSettings(exportSettings);
         await this.plugin.saveSettings();
         await this.plugin.exportFile(this.file, undefined, { outputBaseName, busyPrompt: exportingPrompt });
         return;
+      }
+
+      if (this.plugin.settings.rememberLastExportOptions) {
+        this.plugin.settings.rememberLastExportOptions = false;
+        await this.plugin.saveSettings();
       }
 
       await this.plugin.exportFile(this.file, exportSettings, { outputBaseName, busyPrompt: exportingPrompt });
@@ -1840,23 +1958,27 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
           });
       });
 
+    this.addHeaderFooterSettings(containerEl);
+
     appendElement(containerEl, "h3", { text: this.plugin.t("settingsSaveAndShareHeading") });
 
+    this.addOutputLocationSetting(containerEl);
+
     new Setting(containerEl)
-      .setName(this.plugin.t("outputFolderName"))
-      .setDesc(this.plugin.t("outputFolderDesc"))
-      .addText((text) => {
-        text
-          .setPlaceholder(DEFAULT_SETTINGS.outputFolder)
-          .setValue(this.plugin.settings.outputFolder)
+      .setName(this.plugin.t("rememberLastExportOptionsName"))
+      .setDesc(this.plugin.t("rememberLastExportOptionsDesc"))
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.rememberLastExportOptions)
           .onChange(async (value) => {
-            this.plugin.settings.outputFolder = value.trim() || DEFAULT_SETTINGS.outputFolder;
+            this.plugin.settings.rememberLastExportOptions = value;
             await this.plugin.saveSettings();
           });
       });
 
     new Setting(containerEl)
       .setName(this.plugin.t("openAfterExportName"))
+      .setDesc(this.plugin.t("openAfterExportDesc"))
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.openAfterExport)
@@ -1881,6 +2003,58 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
       cls: "mobile-pdf-exporter-settings-codes"
     });
     this.renderExtraCodes(codesContainer);
+  }
+
+  private addOutputLocationSetting(containerEl: HTMLElement): void {
+    const setting = new Setting(containerEl).setName(this.plugin.t("outputLocationName"));
+    let refreshFolderInput = (): void => undefined;
+
+    setting.addDropdown((dropdown) => {
+      dropdown
+        .addOption("current", this.plugin.t("outputLocationCurrent"))
+        .addOption("folder", this.plugin.t("outputLocationFolder"))
+        .setValue(this.plugin.settings.outputLocation)
+        .onChange(async (value) => {
+          this.plugin.settings.outputLocation = normalizeChoice(value, OUTPUT_LOCATIONS, DEFAULT_SETTINGS.outputLocation);
+          refreshFolderInput();
+          await this.plugin.saveSettings();
+        });
+    });
+
+    setting.addText((text) => {
+      text
+        .setPlaceholder(this.plugin.t("outputFolderPlaceholder"))
+        .setValue(this.plugin.settings.outputFolder)
+        .onChange(async (value) => {
+          this.plugin.settings.outputFolder = value;
+          await this.plugin.saveSettings();
+        });
+      refreshFolderInput = () => {
+        const usesCustomFolder = this.plugin.settings.outputLocation === "folder";
+        text.setDisabled(!usesCustomFolder);
+        setting.setDesc(this.plugin.t(usesCustomFolder ? "outputLocationFolderDesc" : "outputLocationCurrentDesc"));
+      };
+      refreshFolderInput();
+    });
+  }
+
+  private addHeaderFooterSettings(containerEl: HTMLElement): void {
+    for (const field of ["headerText", "footerText"] as const) {
+      const isHeader = field === "headerText";
+      new Setting(containerEl)
+        .setName(this.plugin.t(isHeader ? "headerTextName" : "footerTextName"))
+        .setDesc(this.plugin.t(isHeader ? "headerTextDesc" : "footerTextDesc"))
+        .addText((text) => {
+          text
+            .setPlaceholder(isHeader ? "{title}" : "{page} / {pages}")
+            .setValue(this.plugin.settings[field])
+            .onChange(async (value) => {
+              this.plugin.settings[field] = value;
+              await this.plugin.saveSettings();
+            });
+          text.inputEl.maxLength = 240;
+        });
+    }
   }
 
   private renderExtraCodes(containerEl: HTMLElement): void {
@@ -1926,13 +2100,24 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
 
 function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
   const saved = (raw && typeof raw === "object" ? raw : {}) as Partial<MobilePdfExporterSettings>;
+  const hasLegacyOutputFolder = saved.outputLocation === undefined && typeof saved.outputFolder === "string";
   return {
     language: normalizeChoice(saved.language, UI_LANGUAGES, DEFAULT_SETTINGS.language),
+    outputLocation: normalizeChoice(
+      saved.outputLocation,
+      OUTPUT_LOCATIONS,
+      hasLegacyOutputFolder ? "folder" : DEFAULT_SETTINGS.outputLocation
+    ),
     outputFolder: typeof saved.outputFolder === "string" && saved.outputFolder.trim()
       ? saved.outputFolder.trim()
       : DEFAULT_SETTINGS.outputFolder,
     marginMm: clampNumber(saved.marginMm, 0, 18, DEFAULT_SETTINGS.marginMm),
     includeTitle: typeof saved.includeTitle === "boolean" ? saved.includeTitle : DEFAULT_SETTINGS.includeTitle,
+    headerText: normalizeHeaderFooterTemplate(saved.headerText),
+    footerText: normalizeHeaderFooterTemplate(saved.footerText),
+    rememberLastExportOptions: typeof saved.rememberLastExportOptions === "boolean"
+      ? saved.rememberLastExportOptions
+      : DEFAULT_SETTINGS.rememberLastExportOptions,
     shareAfterExport: typeof saved.shareAfterExport === "boolean"
       ? saved.shareAfterExport
       : DEFAULT_SETTINGS.shareAfterExport,
@@ -1951,9 +2136,13 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
 function cloneSettings(settings: MobilePdfExporterSettings): MobilePdfExporterSettings {
   return {
     language: settings.language,
+    outputLocation: settings.outputLocation,
     outputFolder: settings.outputFolder,
     marginMm: settings.marginMm,
     includeTitle: settings.includeTitle,
+    headerText: normalizeHeaderFooterTemplate(settings.headerText),
+    footerText: normalizeHeaderFooterTemplate(settings.footerText),
+    rememberLastExportOptions: settings.rememberLastExportOptions,
     shareAfterExport: settings.shareAfterExport,
     openAfterExport: settings.openAfterExport,
     noteExportMode: settings.noteExportMode,
@@ -1971,6 +2160,10 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
 
 function normalizeChoice<T extends string>(value: unknown, choices: readonly T[], fallback: T): T {
   return typeof value === "string" && choices.includes(value as T) ? value as T : fallback;
+}
+
+function normalizeHeaderFooterTemplate(value: unknown): string {
+  return typeof value === "string" ? value.replace(/[\r\n\t]+/gu, " ").replace(/\s{2,}/gu, " ").trim().slice(0, 240) : "";
 }
 
 function resolvePdfFontkit(moduleValue: unknown): RegisteredFontkit {
@@ -2004,7 +2197,19 @@ function appendElement<K extends keyof HTMLElementTagNameMap>(
 }
 
 function normalizeOutputFolder(folder: string): string {
-  return normalizePath((folder.trim() || DEFAULT_SETTINGS.outputFolder).replace(/^\/+|\/+$/g, ""));
+  return normalizeVaultFolderPath(folder.trim() || DEFAULT_SETTINGS.outputFolder);
+}
+
+function normalizeVaultFolderPath(folder: string): string {
+  const clean = folder.trim().replace(/^\/+|\/+$/g, "");
+  return clean ? normalizePath(clean) : "";
+}
+
+function resolveOutputFolder(file: TFile, settings: MobilePdfExporterSettings): string {
+  if (settings.outputLocation === "current") {
+    return normalizeVaultFolderPath(file.parent?.path ?? "");
+  }
+  return normalizeOutputFolder(settings.outputFolder);
 }
 
 function getVisibleLiveDrawingOverlay(file: TFile): NoteDoodleOverlaySource | null {
@@ -2185,6 +2390,37 @@ function mmToPx(mm: number): number {
 
 function mmToPt(mm: number): number {
   return (mm / 25.4) * 72;
+}
+
+function getPageBodyLayoutPx(
+  settings: Pick<MobilePdfExporterSettings, "marginMm" | "headerText" | "footerText">,
+  pageHeightPx: number
+): { bodyTopInsetPx: number; bodyBottomInsetPx: number; bodyHeightPx: number } {
+  const { topMm, bottomMm } = getPageBodyInsetsMm(settings);
+  const bodyTopInsetPx = mmToPx(topMm);
+  const bodyBottomInsetPx = mmToPx(bottomMm);
+  return {
+    bodyTopInsetPx,
+    bodyBottomInsetPx,
+    bodyHeightPx: Math.max(24, pageHeightPx - bodyTopInsetPx - bodyBottomInsetPx)
+  };
+}
+
+function getPageBodyInsetsMm(
+  settings: Pick<MobilePdfExporterSettings, "marginMm" | "headerText" | "footerText">
+): { topMm: number; bottomMm: number } {
+  return {
+    topMm: Math.max(settings.marginMm, settings.headerText ? HEADER_FOOTER_MIN_BAND_MM : settings.marginMm),
+    bottomMm: Math.max(settings.marginMm, settings.footerText ? HEADER_FOOTER_MIN_BAND_MM : settings.marginMm)
+  };
+}
+
+function formatExportDate(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
 }
 
 function getConfiguredPageSizeMm(settings: MobilePdfExporterSettings): PdfPageSizeMm {
@@ -2389,6 +2625,8 @@ function captureBoxFragments(pageEl: HTMLElement): BoxFragment[] {
     "pre",
     "blockquote",
     "table",
+    "th",
+    "td",
     ".callout",
     ".markdown-embed",
     ".internal-embed",
@@ -2409,7 +2647,8 @@ function captureBoxFragments(pageEl: HTMLElement): BoxFragment[] {
         right: rect.right - pageRect.left,
         bottom: rect.bottom - pageRect.top,
         background,
-        border
+        border,
+        keepTogether: !element.matches("th, td")
       };
     })
     .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
@@ -2624,7 +2863,9 @@ function captureKeepBlockFragments(
       blocks.push({ ...canvas, priority: 4 });
     }
   }
-  for (const box of boxFragments) blocks.push({ ...box, priority: 3 });
+  for (const box of boxFragments) {
+    if (box.keepTogether) blocks.push({ ...box, priority: 3 });
+  }
   for (const svg of svgFragments) blocks.push({ ...svg, priority: isLargeOrExcalidrawSvg(svg.element) ? 6 : 3 });
   for (const decoration of decorationFragments) blocks.push({ ...decoration, priority: 2 });
   for (const text of textFragments) blocks.push({ ...text, priority: 1 });
@@ -2910,6 +3151,7 @@ function isExportableElement(element: Element): boolean {
 
 function measureTextNode(textNode: Text, parent: HTMLElement, pageRect: DOMRect): TextFragment[] {
   const style = getComputedStyle(parent);
+  const mergeScope = getTextMergeScope(parent);
   const fontSizePx = parseFloat(style.fontSize) || 16;
   const linkElement = parent.closest("a, .internal-link, .external-link");
   const href = resolveLinkHref(linkElement);
@@ -2942,7 +3184,8 @@ function measureTextNode(textNode: Text, parent: HTMLElement, pageRect: DOMRect)
         fontStyle: current.fontStyle,
         color: current.color,
         underline: current.underline,
-        href: current.href
+        href: current.href,
+        mergeScope: current.mergeScope
       });
     }
     current = null;
@@ -2996,7 +3239,8 @@ function measureTextNode(textNode: Text, parent: HTMLElement, pageRect: DOMRect)
         fontStyle: style.fontStyle || "normal",
         color,
         underline,
-        href
+        href,
+        mergeScope
       };
     }
 
@@ -3010,6 +3254,12 @@ function measureTextNode(textNode: Text, parent: HTMLElement, pageRect: DOMRect)
   pushCurrent();
   range.detach();
   return fragments;
+}
+
+function getTextMergeScope(parent: HTMLElement): Element {
+  return parent.closest(
+    "th, td, p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, figcaption, .callout, .markdown-embed, .internal-embed"
+  ) ?? parent;
 }
 
 function firstUsefulRect(range: Range): DOMRect | null {
@@ -3050,6 +3300,7 @@ function mergeAdjacentFragments(fragments: TextFragment[]): TextFragment[] {
       fragment.left >= previous.right - fragment.fontSizePx * 0.5 &&
       previous.underline === fragment.underline &&
       previous.href === fragment.href &&
+      previous.mergeScope === fragment.mergeScope &&
       previous.fontFamily === fragment.fontFamily &&
       previous.fontWeight === fragment.fontWeight &&
       previous.fontStyle === fragment.fontStyle &&
@@ -3239,12 +3490,14 @@ function drawTextLayer(
     pageWidthPt: number;
     pageHeightPt: number;
     pxToPt: number;
+    contentTopInsetPx?: number;
     colorMode: PdfColorMode;
     opacity?: number;
     drawUnderlines?: boolean;
   }
 ): void {
   const { font, pageTopPx, pageBottomPx, pageWidthPt, pageHeightPt, pxToPt } = options;
+  const contentTopInsetPx = options.contentTopInsetPx ?? 0;
   const opacity = options.opacity ?? 1;
   const drawUnderlines = options.drawUnderlines ?? true;
 
@@ -3254,7 +3507,7 @@ function drawTextLayer(
     const localTop = fragment.top - pageTopPx;
     const fontSize = Math.max(3.5, fragment.fontSizePx * pxToPt);
     const x = clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
-    const baselineY = pageHeightPt - (localTop + fragment.fontSizePx * 0.86) * pxToPt;
+    const baselineY = pageHeightPt - (contentTopInsetPx + localTop + fragment.fontSizePx * 0.86) * pxToPt;
     const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt);
     const maxWidth = Math.max(8, Math.min(pageWidthPt - x - 2, measuredWidth + 2));
 
@@ -3337,6 +3590,90 @@ function drawSafeText(
   }
 }
 
+function drawPdfHeaderFooter(
+  page: PDFPage,
+  font: PDFFont,
+  settings: Pick<MobilePdfExporterSettings, "marginMm" | "headerText" | "footerText" | "colorMode">,
+  context: { title: string; pageNumber: number; pageCount: number; exportDate: string }
+): void {
+  const header = formatHeaderFooterText(
+    settings.headerText,
+    context.title,
+    context.pageNumber,
+    context.pageCount,
+    context.exportDate
+  );
+  const footer = formatHeaderFooterText(
+    settings.footerText,
+    context.title,
+    context.pageNumber,
+    context.pageCount,
+    context.exportDate
+  );
+  if (!header && !footer) return;
+
+  const pageWidth = page.getWidth();
+  const pageHeight = page.getHeight();
+  const insetX = Math.max(5, mmToPt(settings.marginMm));
+  const maxWidth = Math.max(16, pageWidth - insetX * 2);
+  const { topMm, bottomMm } = getPageBodyInsetsMm(settings);
+  const color = outputColor(rgb(0.22, 0.22, 0.22), settings.colorMode);
+
+  if (header) {
+    drawAlignedSafePdfText(page, header, {
+      x: insetX,
+      y: pageHeight - mmToPt(topMm) + mmToPt(2.2),
+      size: 8,
+      font,
+      color,
+      maxWidth,
+      align: "left"
+    });
+  }
+  if (footer) {
+    drawAlignedSafePdfText(page, footer, {
+      x: pageWidth - insetX,
+      y: Math.max(3, mmToPt(bottomMm) - mmToPt(4.5)),
+      size: 8,
+      font,
+      color,
+      maxWidth,
+      align: "right"
+    });
+  }
+}
+
+function drawAlignedSafePdfText(
+  page: PDFPage,
+  text: string,
+  options: {
+    x: number;
+    y: number;
+    size: number;
+    font: PDFFont;
+    color: Color;
+    maxWidth: number;
+    align: "left" | "right";
+  }
+): void {
+  const clean = getEncodablePdfText(options.font, stripProblematicPdfChars(text));
+  if (!clean) return;
+  const naturalWidth = options.font.widthOfTextAtSize(clean, options.size);
+  const size = naturalWidth > options.maxWidth
+    ? Math.max(4, options.size * (options.maxWidth / naturalWidth))
+    : options.size;
+  const width = Math.min(options.maxWidth, options.font.widthOfTextAtSize(clean, size));
+  const x = options.align === "right" ? options.x - width : options.x;
+  drawSafeText(page, clean, {
+    x,
+    y: options.y,
+    size,
+    font: options.font,
+    color: options.color,
+    maxWidth: options.maxWidth
+  });
+}
+
 function getEncodablePdfText(font: PDFFont, text: string): string {
   if (!text) return "";
   if (canEncodePdfText(font, text)) return text;
@@ -3390,8 +3727,10 @@ function drawLinkAnnotationLayer(
     pageWidthPt: number;
     pageHeightPt: number;
     pxToPt: number;
+    contentTopInsetPx?: number;
   }
 ): void {
+  const contentTopInsetPx = options.contentTopInsetPx ?? 0;
   for (const link of links) {
     if (link.bottom <= options.pageTopPx || link.top >= options.pageBottomPx) continue;
 
@@ -3399,8 +3738,8 @@ function drawLinkAnnotationLayer(
     const localBottom = link.bottom - options.pageTopPx;
     const x = clampNumber(link.left * options.pxToPt, 0, options.pageWidthPt - 1, 0);
     const right = clampNumber(link.right * options.pxToPt, x + 1, options.pageWidthPt, x + 1);
-    const yTop = options.pageHeightPt - localTop * options.pxToPt;
-    const yBottom = options.pageHeightPt - localBottom * options.pxToPt;
+    const yTop = options.pageHeightPt - (contentTopInsetPx + localTop) * options.pxToPt;
+    const yBottom = options.pageHeightPt - (contentTopInsetPx + localBottom) * options.pxToPt;
     const y = clampNumber(yBottom - 1, 0, options.pageHeightPt - 1, 0);
     const height = Math.max(4, Math.min(options.pageHeightPt - y, yTop - yBottom + 2));
     const width = Math.max(4, right - x);
@@ -3501,6 +3840,12 @@ async function renderPreviewPageToPngBytes(
   context.fillStyle = colorToCss(model.background, "color");
   context.fillRect(0, 0, model.sourceWidthPx, model.pageHeightPx);
 
+  context.save();
+  context.beginPath();
+  context.rect(0, model.bodyTopInsetPx, model.sourceWidthPx, model.bodyHeightPx);
+  context.clip();
+  context.translate(0, model.bodyTopInsetPx);
+
   drawCanvasBoxLayer(context, model.boxFragments, {
     pageTopPx,
     pageBottomPx,
@@ -3510,20 +3855,20 @@ async function renderPreviewPageToPngBytes(
     pageTopPx,
     pageBottomPx,
     sourceWidthPx: model.sourceWidthPx,
-    pageHeightPx: model.pageHeightPx
+    pageHeightPx: model.bodyHeightPx
   });
   await drawCanvasSvgLayer(context, model.svgFragments, {
     pageTopPx,
     pageBottomPx,
     sourceWidthPx: model.sourceWidthPx,
-    pageHeightPx: model.pageHeightPx,
+    pageHeightPx: model.bodyHeightPx,
     rasterScale: scale
   });
   drawCanvasDecorationLayer(context, model.decorationFragments, {
     pageTopPx,
     pageBottomPx,
     sourceWidthPx: model.sourceWidthPx,
-    pageHeightPx: model.pageHeightPx,
+    pageHeightPx: model.bodyHeightPx,
     colorMode: "color"
   });
   drawCanvasTextLayer(context, model.textFragments, {
@@ -3536,8 +3881,11 @@ async function renderPreviewPageToPngBytes(
     pageTopPx,
     pageBottomPx,
     sourceWidthPx: model.sourceWidthPx,
-    pageHeightPx: model.pageHeightPx
+    pageHeightPx: model.bodyHeightPx
   });
+
+  context.restore();
+  drawCanvasHeaderFooter(context, model, pageIndex);
 
   if (options.colorMode === "grayscale") {
     context.setTransform(1, 0, 0, 1, 0, 0);
@@ -3545,6 +3893,71 @@ async function renderPreviewPageToPngBytes(
   }
 
   return dataUrlToUint8Array(canvas.toDataURL("image/png"));
+}
+
+function drawCanvasHeaderFooter(
+  context: CanvasRenderingContext2D,
+  model: PreviewPdfModel,
+  pageIndex: number
+): void {
+  const pageNumber = pageIndex + 1;
+  const pageCount = Math.max(1, model.pageBreaks.length - 1);
+  const header = formatHeaderFooterText(model.headerText, model.title, pageNumber, pageCount, model.exportDate);
+  const footer = formatHeaderFooterText(model.footerText, model.title, pageNumber, pageCount, model.exportDate);
+  if (!header && !footer) return;
+
+  const insetX = Math.max(4, model.horizontalInsetPx);
+  const maxWidth = Math.max(16, model.sourceWidthPx - insetX * 2);
+  const headerY = Math.max(HEADER_FOOTER_FONT_SIZE_PX + 2, model.bodyTopInsetPx - 5);
+  const footerY = Math.min(
+    model.pageHeightPx - 3,
+    model.pageHeightPx - model.bodyBottomInsetPx + HEADER_FOOTER_FONT_SIZE_PX + 5
+  );
+
+  if (header) {
+    drawFittedCanvasPageText(context, header, insetX, headerY, maxWidth, "left", model.foreground);
+  }
+  if (footer) {
+    drawFittedCanvasPageText(context, footer, model.sourceWidthPx - insetX, footerY, maxWidth, "right", model.foreground);
+  }
+}
+
+function drawFittedCanvasPageText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  align: CanvasTextAlign,
+  color: Color
+): void {
+  context.save();
+  let fontSize = HEADER_FOOTER_FONT_SIZE_PX;
+  context.font = `400 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const width = context.measureText(text).width;
+  if (width > maxWidth) {
+    fontSize = Math.max(7, fontSize * (maxWidth / width));
+    context.font = `400 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  }
+  context.fillStyle = colorToCss(color, "color");
+  context.textAlign = align;
+  context.textBaseline = "alphabetic";
+  context.fillText(text, x, y, maxWidth);
+  context.restore();
+}
+
+function formatHeaderFooterText(
+  template: string,
+  title: string,
+  pageNumber: number,
+  pageCount: number,
+  exportDate: string
+): string {
+  return normalizeHeaderFooterTemplate(template)
+    .replace(/\{title\}/giu, title)
+    .replace(/\{page\}/giu, String(pageNumber))
+    .replace(/\{pages\}/giu, String(pageCount))
+    .replace(/\{date\}/giu, exportDate);
 }
 
 function getSafePreviewImageScale(widthPx: number, heightPx: number, requestedScale: number): number {

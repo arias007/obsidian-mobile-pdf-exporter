@@ -9,10 +9,12 @@ One-click preview-style PDF export for Obsidian mobile and desktop.
 - Supports Auto / Chinese / English UI text for export buttons, menus, commands, options, settings, and export prompts.
 - Exports the current Markdown preview to a phone-width PDF.
 - Keeps text selectable/copyable by writing a real PDF text layer.
-- Adds ordinary-note PDF options for page size, orientation, color/grayscale, margin, content scale, selectable-text PDF, and image PDF.
+- Adds PDF options for page size, orientation, color/grayscale, per-page margins, content scale, headers, footers, selectable-text PDF, and image PDF.
+- Saves beside the current note by default, with a combined export-location control for switching to a custom vault folder.
+- Opens the finished PDF by default for viewing or printing, and remembers the last export options by default; both behaviors can be disabled.
 - Uses the rendered Obsidian preview DOM as the layout source.
 - Draws real vector PDF text as the visible body, so exported text stays sharp and selectable.
-- Embeds images separately and draws lightweight block backgrounds for code, tables, quotes, and callouts.
+- Embeds images separately and preserves table cell widths, borders, backgrounds, and text alignment alongside other block styling.
 - Draws link color/underlines, task checkboxes, list bullets, ordered-list markers, and small SVG icons from the rendered preview.
 - Avoids page breaks inside images, list items, paragraphs, code blocks, tables, quotes, embeds, and callouts when they can fit on one page.
 - Exports direct `.excalidraw.md` files as pure image PDFs through the Excalidraw runtime, with automatic lower-resolution retries and page slicing for large drawings.
@@ -52,7 +54,9 @@ The standard community-browser assets keep `main.js` below the earlier 0.3.52 bu
 
 ## Usage
 
-Open a Markdown note, then click the `Export preview PDF` ribbon or menu command. Choose the page size, orientation, color mode, export mode, and other common PDF options in the panel, then click `Export PDF`. The exported PDF is saved to `PDF Exports` in the current vault by default.
+Open a Markdown note, then click the `Export preview PDF` ribbon or menu command. Choose the export location, page size, orientation, margin, content scale, header/footer text, color mode, export mode, and other PDF options in the panel, then click `Export PDF`. New installations save the PDF beside the current note, open it after export, and reuse the last export options by default. Existing installations keep their previously configured output folder during migration.
+
+Header and footer text can include `{title}`, `{page}`, `{pages}`, and `{date}`. Leave either field blank to disable it.
 
 The interface language can be set to Auto, Chinese, or English in the plugin settings. Auto follows the browser/system locale and uses English outside Chinese locales.
 
@@ -63,6 +67,15 @@ Markor creates PDF through Android WebView printing, so its preview PDF text is 
 The exporter uses the rendered preview DOM as the layout source, then writes a real PDF text layer. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
 
 ## Changelog
+
+### 0.3.58
+
+- Fixes issue #3 by preserving automatic table column sizing, keeping text fragments isolated to their source cells, and drawing individual cell borders/backgrounds in both export modes.
+- Adds a combined export-location control with `Current note folder` as the new-install default and an optional custom vault folder.
+- Opens the exported PDF by default so it is immediately available for viewing or printing.
+- Replaces the one-time `Save as default` action with a persistent `Use last export options` toggle that is enabled by default.
+- Adds configurable headers and footers with title, page-number, page-count, and date placeholders.
+- Applies vertical margins and header/footer space on every page, and makes direct Excalidraw exports respect the configured margins and fixed paper size.
 
 ### 0.3.57
 

@@ -20,7 +20,7 @@
 .mobile-pdf-exporter-page {
   box-sizing: border-box;
   width: 100%;
-  padding: var(--mobile-pdf-exporter-padding, 40px);
+  padding: 0 var(--mobile-pdf-exporter-padding, 40px);
   background: var(--background-primary);
   color: var(--text-normal);
   overflow: hidden;
@@ -111,7 +111,7 @@
 }
 
 .mobile-pdf-exporter-page img {
-  max-height: calc(var(--mobile-pdf-exporter-page-height, 850px) - (var(--mobile-pdf-exporter-padding, 26px) * 2) - 24px);
+  max-height: calc(var(--mobile-pdf-exporter-body-height, 850px) - 24px);
 }
 
 .mobile-pdf-exporter-page figure,
@@ -125,7 +125,7 @@
   width: 100%;
   max-width: 100%;
   border-collapse: collapse;
-  table-layout: fixed;
+  table-layout: auto;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -144,6 +144,11 @@
 .mobile-pdf-exporter-page th {
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.mobile-pdf-exporter-page :where(td, th) {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .mobile-pdf-exporter-page a {

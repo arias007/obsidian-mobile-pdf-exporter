@@ -70,6 +70,11 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.3.64
+
+- Waits for images in both editing and reading views, then rechecks the live layout before capturing nearby text.
+- Reassembles reading-view sections with their measured DOM heights after image loading instead of stale renderer heights, preventing text around images from overlapping or disappearing.
+
 ### 0.3.63
 
 - Restores editing-view export to the active CodeMirror and plugin DOM instead of rebuilding Markdown as a separate text layout.

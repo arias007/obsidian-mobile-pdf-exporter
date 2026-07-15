@@ -49,6 +49,11 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /function buildLiveSurfaceCaptureScrollPositions/);
   assert.match(source, /function getLivePreviewRenderer/);
   assert.match(source, /function captureConnectedLivePreviewSections/);
+  assert.match(source, /measuredHeight: Math\.max\(0, rect\.height\)/);
+  assert.match(source, /function getLivePreviewSectionLayoutHeight/);
+  assert.match(source, /return Math\.max\(cachedHeight, measuredHeight\)/);
+  assert.match(source, /sectionTop \+= getLivePreviewSectionLayoutHeight\(section, capture\)/);
+  assert.match(source, /sectionTop \+= getLivePreviewSectionLayoutHeight\(section, captures\.get\(index\)\)/);
   assert.match(source, /function buildMissingLivePreviewSectionScrollPositions/);
   assert.match(source, /function appendLivePreviewSectionCaptures/);
   assert.match(source, /function captureLivePreviewRootOverlays/);
@@ -67,6 +72,11 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /function sortTextFragmentsForDrawing/);
   assert.doesNotMatch(source, /function mergeAdjacentFragments/);
   assert.match(source, /await waitForLiveSurfaceSettled\(rootEl, scrollEl, signal\)/);
+  assert.match(source, /function settleLiveSurfaceAtScrollPosition/);
+  assert.match(source, /await settleLiveSurfaceAtScrollPosition\(rootEl, scrollEl, scrollPositions\[index\], signal\)/);
+  assert.match(source, /Math\.abs\(scrollEl\.scrollTop - expectedTop\) <= 1\.5/);
+  assert.match(source, /if \(rootEl\.querySelector\("img"\)\) \{\s*await waitForImages\(rootEl, Math\.min\(IMAGE_WAIT_TIMEOUT_MS, 1100\)\);\s*await settleLiveSurfaceAtScrollPosition/);
+  assert.match(source, /const imageSignature = Array\.from\(rootEl\.querySelectorAll\("img"\)\)/);
   assert.match(source, /function waitForLiveSurfaceSettled/);
   assert.match(source, /interface LiveSurfaceCaptureWindow/);
   assert.match(source, /textNodes: WeakMap<Text, CachedLiveTextCapture>/);

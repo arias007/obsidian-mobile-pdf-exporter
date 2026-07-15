@@ -92,6 +92,7 @@ interface LivePreviewRenderer {
 interface CapturedLivePreviewSection {
   fragments: CapturedSurfaceFragments;
   documentLeft: number;
+  measuredHeight: number;
 }
 
 interface CapturedSurfaceFragments {
@@ -1085,16 +1086,18 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
       for (let index = 0; index < scrollPositions.length; index += 1) {
         throwIfExportCancelled(signal);
-        scrollEl.scrollTop = scrollPositions[index];
-        scrollEl.dispatchEvent(new Event("scroll"));
-        await waitForLiveSurfaceSettled(rootEl, scrollEl, signal);
+        await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal);
         if (surface.mode === "preview" && index > 0) {
           await waitForPreviewDomStable(rootEl, 750);
         }
         refreshLiveDrawingSurface(rootEl);
         await nextAnimationFrame();
-        if (surface.mode === "preview") {
-          await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 700));
+        if (rootEl.querySelector("img")) {
+          await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 1100));
+          await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal);
+          if (surface.mode === "preview") {
+            await waitForPreviewDomStable(rootEl, 750);
+          }
         }
         throwIfExportCancelled(signal);
 
@@ -2963,17 +2966,32 @@ function getLivePreviewSectionHeight(section: LivePreviewRendererSection): numbe
   return Number.isFinite(height) ? Math.max(0, height) : 0;
 }
 
-function getLivePreviewTopSpace(renderer: LivePreviewRenderer): number {
+function getLivePreviewSectionLayoutHeight(
+  section: LivePreviewRendererSection,
+  capture?: CapturedLivePreviewSection
+): number {
+  const cachedHeight = getLivePreviewSectionHeight(section);
+  const measuredHeight = capture && Number.isFinite(capture.measuredHeight)
+    ? Math.max(0, capture.measuredHeight)
+    : 0;
+  return Math.max(cachedHeight, measuredHeight);
+}
+
+function getLivePreviewTopSpace(
+  renderer: LivePreviewRenderer,
+  captures?: Map<number, CapturedLivePreviewSection>
+): number {
   const topSpace = Number(renderer.topSpace);
   if (Number.isFinite(topSpace)) return Math.max(0, topSpace);
 
   let precedingHeight = 0;
-  for (const section of renderer.sections) {
+  for (let index = 0; index < renderer.sections.length; index += 1) {
+    const section = renderer.sections[index];
     const element = section.el;
     if (element?.isConnected) {
       return Math.max(0, element.offsetTop - precedingHeight);
     }
-    precedingHeight += getLivePreviewSectionHeight(section);
+    precedingHeight += getLivePreviewSectionLayoutHeight(section, captures?.get(index));
   }
   return 0;
 }
@@ -3000,10 +3018,12 @@ function captureConnectedLivePreviewSections(
 
     const rect = element.getBoundingClientRect();
     if (rect.width <= 0.5) continue;
+    const fragments = captureSurfaceFragments(element, linkContext);
 
     captures.set(index, {
-      fragments: captureSurfaceFragments(element, linkContext),
-      documentLeft: rect.left - rootRect.left + scrollEl.scrollLeft
+      fragments,
+      documentLeft: rect.left - rootRect.left + scrollEl.scrollLeft,
+      measuredHeight: Math.max(0, rect.height)
     });
   }
 }
@@ -3016,7 +3036,7 @@ function buildMissingLivePreviewSectionScrollPositions(
 ): number[] {
   const positions = new Set<number>();
   const maximum = Math.max(0, maxScrollTop);
-  let sectionTop = getLivePreviewTopSpace(renderer);
+  let sectionTop = getLivePreviewTopSpace(renderer, captures);
 
   for (let index = 0; index < renderer.sections.length; index += 1) {
     const section = renderer.sections[index];
@@ -3025,7 +3045,7 @@ function buildMissingLivePreviewSectionScrollPositions(
       const target = clampNumber(sectionTop - viewportHeight * 0.18, 0, maximum, 0);
       positions.add(Math.round(target));
     }
-    sectionTop += sectionHeight;
+    sectionTop += getLivePreviewSectionLayoutHeight(section, captures.get(index));
   }
 
   return [...positions].sort((left, right) => left - right);
@@ -3048,7 +3068,7 @@ function appendLivePreviewSectionCaptures(
   captures: Map<number, CapturedLivePreviewSection>,
   seen: SurfaceCaptureSeenState
 ): void {
-  let sectionTop = getLivePreviewTopSpace(renderer);
+  let sectionTop = getLivePreviewTopSpace(renderer, captures);
 
   for (let index = 0; index < renderer.sections.length; index += 1) {
     const section = renderer.sections[index];
@@ -3062,7 +3082,7 @@ function appendLivePreviewSectionCaptures(
         seen
       );
     }
-    sectionTop += getLivePreviewSectionHeight(section);
+    sectionTop += getLivePreviewSectionLayoutHeight(section, capture);
   }
 }
 
@@ -3491,6 +3511,28 @@ function buildLivePreviewGapScrollPositions(
   return [...positions].sort((left, right) => left - right);
 }
 
+async function settleLiveSurfaceAtScrollPosition(
+  rootEl: HTMLElement,
+  scrollEl: HTMLElement,
+  requestedTop: number,
+  signal?: AbortSignal
+): Promise<void> {
+  throwIfExportCancelled(signal);
+  const maximum = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+  let expectedTop = clampNumber(requestedTop, 0, maximum, 0);
+  scrollEl.scrollTop = expectedTop;
+  scrollEl.dispatchEvent(new Event("scroll"));
+  await waitForLiveSurfaceSettled(rootEl, scrollEl, signal);
+  if (Math.abs(scrollEl.scrollTop - expectedTop) <= 1.5) return;
+
+  await waitForPromiseOrTimeout(new Promise<void>((resolve) => window.setTimeout(resolve, 40)), 80);
+  throwIfExportCancelled(signal);
+  expectedTop = clampNumber(requestedTop, 0, Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight), 0);
+  scrollEl.scrollTop = expectedTop;
+  scrollEl.dispatchEvent(new Event("scroll"));
+  await nextAnimationFrame(Math.min(180, FRAME_WAIT_TIMEOUT_MS));
+}
+
 async function waitForLiveSurfaceSettled(
   rootEl: HTMLElement,
   scrollEl: HTMLElement,
@@ -3503,11 +3545,25 @@ async function waitForLiveSurfaceSettled(
     throwIfExportCancelled(signal);
     await nextAnimationFrame();
     const content = rootEl.querySelector<HTMLElement>(".cm-content, .markdown-preview-sizer, .markdown-preview-section");
+    const rootRect = rootEl.getBoundingClientRect();
+    const imageSignature = Array.from(rootEl.querySelectorAll("img")).map((image) => {
+      const rect = image.getBoundingClientRect();
+      return [
+        image.complete ? 1 : 0,
+        image.naturalWidth,
+        image.naturalHeight,
+        Math.round(rect.left - rootRect.left),
+        Math.round(rect.top - rootRect.top + scrollEl.scrollTop),
+        Math.round(rect.width),
+        Math.round(rect.height)
+      ].join(":");
+    }).join(";");
     const signature = [
       Math.round(scrollEl.scrollTop * 10) / 10,
       Math.round(scrollEl.scrollHeight),
       content?.childElementCount ?? rootEl.childElementCount,
-      rootEl.querySelectorAll(".cm-line, .markdown-preview-section").length
+      rootEl.querySelectorAll(".cm-line, .markdown-preview-section").length,
+      imageSignature
     ].join("|");
     if (signature === previousSignature) {
       stableFrames += 1;

@@ -528,6 +528,8 @@ const EXCALIDRAW_IMAGE_PDF_SUBJECT = "Image PDF exported from Obsidian Excalidra
 const MAX_SVG_FRAGMENTS_PER_PAGE = 24;
 const SVG_IMAGE_LOAD_TIMEOUT_MS = 1800;
 const IMAGE_WAIT_TIMEOUT_MS = 2500;
+const REMOTE_IMAGE_CORS_TIMEOUT_MS = 5000;
+const REMOTE_IMAGE_REQUEST_TIMEOUT_MS = 6000;
 const PREVIEW_RENDER_TIMEOUT_MS = 12000;
 const EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS = 45000;
 const EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS = 15000;
@@ -1082,22 +1084,30 @@ export default class MobilePdfExporterPlugin extends Plugin {
         );
       const capturedActualTops = new Set<number>();
       let appendedFinalWindows = false;
+      let appendedPreviewMissingWindows = false;
       scrollEl.scrollLeft = 0;
 
       for (let index = 0; index < scrollPositions.length; index += 1) {
         throwIfExportCancelled(signal);
-        await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal);
-        if (surface.mode === "preview" && index > 0) {
-          await waitForPreviewDomStable(rootEl, 750);
+        await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal, previewRenderer);
+        if (surface.mode === "preview" && index > 0 && !previewRenderer) {
+          await waitForPreviewDomStable(rootEl, 360);
         }
         refreshLiveDrawingSurface(rootEl);
         await nextAnimationFrame();
-        if (rootEl.querySelector("img")) {
+        if (previewRenderer) {
+          const connectedSections = getUncapturedConnectedPreviewSectionElements(
+            rootEl,
+            previewRenderer,
+            previewSectionCaptures
+          );
+          const waitedForImages = await waitForImagesInElements(connectedSections, 900);
+          if (waitedForImages) {
+            await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal, previewRenderer);
+          }
+        } else if (rootEl.querySelector("img")) {
           await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 1100));
           await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal);
-          if (surface.mode === "preview") {
-            await waitForPreviewDomStable(rootEl, 750);
-          }
         }
         throwIfExportCancelled(signal);
 
@@ -1171,7 +1181,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
           scrollPositions.push(...finalPositions);
         }
 
-        if (previewRenderer && index === scrollPositions.length - 1) {
+        if (previewRenderer && !appendedPreviewMissingWindows && index === scrollPositions.length - 1) {
+          appendedPreviewMissingWindows = true;
           const missingPositions = buildMissingLivePreviewSectionScrollPositions(
             previewRenderer,
             previewSectionCaptures,
@@ -3028,6 +3039,24 @@ function captureConnectedLivePreviewSections(
   }
 }
 
+function getUncapturedConnectedPreviewSectionElements(
+  rootEl: HTMLElement,
+  renderer: LivePreviewRenderer,
+  captures: Map<number, CapturedLivePreviewSection>
+): HTMLElement[] {
+  return renderer.sections.flatMap((section, index) => {
+    const element = section.el;
+    if (
+      captures.has(index) ||
+      section.shown === false ||
+      section.rendered === false ||
+      !element?.isConnected ||
+      !rootEl.contains(element)
+    ) return [];
+    return [element];
+  });
+}
+
 function buildMissingLivePreviewSectionScrollPositions(
   renderer: LivePreviewRenderer,
   captures: Map<number, CapturedLivePreviewSection>,
@@ -3515,14 +3544,19 @@ async function settleLiveSurfaceAtScrollPosition(
   rootEl: HTMLElement,
   scrollEl: HTMLElement,
   requestedTop: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  previewRenderer?: LivePreviewRenderer | null
 ): Promise<void> {
   throwIfExportCancelled(signal);
   const maximum = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
   let expectedTop = clampNumber(requestedTop, 0, maximum, 0);
   scrollEl.scrollTop = expectedTop;
   scrollEl.dispatchEvent(new Event("scroll"));
-  await waitForLiveSurfaceSettled(rootEl, scrollEl, signal);
+  if (previewRenderer) {
+    await waitForLivePreviewRendererSettled(scrollEl, previewRenderer, signal);
+  } else {
+    await waitForLiveSurfaceSettled(rootEl, scrollEl, signal);
+  }
   if (Math.abs(scrollEl.scrollTop - expectedTop) <= 1.5) return;
 
   await waitForPromiseOrTimeout(new Promise<void>((resolve) => window.setTimeout(resolve, 40)), 80);
@@ -3531,6 +3565,38 @@ async function settleLiveSurfaceAtScrollPosition(
   scrollEl.scrollTop = expectedTop;
   scrollEl.dispatchEvent(new Event("scroll"));
   await nextAnimationFrame(Math.min(180, FRAME_WAIT_TIMEOUT_MS));
+}
+
+async function waitForLivePreviewRendererSettled(
+  scrollEl: HTMLElement,
+  renderer: LivePreviewRenderer,
+  signal?: AbortSignal
+): Promise<void> {
+  let previousSignature = "";
+  let stableFrames = 0;
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    throwIfExportCancelled(signal);
+    await nextAnimationFrame();
+    const sectionSignature = renderer.sections.map((section, index) => [
+      index,
+      section.el?.isConnected ? 1 : 0,
+      Math.round(getLivePreviewSectionHeight(section)),
+      section.rendered === false ? 0 : 1
+    ].join(":")).join(";");
+    const signature = [
+      Math.round(scrollEl.scrollTop * 10) / 10,
+      Math.round(scrollEl.scrollHeight),
+      sectionSignature
+    ].join("|");
+    if (signature === previousSignature) {
+      stableFrames += 1;
+      if (stableFrames >= 2) return;
+    } else {
+      previousSignature = signature;
+      stableFrames = 0;
+    }
+  }
 }
 
 async function waitForLiveSurfaceSettled(
@@ -4746,7 +4812,40 @@ function computePageBreaks(
   }
 
   if (breaks[breaks.length - 1] < contentHeightPx) breaks.push(contentHeightPx);
-  return breaks;
+  return enforceMaximumPageSpan(breaks, contentHeightPx, pageHeightPx, sortedBlocks);
+}
+
+function enforceMaximumPageSpan(
+  pageBreaks: number[],
+  contentHeightPx: number,
+  pageHeightPx: number,
+  sortedBlocks: KeepBlockFragment[]
+): number[] {
+  const maximumSpan = Math.max(24, pageHeightPx);
+  const normalized = [0];
+
+  for (const rawTarget of pageBreaks.slice(1)) {
+    const target = clampNumber(rawTarget, 0, contentHeightPx, contentHeightPx);
+    let current = normalized[normalized.length - 1];
+
+    while (target - current > maximumSpan + 0.5) {
+      const idealBreak = current + maximumSpan;
+      const textSafeBreak = moveBreakOutsideTextLines(current, idealBreak, maximumSpan, sortedBlocks);
+      let nextBreak = Math.min(idealBreak, textSafeBreak);
+      if (nextBreak <= current + PAGE_BREAK_MIN_ADVANCE_PX) nextBreak = idealBreak;
+      normalized.push(nextBreak);
+      current = nextBreak;
+    }
+
+    const isContentEnd = target >= contentHeightPx - 0.5;
+    if (
+      target > current + 0.5 &&
+      (isContentEnd || target - current > PAGE_BREAK_MIN_ADVANCE_PX)
+    ) normalized.push(target);
+  }
+
+  if (normalized[normalized.length - 1] < contentHeightPx - 0.5) normalized.push(contentHeightPx);
+  return normalized;
 }
 
 function moveBreakOutsideTextLines(
@@ -5388,10 +5487,13 @@ async function drawCanvasImageLayer(
       const slice = getMediaPageSlice(imageFragment, options);
       if (!slice) continue;
 
-      const naturalHeight = Math.max(1, imageFragment.element.naturalHeight);
-      const sourceY = (slice.offsetTopPx / slice.fragmentHeightPx) * naturalHeight;
-      const sourceHeight = (slice.height / slice.fragmentHeightPx) * naturalHeight;
-      const sliceBytes = await imageSliceToPngBytes(imageFragment.element, sourceY, sourceHeight, "color");
+      const sliceBytes = await imageFragmentSliceToPngBytes(
+        imageFragment.element,
+        slice.offsetTopPx,
+        slice.height,
+        slice.fragmentHeightPx,
+        "color"
+      );
       const sliceImage = await imageBytesToHtmlImage(sliceBytes);
       context.drawImage(sliceImage, slice.x, slice.y, slice.width, slice.height);
     } catch (error) {
@@ -5454,6 +5556,13 @@ interface MediaPageSlice {
   offsetTopPx: number;
   fragmentHeightPx: number;
 }
+
+interface RemoteCanvasImageCacheEntry {
+  source: string;
+  image: Promise<HTMLImageElement | null>;
+}
+
+const remoteCanvasImageCache = new WeakMap<HTMLImageElement, RemoteCanvasImageCacheEntry>();
 
 function getMediaPageSlice(
   fragment: { left: number; top: number; right: number; bottom: number },
@@ -6144,6 +6253,72 @@ async function imageSliceToPngBytes(
   return dataUrlToUint8Array(canvas.toDataURL("image/png"));
 }
 
+async function imageFragmentSliceToPngBytes(
+  image: HTMLImageElement,
+  offsetTopPx: number,
+  sliceHeightPx: number,
+  fragmentHeightPx: number,
+  colorMode: PdfColorMode = "color"
+): Promise<Uint8Array> {
+  const sliceSource = (source: HTMLImageElement) => {
+    const sourceHeight = Math.max(1, source.naturalHeight || source.height);
+    const sourceY = (offsetTopPx / Math.max(1, fragmentHeightPx)) * sourceHeight;
+    const sourceHeightPx = (sliceHeightPx / Math.max(1, fragmentHeightPx)) * sourceHeight;
+    return imageSliceToPngBytes(source, sourceY, sourceHeightPx, colorMode);
+  };
+
+  try {
+    return await sliceSource(image);
+  } catch (directError) {
+    const remoteImage = await loadRemoteImageForCanvas(image);
+    if (!remoteImage) throw directError;
+    return sliceSource(remoteImage);
+  }
+}
+
+async function loadRemoteImageForCanvas(image: HTMLImageElement): Promise<HTMLImageElement | null> {
+  const source = String(image.currentSrc || image.src || "").trim();
+  if (!/^https?:\/\//iu.test(source)) return null;
+
+  const cached = remoteCanvasImageCache.get(image);
+  if (cached?.source === source) return cached.image;
+
+  const imagePromise = (async () => {
+    try {
+      try {
+        return await loadImage(source, REMOTE_IMAGE_CORS_TIMEOUT_MS, "anonymous");
+      } catch {
+        // Some hosts omit CORS headers even though Obsidian can request the image directly.
+      }
+
+      const response = await waitForPromiseOrTimeout(
+        requestUrl({ url: source, method: "GET" }),
+        REMOTE_IMAGE_REQUEST_TIMEOUT_MS
+      );
+      if (!response) throw new Error("Remote image download timed out.");
+      if (response.status < 200 || response.status >= 300 || response.arrayBuffer.byteLength < 1) {
+        throw new Error(`Remote image download failed with HTTP ${response.status}.`);
+      }
+      const contentType = response.headers?.["content-type"] || response.headers?.["Content-Type"] || "application/octet-stream";
+      const bytes = new Uint8Array(response.arrayBuffer.byteLength);
+      bytes.set(new Uint8Array(response.arrayBuffer));
+      const blob = new Blob([bytes.buffer], { type: contentType.split(";", 1)[0] });
+      const url = URL.createObjectURL(blob);
+      try {
+        return await loadImage(url, EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    } catch (error) {
+      console.warn("Mobile PDF Exporter remote image fallback failed", error);
+      return null;
+    }
+  })();
+
+  remoteCanvasImageCache.set(image, { source, image: imagePromise });
+  return imagePromise;
+}
+
 function drawLiveDrawingCanvas(
   context: CanvasRenderingContext2D,
   sourceCanvas: HTMLCanvasElement,
@@ -6381,8 +6556,13 @@ function parseSvgLength(value: string | null): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-async function loadImage(url: string, timeoutMs = SVG_IMAGE_LOAD_TIMEOUT_MS): Promise<HTMLImageElement> {
+async function loadImage(
+  url: string,
+  timeoutMs = SVG_IMAGE_LOAD_TIMEOUT_MS,
+  crossOrigin: "anonymous" | "use-credentials" | null = null
+): Promise<HTMLImageElement> {
   const image = new Image();
+  if (crossOrigin) image.crossOrigin = crossOrigin;
   let timeout = 0;
   await new Promise<void>((resolve, reject) => {
     timeout = window.setTimeout(() => reject(new Error("Image load timed out.")), timeoutMs);
@@ -6635,9 +6815,14 @@ function hasExportableContent(container: HTMLElement): boolean {
 }
 
 async function waitForImages(container: HTMLElement, timeoutMs: number): Promise<void> {
-  const images = Array.from(container.querySelectorAll("img"))
-    .filter((image) => !image.complete);
-  if (!images.length) return;
+  await waitForImagesInElements([container], timeoutMs);
+}
+
+async function waitForImagesInElements(elements: Iterable<Element>, timeoutMs: number): Promise<boolean> {
+  const images = Array.from(new Set(
+    Array.from(elements).flatMap((element) => Array.from(element.querySelectorAll("img")))
+  )).filter((image) => !image.complete);
+  if (!images.length) return false;
   const adaptiveTimeout = Math.min(timeoutMs, Math.max(360, images.length * 260));
   const imagePromise = Promise.all(
     images.map(async (image) => {
@@ -6649,6 +6834,7 @@ async function waitForImages(container: HTMLElement, timeoutMs: number): Promise
   );
 
   await waitForPromiseOrTimeout(imagePromise, adaptiveTimeout);
+  return true;
 }
 
 async function nextAnimationFrame(timeoutMs = FRAME_WAIT_TIMEOUT_MS): Promise<void> {

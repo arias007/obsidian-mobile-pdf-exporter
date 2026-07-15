@@ -68,14 +68,22 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /surface\.mode === "preview" && !hasRenderedContent\(rootEl\)/);
   assert.match(source, /await waitForRenderedContent\(rootEl, 1800\)/);
   assert.match(source, /scrollEl\.dispatchEvent\(new Event\("scroll"\)\)/);
-  assert.match(source, /await waitForPreviewDomStable\(rootEl, 750\)/);
+  assert.match(source, /await waitForPreviewDomStable\(rootEl, 360\)/);
   assert.match(source, /function sortTextFragmentsForDrawing/);
   assert.doesNotMatch(source, /function mergeAdjacentFragments/);
   assert.match(source, /await waitForLiveSurfaceSettled\(rootEl, scrollEl, signal\)/);
   assert.match(source, /function settleLiveSurfaceAtScrollPosition/);
-  assert.match(source, /await settleLiveSurfaceAtScrollPosition\(rootEl, scrollEl, scrollPositions\[index\], signal\)/);
+  assert.match(source, /await settleLiveSurfaceAtScrollPosition\(rootEl, scrollEl, scrollPositions\[index\], signal, previewRenderer\)/);
   assert.match(source, /Math\.abs\(scrollEl\.scrollTop - expectedTop\) <= 1\.5/);
-  assert.match(source, /if \(rootEl\.querySelector\("img"\)\) \{\s*await waitForImages\(rootEl, Math\.min\(IMAGE_WAIT_TIMEOUT_MS, 1100\)\);\s*await settleLiveSurfaceAtScrollPosition/);
+  assert.match(source, /function waitForLivePreviewRendererSettled/);
+  assert.match(source, /if \(previewRenderer\) \{\s*await waitForLivePreviewRendererSettled\(scrollEl, previewRenderer, signal\)/);
+  assert.match(source, /section\.el\?\.isConnected \? 1 : 0/);
+  assert.match(source, /function getUncapturedConnectedPreviewSectionElements/);
+  assert.match(source, /waitForImagesInElements\(connectedSections, 900\)/);
+  assert.match(source, /else if \(rootEl\.querySelector\("img"\)\) \{\s*await waitForImages\(rootEl, Math\.min\(IMAGE_WAIT_TIMEOUT_MS, 1100\)\);\s*await settleLiveSurfaceAtScrollPosition/);
+  assert.match(source, /let appendedPreviewMissingWindows = false/);
+  assert.match(source, /previewRenderer && !appendedPreviewMissingWindows && index === scrollPositions\.length - 1/);
+  assert.match(source, /function waitForImagesInElements/);
   assert.match(source, /const imageSignature = Array\.from\(rootEl\.querySelectorAll\("img"\)\)/);
   assert.match(source, /function waitForLiveSurfaceSettled/);
   assert.match(source, /interface LiveSurfaceCaptureWindow/);
@@ -97,6 +105,11 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /if \(pixelCount > 8_000_000\) return fullBounds/);
   assert.match(source, /nextBreak = moveBreakOutsideTextLines\(pageTop, nextBreak, pageHeightPx, sortedBlocks\)/);
   assert.match(source, /function moveBreakOutsideTextLines/);
+  assert.match(source, /return enforceMaximumPageSpan\(breaks, contentHeightPx, pageHeightPx, sortedBlocks\)/);
+  assert.match(source, /function enforceMaximumPageSpan/);
+  assert.match(source, /while \(target - current > maximumSpan \+ 0\.5\)/);
+  assert.match(source, /let nextBreak = Math\.min\(idealBreak, textSafeBreak\)/);
+  assert.match(source, /isContentEnd \|\| target - current > PAGE_BREAK_MIN_ADVANCE_PX/);
   assert.match(source, /const crossingTextLine = sortedBlocks/);
   assert.match(source, /fragment\.priority === 1/);
   assert.match(source, /const beforeLine = crossingTextLine\.top/);
@@ -105,4 +118,17 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /fragment\.bottom <= options\.pageTopPx \+ 0\.5 \|\| fragment\.top >= options\.pageBottomPx - 0\.5/);
   assert.doesNotMatch(source, /const maxBoxBottom/);
   assert.doesNotMatch(source, /const maxKeepBottom/);
+});
+
+test("remote images fall back to Obsidian requests when canvas export is cross-origin blocked", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /function imageFragmentSliceToPngBytes/);
+  assert.match(source, /catch \(directError\) \{\s*const remoteImage = await loadRemoteImageForCanvas\(image\)/);
+  assert.match(source, /function loadRemoteImageForCanvas/);
+  assert.match(source, /const remoteCanvasImageCache = new WeakMap/);
+  assert.match(source, /return await loadImage\(source, REMOTE_IMAGE_CORS_TIMEOUT_MS, "anonymous"\)/);
+  assert.match(source, /requestUrl\(\{ url: source, method: "GET" \}\),\s*REMOTE_IMAGE_REQUEST_TIMEOUT_MS/);
+  assert.match(source, /if \(crossOrigin\) image\.crossOrigin = crossOrigin/);
+  assert.match(source, /new Blob\(\[bytes\.buffer\], \{ type: contentType\.split\(";", 1\)\[0\] \}\)/);
 });

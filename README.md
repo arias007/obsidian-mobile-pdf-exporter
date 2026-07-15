@@ -66,9 +66,16 @@ The interface language can be set to Auto, Chinese, or English in the plugin set
 
 Markor creates PDF through Android WebView printing, so its preview PDF text is selectable. Obsidian plugins do not expose Android native printing, so this plugin uses the closest available browser-side approach: render the Obsidian preview layout, then write real PDF text and images at matching positions.
 
-The exporter walks the active reading surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. Editing view exports use a complete editor-source text model so CodeMirror virtual scrolling cannot drop off-screen lines or duplicate remounted text. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
+The exporter walks the active reading or editing surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. Editing view stays on the real CodeMirror DOM: the exporter scrolls through virtualized windows, waits for each window to settle, assigns each document band to one window, and deduplicates remounted fragments. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
 
 ## Changelog
+
+### 0.3.63
+
+- Restores editing-view export to the active CodeMirror and plugin DOM instead of rebuilding Markdown as a separate text layout.
+- Materializes the full virtualized editor in overlapping scroll windows, waits for stable DOM state, and assigns each document band to one window to prevent missing lines and repeated ghost text.
+- Reassembles reading view from Obsidian's stable renderer sections instead of transient scroll coordinates, preventing remounted tables, headings, and long quotes from disappearing or being duplicated.
+- Ends pagination at the final visible fragment to remove trailing blank pages, and ignores fully transparent NoteDraw canvases while preserving their actual painted bounds.
 
 ### 0.3.62
 

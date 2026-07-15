@@ -67,6 +67,33 @@ interface LiveMarkdownSurface {
   mode: "source" | "preview";
 }
 
+interface LivePreviewRendererPosition {
+  line?: number;
+  col?: number;
+  offset?: number;
+}
+
+interface LivePreviewRendererSection {
+  rendered?: boolean;
+  height?: number;
+  shown?: boolean;
+  el?: HTMLElement;
+  start?: LivePreviewRendererPosition;
+  end?: LivePreviewRendererPosition;
+}
+
+interface LivePreviewRenderer {
+  previewEl?: HTMLElement;
+  sizerEl?: HTMLElement;
+  sections: LivePreviewRendererSection[];
+  topSpace?: number;
+}
+
+interface CapturedLivePreviewSection {
+  fragments: CapturedSurfaceFragments;
+  documentLeft: number;
+}
+
 interface CapturedSurfaceFragments {
   boxFragments: BoxFragment[];
   textFragments: TextFragment[];
@@ -134,6 +161,10 @@ interface ImageFragment {
 
 interface CanvasFragment {
   element: HTMLCanvasElement;
+  sourceLeftPx: number;
+  sourceTopPx: number;
+  sourceRightPx: number;
+  sourceBottomPx: number;
   left: number;
   top: number;
   right: number;
@@ -750,9 +781,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       } else {
         const liveSurface = this.getActiveMarkdownSurface(file);
         let model: PreviewPdfModel;
-        if (liveSurface?.mode === "source") {
-          model = this.captureMarkdownEditorSourcePdfModel(file, markdown, liveSurface);
-        } else if (liveSurface) {
+        if (liveSurface) {
           model = await this.captureLiveViewPdfModel(file, liveSurface, signal);
         } else {
           rendered = await this.renderMarkdownPreview(file, markdown);
@@ -1015,49 +1044,152 @@ export default class MobilePdfExporterPlugin extends Plugin {
   ): Promise<PreviewPdfModel> {
     throwIfExportCancelled(signal);
     const { rootEl, scrollEl } = surface;
+    if (surface.mode === "preview" && !hasRenderedContent(rootEl)) {
+      await waitForRenderedContent(rootEl, 1800);
+      await waitForPreviewDomStable(rootEl, 900);
+      throwIfExportCancelled(signal);
+    }
     const rootRect = rootEl.getBoundingClientRect();
     const liveWidthPx = Math.max(1, scrollEl.clientWidth || rootRect.width);
     const originalScrollTop = scrollEl.scrollTop;
     const originalScrollLeft = scrollEl.scrollLeft;
     const captured = createEmptySurfaceCapture();
     const seen = createSurfaceCaptureSeenState();
+    const liveCaptureCache = createLiveSurfaceCaptureCache();
     const linkContext = createPdfLinkContext(this.app, file);
+    const previewRenderer = surface.mode === "preview"
+      ? getLivePreviewRenderer(this.app, rootEl)
+      : null;
+    const previewSectionCaptures = new Map<number, CapturedLivePreviewSection>();
+    let capturedPreviewOverlays = false;
     let contentHeightPx = Math.max(1, scrollEl.scrollHeight, rootEl.scrollHeight, rootRect.height);
 
     try {
       const viewportHeight = Math.max(160, scrollEl.clientHeight || rootRect.height || 640);
-      if (surface.mode === "preview") {
-        scrollEl.scrollLeft = 0;
-        const maxScrollTop = Math.max(0, scrollEl.scrollHeight - viewportHeight);
-        for (const scrollTop of buildLivePreviewCaptureScrollPositions(maxScrollTop, viewportHeight)) {
-          scrollEl.scrollTop = scrollTop;
-          refreshLiveDrawingSurface(rootEl);
-          await nextAnimationFrame();
-          await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 700));
-          throwIfExportCancelled(signal);
-          appendSurfaceCapture(
-            captured,
-            captureSurfaceFragments(rootEl, linkContext),
-            scrollEl.scrollTop,
-            scrollEl.scrollLeft,
-            seen
-          );
-          contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
+      const captureStep = Math.max(120, viewportHeight * 0.72);
+      const overlapHeight = Math.max(0, viewportHeight - captureStep);
+      const scrollPositions = surface.mode === "preview"
+        ? previewRenderer
+          ? buildLiveSurfaceCaptureScrollPositions(
+            Math.max(0, scrollEl.scrollHeight - viewportHeight),
+            viewportHeight
+          )
+          : [0]
+        : buildLiveSurfaceCaptureScrollPositions(
+          Math.max(0, scrollEl.scrollHeight - viewportHeight),
+          viewportHeight
+        );
+      const capturedActualTops = new Set<number>();
+      let appendedFinalWindows = false;
+      scrollEl.scrollLeft = 0;
+
+      for (let index = 0; index < scrollPositions.length; index += 1) {
+        throwIfExportCancelled(signal);
+        scrollEl.scrollTop = scrollPositions[index];
+        scrollEl.dispatchEvent(new Event("scroll"));
+        await waitForLiveSurfaceSettled(rootEl, scrollEl, signal);
+        if (surface.mode === "preview" && index > 0) {
+          await waitForPreviewDomStable(rootEl, 750);
         }
-      } else {
         refreshLiveDrawingSurface(rootEl);
         await nextAnimationFrame();
-        await nextAnimationFrame();
-        await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 900));
+        if (surface.mode === "preview") {
+          await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 700));
+        }
         throwIfExportCancelled(signal);
-        appendSurfaceCapture(
-          captured,
-          captureSurfaceFragments(rootEl, linkContext),
-          0,
-          0,
-          seen
-        );
-        contentHeightPx = Math.max(1, measureCapturedSurfaceBottom(captured));
+
+        const actualTop = scrollEl.scrollTop;
+        const actualKey = Math.round(actualTop * 10) / 10;
+        contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
+        const maxScrollTop = Math.max(0, scrollEl.scrollHeight - viewportHeight);
+        if (!capturedActualTops.has(actualKey)) {
+          capturedActualTops.add(actualKey);
+          if (previewRenderer) {
+            captureConnectedLivePreviewSections(
+              rootEl,
+              scrollEl,
+              previewRenderer,
+              linkContext,
+              previewSectionCaptures
+            );
+            if (!capturedPreviewOverlays && actualTop <= 0.5) {
+              capturedPreviewOverlays = true;
+              appendSurfaceCapture(
+                captured,
+                captureLivePreviewRootOverlays(
+                  rootEl,
+                  previewRenderer,
+                  linkContext,
+                  liveCaptureCache,
+                  actualTop,
+                  scrollEl.scrollLeft
+                ),
+                0,
+                0,
+                seen
+              );
+            }
+          } else {
+            const isFirstWindow = actualTop <= 0.5;
+            const isLastWindow = actualTop >= maxScrollTop - 0.5;
+            const captureWholePreview = surface.mode === "preview" && index === 0;
+            const bandTop = captureWholePreview || isFirstWindow ? 0 : actualTop + overlapHeight / 2;
+            const bandBottom = captureWholePreview || isLastWindow
+              ? contentHeightPx + 1
+              : Math.min(contentHeightPx + 1, actualTop + viewportHeight - overlapHeight / 2);
+            appendSurfaceCapture(
+              captured,
+              captureSurfaceFragments(rootEl, linkContext, {
+                scrollTop: actualTop,
+                scrollLeft: scrollEl.scrollLeft,
+                bandTop,
+                bandBottom,
+                cache: liveCaptureCache
+              }),
+              actualTop,
+              scrollEl.scrollLeft,
+              seen
+            );
+          }
+
+          if (surface.mode === "preview" && !previewRenderer) {
+            const gapPositions = buildLivePreviewGapScrollPositions(captured, contentHeightPx, viewportHeight);
+            for (const position of gapPositions) {
+              if (!scrollPositions.includes(position)) scrollPositions.push(position);
+            }
+          }
+        }
+
+        if (surface.mode === "source" && !appendedFinalWindows && index === scrollPositions.length - 1) {
+          appendedFinalWindows = true;
+          const previousMaximum = scrollPositions[scrollPositions.length - 1] ?? 0;
+          const finalPositions = buildLiveSurfaceCaptureScrollPositions(maxScrollTop, viewportHeight)
+            .filter((position) => position > previousMaximum + 0.5);
+          scrollPositions.push(...finalPositions);
+        }
+
+        if (previewRenderer && index === scrollPositions.length - 1) {
+          const missingPositions = buildMissingLivePreviewSectionScrollPositions(
+            previewRenderer,
+            previewSectionCaptures,
+            maxScrollTop,
+            viewportHeight
+          );
+          for (const position of missingPositions) {
+            const positionKey = Math.round(position * 10) / 10;
+            if (!capturedActualTops.has(positionKey) && !scrollPositions.includes(position)) {
+              scrollPositions.push(position);
+            }
+          }
+        }
+      }
+
+      if (previewRenderer) {
+        appendLivePreviewSectionCaptures(captured, previewRenderer, previewSectionCaptures, seen);
+        const missingSections = countMissingLivePreviewSections(previewRenderer, previewSectionCaptures);
+        if (missingSections > 0) {
+          throw new Error(`Live reading view did not render ${missingSections} content section(s) during export.`);
+        }
       }
     } finally {
       scrollEl.scrollTop = originalScrollTop;
@@ -1081,10 +1213,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const surfaceScale = (usableWidthPx / liveWidthPx) * (this.settings.contentScalePercent / 100);
     const transformed = transformSurfaceCapture(captured, horizontalInsetPx, surfaceScale);
     const capturedBottomPx = measureVisibleCapturedSurfaceBottom(transformed);
-    const transformedContentHeight = Math.max(
-      1,
-      capturedBottomPx || (surface.mode === "preview" ? contentHeightPx * surfaceScale : 0)
-    );
+    const transformedContentHeight = Math.max(1, capturedBottomPx);
     const pageBreaks = computePageBreaks(transformedContentHeight, bodyHeightPx, transformed.keepBlocks);
     const rootStyle = getComputedStyle(rootEl);
 
@@ -1103,56 +1232,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       foreground: parseCssColor(rootStyle.color) ?? rgb(0.12, 0.12, 0.12),
       ...transformed,
       contentHeightPx: transformedContentHeight,
-      pageBreaks,
-      title: file.basename,
-      headerText: this.settings.headerText,
-      footerText: this.settings.footerText,
-      exportDate: formatExportDate(new Date())
-    };
-  }
-
-  private captureMarkdownEditorSourcePdfModel(
-    file: TFile,
-    markdown: string,
-    surface: LiveMarkdownSurface
-  ): PreviewPdfModel {
-    const pageSizeMm = getConfiguredPageSizeMm(this.settings);
-    const pageWidthPt = mmToPt(pageSizeMm.width);
-    const pageHeightPt = mmToPt(pageSizeMm.height);
-    const sourceWidthPx = mmToPx(pageSizeMm.width);
-    const pxToPt = pageWidthPt / sourceWidthPx;
-    const pageHeightPx = pageHeightPt / pxToPt;
-    const { bodyTopInsetPx, bodyBottomInsetPx, bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
-    const horizontalInsetPx = mmToPx(this.settings.marginMm);
-    const linkContext = createPdfLinkContext(this.app, file);
-    const rootStyle = getComputedStyle(surface.rootEl);
-    const capture = buildMarkdownEditorSourceCapture(markdown, {
-      ownerDocument: surface.rootEl.ownerDocument,
-      mergeScope: surface.rootEl,
-      linkContext,
-      sourceWidthPx,
-      horizontalInsetPx,
-      contentScale: this.settings.contentScalePercent / 100,
-      style: getMarkdownEditorSourceStyle(surface.rootEl)
-    });
-    const contentHeightPx = Math.max(1, measureVisibleCapturedSurfaceBottom(capture));
-    const pageBreaks = computePageBreaks(contentHeightPx, bodyHeightPx, capture.keepBlocks);
-
-    return {
-      ownerDocument: surface.rootEl.ownerDocument,
-      pageWidthPt,
-      pageHeightPt,
-      sourceWidthPx,
-      pxToPt,
-      pageHeightPx,
-      bodyTopInsetPx,
-      bodyBottomInsetPx,
-      bodyHeightPx,
-      horizontalInsetPx,
-      background: findOpaqueBackgroundColor(surface.rootEl) ?? rgb(1, 1, 1),
-      foreground: parseCssColor(rootStyle.color) ?? rgb(0.12, 0.12, 0.12),
-      ...capture,
-      contentHeightPx,
       pageBreaks,
       title: file.basename,
       headerText: this.settings.headerText,
@@ -2866,6 +2945,177 @@ interface SurfaceCaptureSeenState {
   keepBlocks: Set<string>;
 }
 
+function getLivePreviewRenderer(app: App, rootEl: HTMLElement): LivePreviewRenderer | null {
+  const view = app.workspace.getActiveViewOfType(MarkdownView) as (MarkdownView & {
+    previewMode?: { renderer?: LivePreviewRenderer };
+  }) | null;
+  const renderer = view?.previewMode?.renderer;
+  if (!renderer?.sections?.length) return null;
+
+  const previewEl = renderer.previewEl;
+  if (previewEl && previewEl !== rootEl) return null;
+  if (renderer.sizerEl && !rootEl.contains(renderer.sizerEl)) return null;
+  return renderer;
+}
+
+function getLivePreviewSectionHeight(section: LivePreviewRendererSection): number {
+  const height = Number(section.height);
+  return Number.isFinite(height) ? Math.max(0, height) : 0;
+}
+
+function getLivePreviewTopSpace(renderer: LivePreviewRenderer): number {
+  const topSpace = Number(renderer.topSpace);
+  if (Number.isFinite(topSpace)) return Math.max(0, topSpace);
+
+  let precedingHeight = 0;
+  for (const section of renderer.sections) {
+    const element = section.el;
+    if (element?.isConnected) {
+      return Math.max(0, element.offsetTop - precedingHeight);
+    }
+    precedingHeight += getLivePreviewSectionHeight(section);
+  }
+  return 0;
+}
+
+function captureConnectedLivePreviewSections(
+  rootEl: HTMLElement,
+  scrollEl: HTMLElement,
+  renderer: LivePreviewRenderer,
+  linkContext: PdfLinkContext,
+  captures: Map<number, CapturedLivePreviewSection>
+): void {
+  const rootRect = rootEl.getBoundingClientRect();
+
+  for (let index = 0; index < renderer.sections.length; index += 1) {
+    if (captures.has(index)) continue;
+    const section = renderer.sections[index];
+    const element = section.el;
+    if (
+      section.shown === false ||
+      section.rendered === false ||
+      !element?.isConnected ||
+      !rootEl.contains(element)
+    ) continue;
+
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0.5) continue;
+
+    captures.set(index, {
+      fragments: captureSurfaceFragments(element, linkContext),
+      documentLeft: rect.left - rootRect.left + scrollEl.scrollLeft
+    });
+  }
+}
+
+function buildMissingLivePreviewSectionScrollPositions(
+  renderer: LivePreviewRenderer,
+  captures: Map<number, CapturedLivePreviewSection>,
+  maxScrollTop: number,
+  viewportHeight: number
+): number[] {
+  const positions = new Set<number>();
+  const maximum = Math.max(0, maxScrollTop);
+  let sectionTop = getLivePreviewTopSpace(renderer);
+
+  for (let index = 0; index < renderer.sections.length; index += 1) {
+    const section = renderer.sections[index];
+    const sectionHeight = getLivePreviewSectionHeight(section);
+    if (section.shown !== false && sectionHeight > 0.5 && !captures.has(index)) {
+      const target = clampNumber(sectionTop - viewportHeight * 0.18, 0, maximum, 0);
+      positions.add(Math.round(target));
+    }
+    sectionTop += sectionHeight;
+  }
+
+  return [...positions].sort((left, right) => left - right);
+}
+
+function countMissingLivePreviewSections(
+  renderer: LivePreviewRenderer,
+  captures: Map<number, CapturedLivePreviewSection>
+): number {
+  return renderer.sections.filter((section, index) => (
+    section.shown !== false &&
+    getLivePreviewSectionHeight(section) > 0.5 &&
+    !captures.has(index)
+  )).length;
+}
+
+function appendLivePreviewSectionCaptures(
+  target: CapturedSurfaceFragments,
+  renderer: LivePreviewRenderer,
+  captures: Map<number, CapturedLivePreviewSection>,
+  seen: SurfaceCaptureSeenState
+): void {
+  let sectionTop = getLivePreviewTopSpace(renderer);
+
+  for (let index = 0; index < renderer.sections.length; index += 1) {
+    const section = renderer.sections[index];
+    const capture = captures.get(index);
+    if (capture) {
+      appendSurfaceCapture(
+        target,
+        capture.fragments,
+        sectionTop,
+        capture.documentLeft,
+        seen
+      );
+    }
+    sectionTop += getLivePreviewSectionHeight(section);
+  }
+}
+
+function captureLivePreviewRootOverlays(
+  rootEl: HTMLElement,
+  renderer: LivePreviewRenderer,
+  linkContext: PdfLinkContext,
+  liveCache: LiveSurfaceCaptureCache,
+  scrollTop: number,
+  scrollLeft: number
+): CapturedSurfaceFragments {
+  const captured = createEmptySurfaceCapture();
+  const seen = createSurfaceCaptureSeenState();
+  const rootRect = rootEl.getBoundingClientRect();
+  const sizerEl = renderer.sizerEl;
+
+  for (const child of Array.from(rootEl.children)) {
+    if (!(child instanceof HTMLElement)) continue;
+    if (child === sizerEl || sizerEl?.contains(child)) continue;
+
+    const rect = child.getBoundingClientRect();
+    appendSurfaceCapture(
+      captured,
+      captureSurfaceFragments(child, linkContext),
+      rect.top - rootRect.top + scrollTop,
+      rect.left - rootRect.left + scrollLeft,
+      seen
+    );
+  }
+
+  const isOutsideSizer = (element: Element): boolean => !sizerEl?.contains(element);
+  const imageFragments = captureImageFragments(rootEl).filter((fragment) => isOutsideSizer(fragment.element));
+  const canvasFragments = captureCanvasFragments(rootEl, liveCache)
+    .filter((fragment) => isOutsideSizer(fragment.element));
+  const svgFragments = captureSvgFragments(rootEl).filter((fragment) => isOutsideSizer(fragment.element));
+  const directMediaCapture = createEmptySurfaceCapture();
+  directMediaCapture.imageFragments = imageFragments;
+  directMediaCapture.canvasFragments = canvasFragments;
+  directMediaCapture.svgFragments = svgFragments;
+  directMediaCapture.keepBlocks = [
+    ...imageFragments.map((fragment) => ({ ...fragment, priority: 6 })),
+    ...canvasFragments
+      .filter((fragment) => !fragment.element.classList.contains("mobile-pdf-exporter-note-doodle-canvas"))
+      .map((fragment) => ({ ...fragment, priority: 4 })),
+    ...svgFragments.map((fragment) => ({
+      ...fragment,
+      priority: isLargeOrExcalidrawSvg(fragment.element) ? 6 : 3
+    }))
+  ];
+  appendSurfaceCapture(captured, directMediaCapture, scrollTop, scrollLeft, seen);
+  return captured;
+}
+
 function createEmptySurfaceCapture(): CapturedSurfaceFragments {
   return {
     boxFragments: [],
@@ -2892,231 +3142,41 @@ function createSurfaceCaptureSeenState(): SurfaceCaptureSeenState {
   };
 }
 
-interface MarkdownEditorSourceStyle {
-  fontSizePx: number;
-  lineHeightPx: number;
-  fontFamily: string;
-  fontWeight: string;
-  fontStyle: string;
-  color: Color;
-  linkColor: Color;
+interface CachedLiveTextCapture {
+  signature: string;
+  documentFragments: TextFragment[];
 }
 
-interface MarkdownEditorSourceCaptureOptions {
-  ownerDocument: Document;
-  mergeScope: Element;
-  linkContext: PdfLinkContext;
-  sourceWidthPx: number;
-  horizontalInsetPx: number;
-  contentScale: number;
-  style: MarkdownEditorSourceStyle;
+interface LiveSurfaceCaptureCache {
+  textNodes: WeakMap<Text, CachedLiveTextCapture>;
+  canvasBounds: WeakMap<HTMLCanvasElement, CanvasPixelBounds | null>;
 }
 
-function getMarkdownEditorSourceStyle(rootEl: HTMLElement): MarkdownEditorSourceStyle {
-  const sample = rootEl.querySelector<HTMLElement>(".cm-line, .cm-content") ?? rootEl;
-  const sampleStyle = getComputedStyle(sample);
-  const rootStyle = getComputedStyle(rootEl);
-  const fontSizePx = clampNumber(parseFloat(sampleStyle.fontSize), 8, 28, 15);
-  const parsedLineHeight = parseFloat(sampleStyle.lineHeight);
-  const lineHeightPx = Number.isFinite(parsedLineHeight)
-    ? clampNumber(parsedLineHeight, fontSizePx * 1.1, fontSizePx * 2.4, fontSizePx * 1.45)
-    : fontSizePx * 1.45;
+interface LiveSurfaceCaptureWindow {
+  scrollTop: number;
+  scrollLeft: number;
+  bandTop: number;
+  bandBottom: number;
+  cache: LiveSurfaceCaptureCache;
+}
+
+function createLiveSurfaceCaptureCache(): LiveSurfaceCaptureCache {
   return {
-    fontSizePx,
-    lineHeightPx,
-    fontFamily: sampleStyle.fontFamily || rootStyle.fontFamily || "sans-serif",
-    fontWeight: sampleStyle.fontWeight || "400",
-    fontStyle: sampleStyle.fontStyle || "normal",
-    color: parseCssColor(sampleStyle.color) ?? parseCssColor(rootStyle.color) ?? rgb(0.12, 0.12, 0.12),
-    linkColor: parseCssColor(rootStyle.getPropertyValue("--link-color")) ?? rgb(0.08, 0.36, 0.72)
+    textNodes: new WeakMap(),
+    canvasBounds: new WeakMap()
   };
 }
 
-function buildMarkdownEditorSourceCapture(
-  markdown: string,
-  options: MarkdownEditorSourceCaptureOptions
+function captureSurfaceFragments(
+  rootEl: HTMLElement,
+  linkContext: PdfLinkContext,
+  liveWindow?: LiveSurfaceCaptureWindow
 ): CapturedSurfaceFragments {
-  const capture = createEmptySurfaceCapture();
-  const scale = clampNumber(options.contentScale, 0.5, 2, 1);
-  const fontSizePx = options.style.fontSizePx * scale;
-  const lineHeightPx = Math.max(fontSizePx * 1.28, options.style.lineHeightPx * scale);
-  const leftEdge = options.horizontalInsetPx + 10;
-  const rightEdge = Math.max(leftEdge + 48, options.sourceWidthPx - options.horizontalInsetPx - 10);
-  const lines = markdown.replace(/\r\n?/gu, "\n").split("\n");
-  let y = 14 * scale;
-  let inCodeFence = false;
-
-  for (const rawLine of lines) {
-    const untabbed = rawLine.replace(/\t/gu, "    ");
-    const trimmedRight = untabbed.trimEnd();
-    const fence = trimmedRight.trimStart().match(/^```/u);
-    const lineIsCode = inCodeFence || Boolean(fence) || /^ {4,}\S/u.test(trimmedRight);
-    if (fence) inCodeFence = !inCodeFence;
-
-    if (!trimmedRight.trim()) {
-      y += lineHeightPx * 0.58;
-      continue;
-    }
-
-    const leadingSpaces = untabbed.match(/^\s*/u)?.[0].length ?? 0;
-    const indentPx = Math.min(72 * scale, leadingSpaces * fontSizePx * 0.34);
-    const quote = /^\s*>/u.test(trimmedRight);
-    const taskMatch = trimmedRight.match(/^(\s*[-*+]\s+)\[([^\]])\]\s+(.*)$/u);
-    const checkbox = taskMatch
-      ? { checked: taskMatch[2].trim().toLowerCase() === "x", status: taskMatch[2] }
-      : null;
-    const displayText = taskMatch ? `${taskMatch[1]}${taskMatch[3]}` : trimmedRight;
-    const textLeft = leftEdge + indentPx + (checkbox ? fontSizePx * 1.35 : 0);
-    const textMaxWidth = Math.max(32, rightEdge - textLeft);
-    const wrappedLines = wrapEditorSourceText(displayText, textMaxWidth, fontSizePx);
-    const hrefs = extractEditorSourceHrefs(trimmedRight, options.linkContext);
-    const lineTop = y;
-
-    for (let index = 0; index < wrappedLines.length; index += 1) {
-      const wrappedText = wrappedLines[index];
-      const width = Math.min(textMaxWidth, Math.max(6, estimateEditorSourceTextWidth(wrappedText, fontSizePx)));
-      const lineBottom = y + lineHeightPx;
-      if (quote || lineIsCode) {
-        capture.boxFragments.push({
-          left: Math.max(options.horizontalInsetPx, leftEdge + indentPx - 8 * scale),
-          top: y - 2 * scale,
-          right: rightEdge,
-          bottom: lineBottom + 2 * scale,
-          background: lineIsCode ? "rgba(127, 127, 127, 0.08)" : "rgba(127, 127, 127, 0.055)",
-          borderTop: null,
-          borderRight: null,
-          borderBottom: null,
-          borderLeft: quote ? { color: "rgba(127, 127, 127, 0.55)", widthPx: Math.max(2, 3 * scale) } : null,
-          borderRadiusPx: lineIsCode ? 4 * scale : 0,
-          keepTogether: false
-        });
-      }
-
-      if (checkbox && index === 0) {
-        const size = Math.max(9, fontSizePx * 0.82);
-        const checkLeft = Math.max(options.horizontalInsetPx, textLeft - fontSizePx * 1.1);
-        const checkTop = y + Math.max(1, (lineHeightPx - size) * 0.5);
-        capture.decorationFragments.push({
-          kind: "checkbox",
-          left: checkLeft,
-          top: checkTop,
-          right: checkLeft + size,
-          bottom: checkTop + size,
-          color: rgb(0.12, 0.12, 0.12),
-          border: rgb(0.35, 0.35, 0.35),
-          background: checkbox.checked ? rgb(0.2, 0.42, 0.85) : rgb(1, 1, 1),
-          borderWidthPx: 1.2,
-          borderRadiusPx: 3,
-          checked: checkbox.checked,
-          text: checkbox.status,
-          fontSizePx
-        });
-      }
-
-      const href = hrefs[0] ?? null;
-      capture.textFragments.push({
-        text: wrappedText,
-        left: textLeft,
-        top: y,
-        right: textLeft + width,
-        bottom: lineBottom,
-        fontSizePx,
-        fontFamily: lineIsCode ? "monospace" : options.style.fontFamily,
-        fontWeight: options.style.fontWeight,
-        fontStyle: options.style.fontStyle,
-        color: href ? options.style.linkColor : options.style.color,
-        underline: Boolean(href),
-        lineThrough: false,
-        href,
-        mergeScope: options.mergeScope
-      });
-      if (href) {
-        capture.linkFragments.push({
-          href,
-          left: textLeft,
-          top: y,
-          right: textLeft + width,
-          bottom: lineBottom
-        });
-      }
-      capture.keepBlocks.push({
-        left: textLeft,
-        top: y,
-        right: textLeft + width,
-        bottom: lineBottom,
-        priority: 1
-      });
-      y = lineBottom;
-    }
-
-    if (quote || lineIsCode) {
-      capture.keepBlocks.push({
-        left: Math.max(options.horizontalInsetPx, leftEdge + indentPx - 8 * scale),
-        top: lineTop,
-        right: rightEdge,
-        bottom: y,
-        priority: 2
-      });
-    }
-    y += Math.max(2, lineHeightPx * 0.14);
-  }
-
-  return capture;
-}
-
-function extractEditorSourceHrefs(text: string, context: PdfLinkContext): string[] {
-  const hrefs: string[] = [];
-  const addHref = (href: string | null): void => {
-    if (href && !hrefs.includes(href)) hrefs.push(href);
-  };
-
-  text.replace(/!?\[[^\]]*\]\(([^)]+)\)/gu, (match, target: string) => {
-    if (!match.startsWith("!")) addHref(normalizePdfHref(target) ?? resolveInternalPdfHref(target, context));
-    return match;
-  });
-  for (const match of text.matchAll(/\b(?:https?:\/\/|mailto:|tel:|obsidian:)[^\s"'<>）)]+/giu)) {
-    addHref(normalizePdfHref(match[0]));
-  }
-  for (const match of text.matchAll(/\[\[([^\]]+)\]\]/gu)) {
-    addHref(resolveInternalPdfHref(match[1], context));
-  }
-  return hrefs;
-}
-
-function wrapEditorSourceText(text: string, maxWidthPx: number, fontSizePx: number): string[] {
-  const lines: string[] = [];
-  let current = "";
-  let width = 0;
-  for (const char of text) {
-    const charWidth = estimateEditorSourceTextWidth(char, fontSizePx);
-    if (current && width + charWidth > maxWidthPx) {
-      lines.push(current.trimEnd());
-      current = "";
-      width = 0;
-    }
-    current += char;
-    width += charWidth;
-  }
-  if (current.trim()) lines.push(current.trimEnd());
-  return lines.length ? lines : [text];
-}
-
-function estimateEditorSourceTextWidth(text: string, fontSizePx: number): number {
-  let width = 0;
-  for (const char of text) {
-    if (/\s/u.test(char)) width += fontSizePx * 0.33;
-    else if (/[\u2E80-\u9FFF\uF900-\uFAFF]/u.test(char)) width += fontSizePx;
-    else width += fontSizePx * 0.56;
-  }
-  return width;
-}
-
-function captureSurfaceFragments(rootEl: HTMLElement, linkContext: PdfLinkContext): CapturedSurfaceFragments {
   return withExportableElementCache(() => {
     const boxFragments = captureBoxFragments(rootEl);
-    const textFragments = captureTextFragments(rootEl, linkContext);
+    const textFragments = captureTextFragments(rootEl, linkContext, liveWindow);
     const imageFragments = captureImageFragments(rootEl);
-    const canvasFragments = captureCanvasFragments(rootEl);
+    const canvasFragments = captureCanvasFragments(rootEl, liveWindow?.cache);
     const linkFragments = captureLinkFragments(rootEl, linkContext);
     const svgFragments = captureSvgFragments(rootEl);
     const decorationFragments = captureDecorationFragments(rootEl);
@@ -3129,7 +3189,7 @@ function captureSurfaceFragments(rootEl: HTMLElement, linkContext: PdfLinkContex
       svgFragments,
       decorationFragments
     );
-    return {
+    const capture = {
       boxFragments,
       textFragments,
       imageFragments,
@@ -3139,7 +3199,36 @@ function captureSurfaceFragments(rootEl: HTMLElement, linkContext: PdfLinkContex
       decorationFragments,
       keepBlocks
     };
+    return liveWindow ? filterSurfaceCaptureToBand(capture, liveWindow) : capture;
   });
+}
+
+function filterSurfaceCaptureToBand(
+  capture: CapturedSurfaceFragments,
+  liveWindow: LiveSurfaceCaptureWindow
+): CapturedSurfaceFragments {
+  const bandHeight = Math.max(1, liveWindow.bandBottom - liveWindow.bandTop);
+  const ownsRect = (fragment: { top: number; bottom: number }): boolean => {
+    const documentTop = fragment.top + liveWindow.scrollTop;
+    const documentBottom = fragment.bottom + liveWindow.scrollTop;
+    const center = (documentTop + documentBottom) / 2;
+    const tallFragment = documentBottom - documentTop >= bandHeight * 0.9;
+    return (
+      (center >= liveWindow.bandTop - 0.5 && center < liveWindow.bandBottom - 0.5) ||
+      (tallFragment && documentBottom > liveWindow.bandTop && documentTop < liveWindow.bandBottom)
+    );
+  };
+
+  return {
+    boxFragments: capture.boxFragments.filter(ownsRect),
+    textFragments: capture.textFragments.filter(ownsRect),
+    imageFragments: capture.imageFragments.filter(ownsRect),
+    canvasFragments: capture.canvasFragments.filter(ownsRect),
+    linkFragments: capture.linkFragments.filter(ownsRect),
+    svgFragments: capture.svgFragments.filter(ownsRect),
+    decorationFragments: capture.decorationFragments.filter(ownsRect),
+    keepBlocks: capture.keepBlocks.filter(ownsRect)
+  };
 }
 
 function appendSurfaceCapture(
@@ -3200,7 +3289,11 @@ function appendSurfaceCapture(
     geometryKey(fragment),
     fragment.element.className,
     fragment.element.width,
-    fragment.element.height
+    fragment.element.height,
+    fragment.sourceLeftPx,
+    fragment.sourceTopPx,
+    fragment.sourceRightPx,
+    fragment.sourceBottomPx
   ].join("|"));
 
   const links = snapshot.linkFragments.map(offsetRect);
@@ -3291,7 +3384,7 @@ function transformSurfaceCapture(
     borderLeft: transformBorder(fragment.borderLeft),
     borderRadiusPx: fragment.borderRadiusPx * scale
   }));
-  const textFragments = mergeAdjacentFragments(capture.textFragments.map((fragment) => ({
+  const textFragments = sortTextFragmentsForDrawing(capture.textFragments.map((fragment) => ({
     ...transformRect(fragment),
     fontSizePx: fragment.fontSizePx * scale
   })));
@@ -3343,20 +3436,87 @@ function measureVisibleCapturedSurfaceBottom(capture: CapturedSurfaceFragments):
   );
 }
 
-function buildLivePreviewCaptureScrollPositions(maxScrollTop: number, viewportHeight: number): number[] {
+function buildLiveSurfaceCaptureScrollPositions(maxScrollTop: number, viewportHeight: number): number[] {
   const maximum = Math.max(0, Math.round(maxScrollTop));
   if (maximum <= 0) return [0];
 
   const positions = new Set<number>([0, maximum]);
   const step = Math.max(120, viewportHeight * 0.72);
-  const maxSteps = 96;
-  for (let index = 1; index < maxSteps; index += 1) {
+  for (let index = 1; ; index += 1) {
     const next = Math.min(maximum, Math.round(index * step));
     positions.add(next);
     if (next >= maximum) break;
   }
 
   return [...positions].sort((a, b) => a - b);
+}
+
+function buildLivePreviewGapScrollPositions(
+  capture: CapturedSurfaceFragments,
+  contentHeight: number,
+  viewportHeight: number
+): number[] {
+  const visibleRanges = [
+    ...capture.textFragments,
+    ...capture.imageFragments,
+    ...capture.canvasFragments,
+    ...capture.svgFragments,
+    ...capture.decorationFragments
+  ]
+    .filter((fragment) => fragment.bottom > fragment.top + 0.5)
+    .map((fragment) => ({ top: Math.max(0, fragment.top), bottom: Math.max(0, fragment.bottom) }))
+    .sort((left, right) => left.top - right.top || left.bottom - right.bottom);
+  if (!visibleRanges.length) return buildLiveSurfaceCaptureScrollPositions(
+    Math.max(0, contentHeight - viewportHeight),
+    viewportHeight
+  );
+
+  const gapThreshold = Math.max(160, viewportHeight * 0.42);
+  const maximum = Math.max(0, contentHeight - viewportHeight);
+  const positions = new Set<number>();
+  let coveredBottom = 0;
+
+  const addGap = (gapTop: number, gapBottom: number): void => {
+    if (gapBottom - gapTop < gapThreshold) return;
+    const centeredTop = (gapTop + gapBottom - viewportHeight) / 2;
+    positions.add(Math.round(clampNumber(centeredTop, 0, maximum, 0)));
+  };
+
+  for (const range of visibleRanges) {
+    if (range.top > coveredBottom) addGap(coveredBottom, range.top);
+    coveredBottom = Math.max(coveredBottom, range.bottom);
+  }
+  if (contentHeight > coveredBottom) addGap(coveredBottom, contentHeight);
+
+  return [...positions].sort((left, right) => left - right);
+}
+
+async function waitForLiveSurfaceSettled(
+  rootEl: HTMLElement,
+  scrollEl: HTMLElement,
+  signal?: AbortSignal
+): Promise<void> {
+  let previousSignature = "";
+  let stableFrames = 0;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    throwIfExportCancelled(signal);
+    await nextAnimationFrame();
+    const content = rootEl.querySelector<HTMLElement>(".cm-content, .markdown-preview-sizer, .markdown-preview-section");
+    const signature = [
+      Math.round(scrollEl.scrollTop * 10) / 10,
+      Math.round(scrollEl.scrollHeight),
+      content?.childElementCount ?? rootEl.childElementCount,
+      rootEl.querySelectorAll(".cm-line, .markdown-preview-section").length
+    ].join("|");
+    if (signature === previousSignature) {
+      stableFrames += 1;
+      if (stableFrames >= 2) return;
+    } else {
+      previousSignature = signature;
+      stableFrames = 0;
+    }
+  }
 }
 
 function refreshLiveDrawingSurface(rootEl: HTMLElement): void {
@@ -3391,7 +3551,11 @@ function findOpaqueBackgroundColor(element: HTMLElement): Color | null {
   return null;
 }
 
-function captureTextFragments(pageEl: HTMLElement, linkContext?: PdfLinkContext): TextFragment[] {
+function captureTextFragments(
+  pageEl: HTMLElement,
+  linkContext?: PdfLinkContext,
+  liveWindow?: LiveSurfaceCaptureWindow
+): TextFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
   const fragments: TextFragment[] = [];
   const walker = pageEl.ownerDocument.createTreeWalker(pageEl, NodeFilter.SHOW_TEXT, {
@@ -3408,11 +3572,49 @@ function captureTextFragments(pageEl: HTMLElement, linkContext?: PdfLinkContext)
   while (node) {
     const textNode = node as Text;
     const parent = textNode.parentElement;
-    if (parent) fragments.push(...measureTextNode(textNode, parent, pageRect, linkContext));
+    if (parent) {
+      if (!liveWindow) {
+        fragments.push(...measureTextNode(textNode, parent, pageRect, linkContext));
+      } else {
+        const parentRect = parent.getBoundingClientRect();
+        const signature = [
+          textNode.nodeValue ?? "",
+          Math.round((parentRect.left + liveWindow.scrollLeft) * 10) / 10,
+          Math.round((parentRect.top + liveWindow.scrollTop) * 10) / 10,
+          Math.round(parentRect.width * 10) / 10,
+          Math.round(parentRect.height * 10) / 10,
+          parent.className
+        ].join("|");
+        let cached = liveWindow.cache.textNodes.get(textNode);
+        if (!cached || cached.signature !== signature) {
+          const documentFragments = measureTextNode(textNode, parent, pageRect, linkContext).map((fragment) => ({
+            ...fragment,
+            left: fragment.left + liveWindow.scrollLeft,
+            right: fragment.right + liveWindow.scrollLeft,
+            top: fragment.top + liveWindow.scrollTop,
+            bottom: fragment.bottom + liveWindow.scrollTop
+          }));
+          cached = { signature, documentFragments };
+          liveWindow.cache.textNodes.set(textNode, cached);
+        }
+
+        for (const fragment of cached.documentFragments) {
+          const center = (fragment.top + fragment.bottom) / 2;
+          if (center < liveWindow.bandTop - 0.5 || center >= liveWindow.bandBottom - 0.5) continue;
+          fragments.push({
+            ...fragment,
+            left: fragment.left - liveWindow.scrollLeft,
+            right: fragment.right - liveWindow.scrollLeft,
+            top: fragment.top - liveWindow.scrollTop,
+            bottom: fragment.bottom - liveWindow.scrollTop
+          });
+        }
+      }
+    }
     node = walker.nextNode();
   }
 
-  return mergeAdjacentFragments(fragments);
+  return sortTextFragmentsForDrawing(fragments);
 }
 
 function captureImageFragments(pageEl: HTMLElement): ImageFragment[] {
@@ -3432,21 +3634,92 @@ function captureImageFragments(pageEl: HTMLElement): ImageFragment[] {
     .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
 }
 
-function captureCanvasFragments(pageEl: HTMLElement): CanvasFragment[] {
+interface CanvasPixelBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function captureCanvasFragments(
+  pageEl: HTMLElement,
+  liveCache?: LiveSurfaceCaptureCache
+): CanvasFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
   return Array.from(pageEl.querySelectorAll("canvas"))
     .filter((canvas) => isExportableElement(canvas) && canvas.width > 0 && canvas.height > 0)
     .map((canvas) => {
       const rect = canvas.getBoundingClientRect();
+      let pixelBounds = liveCache?.canvasBounds.get(canvas);
+      if (pixelBounds === undefined) {
+        pixelBounds = getCanvasVisiblePixelBounds(canvas);
+        liveCache?.canvasBounds.set(canvas, pixelBounds);
+      }
+      if (!pixelBounds) return null;
+
+      const scaleX = rect.width / Math.max(1, canvas.width);
+      const scaleY = rect.height / Math.max(1, canvas.height);
       return {
         element: canvas,
-        left: rect.left - pageRect.left,
-        top: rect.top - pageRect.top,
-        right: rect.right - pageRect.left,
-        bottom: rect.bottom - pageRect.top
+        sourceLeftPx: pixelBounds.left,
+        sourceTopPx: pixelBounds.top,
+        sourceRightPx: pixelBounds.right,
+        sourceBottomPx: pixelBounds.bottom,
+        left: rect.left - pageRect.left + pixelBounds.left * scaleX,
+        top: rect.top - pageRect.top + pixelBounds.top * scaleY,
+        right: rect.left - pageRect.left + pixelBounds.right * scaleX,
+        bottom: rect.top - pageRect.top + pixelBounds.bottom * scaleY
       };
     })
-    .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
+    .filter((fragment): fragment is CanvasFragment => Boolean(
+      fragment && fragment.right > fragment.left && fragment.bottom > fragment.top
+    ));
+}
+
+function getCanvasVisiblePixelBounds(canvas: HTMLCanvasElement): CanvasPixelBounds | null {
+  const fullBounds = { left: 0, top: 0, right: canvas.width, bottom: canvas.height };
+  const drawingSurface = canvas.closest<HTMLElement>(".notedraw-shell, .note-doodle-shell");
+  if (drawingSurface) {
+    const kind = drawingSurface.classList.contains("notedraw-shell") ? "notedraw" : "note-doodle";
+    const controller = getLiveDrawingController(drawingSurface, kind);
+    const drawingData = kind === "notedraw" ? controller?.drawingData : controller?.doodleData;
+    const strokes = (drawingData as { strokes?: unknown[] } | null | undefined)?.strokes;
+    if (Array.isArray(strokes) && strokes.length === 0) return null;
+  }
+
+  const pixelCount = canvas.width * canvas.height;
+  if (pixelCount > 8_000_000) return fullBounds;
+
+  try {
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return fullBounds;
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let minX = canvas.width;
+    let minY = canvas.height;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let y = 0; y < canvas.height; y += 1) {
+      for (let x = 0; x < canvas.width; x += 1) {
+        if (pixels[(y * canvas.width + x) * 4 + 3] <= 1) continue;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+
+    if (maxX < minX || maxY < minY) return null;
+    const padding = 2;
+    return {
+      left: Math.max(0, minX - padding),
+      top: Math.max(0, minY - padding),
+      right: Math.min(canvas.width, maxX + padding + 1),
+      bottom: Math.min(canvas.height, maxY + padding + 1)
+    };
+  } catch {
+    return fullBounds;
+  }
 }
 
 function captureLinkFragments(pageEl: HTMLElement, linkContext?: PdfLinkContext): LinkFragment[] {
@@ -4212,45 +4485,13 @@ function compactSeparatorSpacing(text: string): string {
     .trim();
 }
 
-function mergeAdjacentFragments(fragments: TextFragment[]): TextFragment[] {
-  const sorted = [...fragments].sort((a, b) => (Math.abs(a.top - b.top) > 2 ? a.top - b.top : a.left - b.left));
-  const merged: TextFragment[] = [];
-
-  for (const fragment of sorted) {
-    const previous = merged[merged.length - 1];
-    const sameLine =
-      previous &&
-      Math.abs(previous.top - fragment.top) <= Math.max(2.5, fragment.fontSizePx * 0.35) &&
-      fragment.left >= previous.right - fragment.fontSizePx * 0.5 &&
-      previous.underline === fragment.underline &&
-      previous.lineThrough === fragment.lineThrough &&
-      previous.href === fragment.href &&
-      previous.mergeScope === fragment.mergeScope &&
-      previous.fontFamily === fragment.fontFamily &&
-      previous.fontWeight === fragment.fontWeight &&
-      previous.fontStyle === fragment.fontStyle &&
-      colorsEqual(previous.color, fragment.color);
-
-    if (!sameLine) {
-      merged.push({ ...fragment });
-      continue;
-    }
-
-    const gap = fragment.left - previous.right;
-    const separator =
-      gap > fragment.fontSizePx * 0.3 && !previous.text.endsWith(" ") && !fragment.text.startsWith(" ")
-        ? " "
-        : "";
-    previous.text = normalizeLineText(`${previous.text}${separator}${fragment.text}`);
-    previous.right = Math.max(previous.right, fragment.right);
-    previous.bottom = Math.max(previous.bottom, fragment.bottom);
-  }
-
-  return merged;
-}
-
-function colorsEqual(left: Color, right: Color): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+function sortTextFragmentsForDrawing(fragments: TextFragment[]): TextFragment[] {
+  return [...fragments].sort((left, right) => {
+    const lineTolerance = Math.max(3, Math.min(left.fontSizePx, right.fontSizePx) * 0.45);
+    return Math.abs(left.top - right.top) <= lineTolerance
+      ? left.left - right.left
+      : left.top - right.top;
+  });
 }
 
 function createPdfLinkContext(app: App, file: TFile): PdfLinkContext {
@@ -5205,14 +5446,19 @@ function drawCanvasBitmapLayer(
 
     const cssWidth = Math.max(1, canvasFragment.right - canvasFragment.left);
     const cssHeight = Math.max(1, canvasFragment.bottom - canvasFragment.top);
-    const ratioX = canvasFragment.element.width / cssWidth;
-    const ratioY = canvasFragment.element.height / cssHeight;
+    const sourceFragmentWidth = Math.max(1, canvasFragment.sourceRightPx - canvasFragment.sourceLeftPx);
+    const sourceFragmentHeight = Math.max(1, canvasFragment.sourceBottomPx - canvasFragment.sourceTopPx);
+    const ratioX = sourceFragmentWidth / cssWidth;
+    const ratioY = sourceFragmentHeight / cssHeight;
     const cssSliceTop = visibleTop - canvasFragment.top;
     const cssSliceHeight = visibleBottom - visibleTop;
-    const sourceX = 0;
-    const sourceY = Math.max(0, Math.floor(cssSliceTop * ratioY));
-    const sourceWidth = Math.max(1, Math.min(canvasFragment.element.width, Math.ceil(cssWidth * ratioX)));
-    const sourceHeight = Math.max(1, Math.min(canvasFragment.element.height - sourceY, Math.ceil(cssSliceHeight * ratioY)));
+    const sourceX = canvasFragment.sourceLeftPx;
+    const sourceY = Math.max(canvasFragment.sourceTopPx, Math.floor(canvasFragment.sourceTopPx + cssSliceTop * ratioY));
+    const sourceWidth = Math.max(1, Math.min(sourceFragmentWidth, Math.ceil(cssWidth * ratioX)));
+    const sourceHeight = Math.max(
+      1,
+      Math.min(canvasFragment.sourceBottomPx - sourceY, Math.ceil(cssSliceHeight * ratioY))
+    );
     const x = clampNumber(canvasFragment.left, 0, options.sourceWidthPx - 4, 0);
     const y = Math.max(0, visibleTop - options.pageTopPx);
     const width = Math.max(1, Math.min(cssWidth, options.sourceWidthPx - x));

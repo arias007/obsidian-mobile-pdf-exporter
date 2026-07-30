@@ -3026,6 +3026,90 @@ function getPageTextFragments(model: PreviewPdfModel, pageIndex: number): TextFr
   return model.textFragments.filter((fragment) => fragment.bottom > top && fragment.top < bottom && fragment.text.trim());
 }
 
+interface OfficeTextLine {
+  fragments: TextFragment[];
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+interface OfficeTextBoxLayout {
+  xPt: number;
+  yPt: number;
+  widthPt: number;
+  heightPt: number;
+}
+
+function getPageOfficeTextLines(model: PreviewPdfModel, pageIndex: number): OfficeTextLine[] {
+  const fragments = getPageTextFragments(model, pageIndex)
+    .sort((left, right) => left.top - right.top || left.left - right.left);
+  const lines: OfficeTextLine[] = [];
+
+  for (const fragment of fragments) {
+    const matchingLine = [...lines].reverse().find((line) => {
+      const lineTolerance = Math.max(1.5, Math.min(fragment.fontSizePx, line.bottom - line.top) * 0.24);
+      return Math.abs(fragment.top - line.top) <= lineTolerance;
+    });
+
+    if (matchingLine) {
+      matchingLine.fragments.push(fragment);
+      matchingLine.left = Math.min(matchingLine.left, fragment.left);
+      matchingLine.top = Math.min(matchingLine.top, fragment.top);
+      matchingLine.right = Math.max(matchingLine.right, fragment.right);
+      matchingLine.bottom = Math.max(matchingLine.bottom, fragment.bottom);
+      continue;
+    }
+
+    lines.push({
+      fragments: [fragment],
+      left: fragment.left,
+      top: fragment.top,
+      right: fragment.right,
+      bottom: fragment.bottom
+    });
+  }
+
+  return lines
+    .map((line) => ({
+      ...line,
+      fragments: line.fragments.sort((left, right) => left.left - right.left)
+    }))
+    .sort((left, right) => left.top - right.top || left.left - right.left);
+}
+
+function getPptTextBoxLayout(model: PreviewPdfModel, pageIndex: number, line: OfficeTextLine): OfficeTextBoxLayout {
+  const pageTop = model.pageBreaks[pageIndex];
+  return {
+    xPt: Math.max(0, line.left * model.pxToPt),
+    yPt: Math.max(0, (line.top - pageTop + model.bodyTopInsetPx) * model.pxToPt),
+    widthPt: Math.max(4, (line.right - line.left) * model.pxToPt + 2),
+    heightPt: Math.max(5, (line.bottom - line.top) * model.pxToPt * 1.12)
+  };
+}
+
+function getWordTextBoxLayout(model: PreviewPdfModel, pageIndex: number, line: OfficeTextLine): OfficeTextBoxLayout {
+  const layout = getPptTextBoxLayout(model, pageIndex, line);
+  const largestFont = Math.max(...line.fragments.map((fragment) => fragment.fontSizePx));
+  return {
+    ...layout,
+    yPt: layout.yPt + largestFont * model.pxToPt * 0.14,
+    heightPt: layout.heightPt + largestFont * model.pxToPt * 0.14
+  };
+}
+
+function getOfficeLineRunText(line: OfficeTextLine, fragmentIndex: number): string {
+  const fragment = line.fragments[fragmentIndex];
+  if (fragmentIndex === 0) return fragment.text;
+  const previous = line.fragments[fragmentIndex - 1];
+  const gap = Math.max(0, fragment.left - previous.right);
+  const estimatedSpace = Math.max(1, previous.fontSizePx * 0.34);
+  const needsSpacer = gap >= estimatedSpace * 1.35 &&
+    !/^\s/u.test(fragment.text) &&
+    !/\s$/u.test(previous.text);
+  return `${needsSpacer ? " " : ""}${fragment.text}`;
+}
+
 function colorToHex(color: Color): string {
   const candidate = color as unknown as { red?: number; green?: number; blue?: number };
   return [candidate.red, candidate.green, candidate.blue]
@@ -3048,26 +3132,27 @@ async function buildEditablePptx(file: TFile, model: PreviewPdfModel, pages: Uin
     const slide = pptx.addSlide();
     slide.background = { color: "FFFFFF" };
     slide.addImage({ data: bytesToDataUrl(pages[pageIndex]), x: 0, y: 0, w: widthIn, h: heightIn });
-    const pageTop = model.pageBreaks[pageIndex];
-    for (const fragment of getPageTextFragments(model, pageIndex)) {
-      const xPt = fragment.left * model.pxToPt;
-      const yPt = (fragment.top - pageTop + model.bodyTopInsetPx) * model.pxToPt;
-      const widthPt = Math.max(4, (fragment.right - fragment.left) * model.pxToPt + 1.5);
-      const heightPt = Math.max(5, (fragment.bottom - fragment.top) * model.pxToPt * 1.08);
-      slide.addText(fragment.text, {
-        x: Math.max(0, xPt / 72),
-        y: Math.max(0, yPt / 72),
-        w: Math.max(0.05, widthPt / 72),
-        h: Math.max(0.05, heightPt / 72),
-        fontFace: fragment.fontFamily.split(",")[0].replace(/["']/g, ""),
-        fontSize: Math.max(4, fragment.fontSizePx * model.pxToPt),
-        bold: Number.parseInt(fragment.fontWeight, 10) >= 600,
-        italic: fragment.fontStyle === "italic",
-        color: colorToHex(fragment.color),
+    for (const line of getPageOfficeTextLines(model, pageIndex)) {
+      const layout = getPptTextBoxLayout(model, pageIndex, line);
+      const runs = line.fragments.map((fragment, fragmentIndex) => ({
+        text: getOfficeLineRunText(line, fragmentIndex),
+        options: {
+          fontFace: fragment.fontFamily.split(",")[0].replace(/["']/g, "") || "Arial",
+          fontSize: Math.max(4, fragment.fontSizePx * model.pxToPt),
+          bold: Number.parseInt(fragment.fontWeight, 10) >= 600,
+          italic: fragment.fontStyle === "italic",
+          color: colorToHex(fragment.color),
+          breakLine: false
+        }
+      }));
+      slide.addText(runs, {
+        x: layout.xPt / 72,
+        y: layout.yPt / 72,
+        w: layout.widthPt / 72,
+        h: layout.heightPt / 72,
         margin: 0,
-        valign: "mid",
+        valign: "top",
         paraSpaceAfterPt: 0,
-        lineSpacingMultiple: 1,
         isTextBox: true,
         fit: "shrink"
       });
@@ -3139,8 +3224,8 @@ async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): 
   for (let pageIndex = 0; pageIndex < model.pageBreaks.length - 1; pageIndex += 1) {
     const marker = `__MPE_PAGE_${pageIndex}__`;
     const markerParagraph = new RegExp(`<w:p(?=[ >])[\\s\\S]*?${marker}[\\s\\S]*?<\\/w:p>`, "u");
-    const textBoxes = getPageTextFragments(model, pageIndex)
-      .map((fragment, fragmentIndex) => buildWordTextBoxXml(model, pageIndex, fragment, fragmentIndex))
+    const textBoxes = getPageOfficeTextLines(model, pageIndex)
+      .map((line, lineIndex) => buildWordTextBoxXml(model, pageIndex, line, lineIndex))
       .join("");
     if (!markerParagraph.test(xml)) throw new Error(`DOCX page marker ${pageIndex + 1} is missing.`);
     xml = xml.replace(markerParagraph, textBoxes);
@@ -3155,25 +3240,26 @@ async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): 
 function buildWordTextBoxXml(
   model: PreviewPdfModel,
   pageIndex: number,
-  fragment: TextFragment,
-  fragmentIndex: number
+  line: OfficeTextLine,
+  lineIndex: number
 ): string {
-  const pageTop = model.pageBreaks[pageIndex];
-  const leftPt = Math.max(0, fragment.left * model.pxToPt);
-  const topPt = Math.max(0, (fragment.top - pageTop + model.bodyTopInsetPx) * model.pxToPt);
-  const widthPt = Math.max(4, (fragment.right - fragment.left) * model.pxToPt + 1.5);
-  const heightPt = Math.max(5, (fragment.bottom - fragment.top) * model.pxToPt * 1.08);
-  const fontSizeHalfPt = Math.max(8, Math.round(fragment.fontSizePx * model.pxToPt * 2));
+  const layout = getWordTextBoxLayout(model, pageIndex, line);
+  const shapeId = 1025 + pageIndex * 1000 + lineIndex;
+  const shapeType = pageIndex === 0 && lineIndex === 0
+    ? '<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>'
+    : "";
+  const runs = line.fragments.map((fragment, fragmentIndex) => buildWordTextRunXml(fragment, getOfficeLineRunText(line, fragmentIndex))).join("");
+  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:pict>${shapeType}<v:shape id="_x0000_s${shapeId}" type="#_x0000_t202" stroked="f" filled="f" style="position:absolute;margin-left:${layout.xPt.toFixed(2)}pt;margin-top:${layout.yPt.toFixed(2)}pt;width:${layout.widthPt.toFixed(2)}pt;height:${layout.heightPt.toFixed(2)}pt;z-index:251659264;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-style:none"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="${Math.round(layout.heightPt * 20)}" w:lineRule="exact"/></w:pPr>${runs}</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
+}
+
+function buildWordTextRunXml(fragment: TextFragment, text: string): string {
+  const fontSizeHalfPt = Math.max(8, Math.round(fragment.fontSizePx * 0.75 * 2));
   const fontFamily = escapeXml(fragment.fontFamily.split(",")[0].replace(/["']/g, "") || "Arial");
   const bold = Number.parseInt(fragment.fontWeight, 10) >= 600 ? "<w:b/>" : "";
   const italic = fragment.fontStyle === "italic" ? "<w:i/>" : "";
   const underline = fragment.underline ? '<w:u w:val="single"/>' : "";
   const strike = fragment.lineThrough ? "<w:strike/>" : "";
-  const shapeId = 1025 + pageIndex * 1000 + fragmentIndex;
-  const shapeType = pageIndex === 0 && fragmentIndex === 0
-    ? '<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>'
-    : "";
-  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:pict>${shapeType}<v:shape id="_x0000_s${shapeId}" type="#_x0000_t202" stroked="f" filled="f" style="position:absolute;margin-left:${leftPt.toFixed(2)}pt;margin-top:${topPt.toFixed(2)}pt;width:${widthPt.toFixed(2)}pt;height:${heightPt.toFixed(2)}pt;z-index:251659264;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-style:none"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="${Math.round(heightPt * 20)}" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${fontFamily}" w:hAnsi="${fontFamily}" w:eastAsia="${fontFamily}"/>${bold}${italic}${underline}${strike}<w:color w:val="${colorToHex(fragment.color)}"/><w:sz w:val="${fontSizeHalfPt}"/><w:szCs w:val="${fontSizeHalfPt}"/></w:rPr><w:t xml:space="preserve">${escapeXml(fragment.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
+  return `<w:r><w:rPr><w:rFonts w:ascii="${fontFamily}" w:hAnsi="${fontFamily}" w:eastAsia="${fontFamily}"/>${bold}${italic}${underline}${strike}<w:color w:val="${colorToHex(fragment.color)}"/><w:sz w:val="${fontSizeHalfPt}"/><w:szCs w:val="${fontSizeHalfPt}"/></w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
 }
 
 function escapeXml(value: string): string {

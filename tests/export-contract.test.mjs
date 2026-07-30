@@ -137,10 +137,80 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /function getOfficeTextFragmentLayout\(/);
+  assert.match(source, /overlap >= minimumHeight \* 0\.32 \|\| Math\.abs\(fragmentCenter - lineCenter\) <= centerTolerance/);
   assert.match(source, /for \(const line of getPageOfficeTextLines\(model, pageIndex\)\) \{\s*for \(const fragment of line\.fragments\)/);
   assert.match(source, /const layout = getPptTextBoxLayout\(model, pageIndex, fragment\)/);
   assert.doesNotMatch(source, /fit:\s*"shrink"/);
-  assert.match(source, /\.flatMap\(\(line\) => line\.fragments\)/);
-  assert.match(source, /buildWordTextBoxXml\(model, pageIndex, fragment, fragmentIndex\)/);
+  assert.match(source, /function buildWordFlowTextParagraphsXml\([\s\S]*?model: PreviewPdfModel,[\s\S]*?pageIndex: number,[\s\S]*?hyperlinkIds: ReadonlyMap<string, string>/);
+  assert.match(source, /const paragraphs = buildWordFlowTextParagraphsXml\(model, pageIndex, hyperlinkIds\)/);
+  assert.match(source, /const pageModel = editableOffice/);
+  assert.match(source, /if \(format === "pptx"\) \{\s*return buildEditablePptx\(file, pageModel\);\s*\}/);
+  assert.match(source, /if \(format === "docx"\) \{\s*return buildEditableDocx\(file, pageModel\);\s*\}/);
+  assert.match(source, /return injectEditableWordTextBoxes\(packed, model\)/);
+  assert.match(source, /for \(const line of getPageOfficeTextLines\(model, pageIndex\)\)/);
+  assert.match(source, /slide\.addText\(fragment\.text,/);
+  assert.doesNotMatch(source, /slide\.addImage\(\{ data: bytesToDataUrl\(pages\[pageIndex\]\)/);
+  assert.doesNotMatch(source, /new ImageRun\(/);
+  assert.doesNotMatch(source, /new Header\(/);
+  assert.match(source, /new Paragraph\(\{ children: \[new TextRun\(`__MPE_PAGE_\$\{pageIndex\}__`\)\] \}\)/);
+  assert.match(source, /const markerParagraph = new RegExp\(`<w:p\(\?=\[ >\]\)\(\?:\(\?!/);
+  assert.match(source, /<w:tabs>\$\{tabStops\}<\/w:tabs>/);
+  assert.match(source, /const visibleGap = gapPx > Math\.max\(2,/);
+  assert.match(source, /return distinctScopes && columnGap && !fragment\.officeDecoration && !previous\.officeDecoration \? "tab" : "space"/);
+  assert.match(source, /<w:t xml:space="preserve"> <\/w:t>/);
+  assert.match(source, /<w:spacing w:before="\$\{beforeTwips\}" w:after="0"/);
+  assert.match(source, /<w:ind w:left="\$\{leftTwips\}"\/>/);
+  assert.match(source, /decoration\.checked \? "☑" : "☐"/);
+  assert.match(source, /decoration\.kind === "bullet"[\s\S]*?"•"/);
+  assert.match(source, /includeText,\s*includeDecorations/);
+  assert.match(source, /if \(options\.includeDecorations !== false\)/);
+  assert.match(source, /<w:pStyle w:val="Heading\$\{headingLevel\}"\/>/);
+  assert.match(source, /fragment\.fontSizePx \* model\.pxToPt \* 2/);
+  assert.match(source, /function buildWordTextPayloadXml\(text: string\)/);
+  assert.match(source, /character === "-" && isAsciiDigit\(previous\) && isAsciiDigit\(next\)/);
+  assert.match(source, /xml \+= "<w:noBreakHyphen\/>"/);
+  assert.match(source, /<w:hyperlink r:id="\$\{relationshipId\}" w:history="1">/);
+  assert.match(source, /function injectWordHyperlinkRelationships/);
+  assert.match(source, /relationships\/hyperlink/);
+  assert.match(source, /hyperlink: fragment\.href \? \{ url: fragment\.href \}/);
+  assert.doesNotMatch(source, /<wps:txbx/);
+  assert.doesNotMatch(source, /<w:txbxContent>/);
+  assert.doesNotMatch(source, /<v:shape/);
+  assert.doesNotMatch(source, /<w:pict>/);
+  assert.match(source, /if \(element\.matches\("input\[type='checkbox'\]"\)\) continue/);
   assert.match(source, /return usable \|\| "Noto Sans SC"/);
+  assert.doesNotMatch(source, /const officePreviewPages = editableOffice/);
+  assert.doesNotMatch(source, /injectOfficePreviewPages\(blob, model, previewPages\)/);
+  assert.doesNotMatch(source, /injectOfficePreviewPages\(editable, model, previewPages\)/);
+});
+
+test("live preview Markdown syntax is omitted without removing hashtag text", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /function isLivePreviewMarkdownSyntaxElement\(element: Element\)/);
+  assert.match(source, /element\.closest\('\[class\*="cm-formatting"\]'\)/);
+  assert.match(source, /!formatting\.classList\.contains\("cm-formatting-hashtag"\)/);
+  assert.match(source, /isLivePreviewMarkdownSyntaxElement\(element\) \|\|/);
+  assert.match(source, /function getTextHeadingLevel\(parent: HTMLElement\)/);
+});
+
+test("NoteDraw exports fall back to persisted strokes when the live canvas is outside the note", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /interface NoteDrawApiRuntime/);
+  assert.match(source, /noteDrawSourcePath\?: string/);
+  assert.match(source, /getAbstractFileByPath\(normalizePath\(options\.noteDrawSourcePath\)\)/);
+  assert.match(source, /const preparedNoteDraw = await this\.prepareNoteDrawExportOverlay\(file, rootEl\)/);
+  assert.match(source, /const preparedNoteDraw = await this\.prepareNoteDrawExportOverlay\(noteDrawFile, noteDrawHost\)/);
+  assert.match(source, /model = this\.capturePreviewPdfModel\(file, rendered\.pageEl\)/);
+  assert.match(source, /preparedNoteDraw\.cleanup\(\)/);
+  assert.match(source, /private async prepareNoteDrawExportOverlay\(/);
+  assert.match(source, /rawData = await api\.readDrawings\(file\)/);
+  assert.match(source, /rawData as \{ visible\?: unknown \}/);
+  assert.match(source, /await api\.injectExportSnapshot\(file, host\)/);
+  assert.match(source, /drawNoteDoodleStrokes\(context, data\.strokes, width, height\)/);
+  assert.match(source, /mobile-pdf-exporter-note-doodle-canvas mobile-pdf-exporter-live-drawing-canvas notedraw-canvas/);
+  assert.match(source, /function isNoteDrawCanvasFragment\(fragment: CanvasFragment\)/);
+  assert.match(source, /canvas\.closest\(\s*"\.notedraw-shell, \.note-doodle-shell, \.notedraw-export-image-canvas-layer"/);
+  assert.match(source, /canvasFragments: model\.canvasFragments\.filter\(\(fragment\) => !isNoteDrawCanvasFragment\(fragment\)\)/);
 });

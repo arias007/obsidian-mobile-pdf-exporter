@@ -116,6 +116,7 @@ interface ExportFileOptions {
   busyPrompt?: PdfExportBusyPrompt;
   signal?: AbortSignal;
   format?: ExportFormat;
+  noteDrawSourcePath?: string;
 }
 
 interface PdfLinkContext {
@@ -138,6 +139,8 @@ interface TextFragment {
   underline: boolean;
   lineThrough: boolean;
   href: string | null;
+  headingLevel?: number;
+  officeDecoration?: boolean;
   mergeScope: Element;
 }
 
@@ -155,6 +158,7 @@ interface TextLineDraft {
   underline: boolean;
   lineThrough: boolean;
   href: string | null;
+  headingLevel?: number;
   mergeScope: Element;
 }
 
@@ -271,6 +275,7 @@ interface PreviewPdfModel {
   headerText: string;
   footerText: string;
   exportDate: string;
+  noteDrawInkStrokes?: PdfInkStroke[];
 }
 
 interface ExcalidrawAutomateRuntime {
@@ -326,6 +331,22 @@ interface NoteDoodleData {
   updatedAt: string | null;
 }
 
+interface PdfInkStroke {
+  brush: "pen" | "watercolor";
+  color: string;
+  widthPx: number;
+  opacity: number;
+  count: number;
+  points: Array<{ x: number; y: number }>;
+}
+
+interface PreparedNoteDrawExportOverlay {
+  cleanup: () => void;
+  data: NoteDoodleData | null;
+  widthPx: number;
+  heightPx: number;
+}
+
 interface NoteDoodleOverlaySource {
   data: NoteDoodleData | null;
   canvas: HTMLCanvasElement | null;
@@ -342,6 +363,11 @@ interface LiveDrawingController {
   render?: () => void;
   active?: boolean;
   surfaceType?: string;
+}
+
+interface NoteDrawApiRuntime {
+  readDrawings?: (fileOrPath: TFile | string) => Promise<unknown>;
+  injectExportSnapshot?: (fileOrPath: TFile | string, container: HTMLElement) => Promise<HTMLElement | null>;
 }
 
 const UI_TEXT = {
@@ -556,7 +582,7 @@ const PAGE_BREAK_MIN_ADVANCE_PX = 72;
 const HEADER_FOOTER_MIN_BAND_MM = 8;
 const HEADER_FOOTER_FONT_SIZE_PX = 10;
 const SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE = 2;
-const SELECTABLE_TEXT_LAYER_OPACITY = 0.003;
+const SELECTABLE_TEXT_LAYER_OPACITY = 1;
 const NOTE_DOODLE_MAX_PEN_COUNT = 5;
 const NOTE_DOODLE_DEFAULT_OPACITY = 1;
 const NOTE_DOODLE_WATERCOLOR = "watercolor";
@@ -797,6 +823,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const format = options.format ?? "pdf";
       const isMarkdown = file.extension.toLowerCase() === "md";
       const markdown = isMarkdown ? await this.app.vault.cachedRead(file) : "";
+      const noteDrawSource = options.noteDrawSourcePath
+        ? this.app.vault.getAbstractFileByPath(normalizePath(options.noteDrawSourcePath))
+        : file;
+      const noteDrawFile = noteDrawSource instanceof TFile ? noteDrawSource : file;
       throwIfExportCancelled(signal);
       let outputBlob: Blob;
       let model: PreviewPdfModel | null = null;
@@ -809,7 +839,24 @@ export default class MobilePdfExporterPlugin extends Plugin {
         } else if (isMarkdown) {
           rendered = await this.renderMarkdownPreview(file, markdown);
           throwIfExportCancelled(signal);
-          model = this.capturePreviewPdfModel(file, rendered.pageEl);
+          const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
+          const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(noteDrawFile, noteDrawHost);
+          try {
+            await nextAnimationFrame();
+            model = this.capturePreviewPdfModel(file, rendered.pageEl);
+            const pageRect = rendered.pageEl.getBoundingClientRect();
+            const hostRect = noteDrawHost.getBoundingClientRect();
+            model.noteDrawInkStrokes = projectNoteDrawInkStrokes(
+              preparedNoteDraw.data,
+              preparedNoteDraw.widthPx,
+              preparedNoteDraw.heightPx,
+              hostRect.left - pageRect.left,
+              hostRect.top - pageRect.top,
+              1
+            );
+          } finally {
+            preparedNoteDraw.cleanup();
+          }
         } else {
           throw new Error(this.t("previewNoContentError"));
         }
@@ -1102,6 +1149,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const previewSectionCaptures = new Map<number, CapturedLivePreviewSection>();
     let capturedPreviewOverlays = false;
     let contentHeightPx = Math.max(1, scrollEl.scrollHeight, rootEl.scrollHeight, rootRect.height);
+    const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, rootEl);
 
     try {
       const viewportHeight = Math.max(160, scrollEl.clientHeight || rootRect.height || 640);
@@ -1244,6 +1292,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     } finally {
       scrollEl.scrollTop = originalScrollTop;
       scrollEl.scrollLeft = originalScrollLeft;
+      preparedNoteDraw.cleanup();
       refreshLiveDrawingSurface(rootEl);
       await nextAnimationFrame();
     }
@@ -1286,7 +1335,15 @@ export default class MobilePdfExporterPlugin extends Plugin {
       title: file.basename,
       headerText: this.settings.headerText,
       footerText: this.settings.footerText,
-      exportDate: formatExportDate(new Date())
+      exportDate: formatExportDate(new Date()),
+      noteDrawInkStrokes: projectNoteDrawInkStrokes(
+        preparedNoteDraw.data,
+        preparedNoteDraw.widthPx,
+        preparedNoteDraw.heightPx,
+        horizontalInsetPx,
+        0,
+        surfaceScale
+      )
     };
   }
 
@@ -1480,6 +1537,110 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (overlay.data?.strokes.length) drawNoteDoodleStrokes(context, overlay.data.strokes, width, height);
   }
 
+  private async prepareNoteDrawExportOverlay(
+    file: TFile,
+    host: HTMLElement
+  ): Promise<PreparedNoteDrawExportOverlay> {
+    const rect = host.getBoundingClientRect();
+    const width = Math.max(1, Math.ceil(host.scrollWidth || rect.width || 1));
+    const height = Math.max(1, Math.ceil(host.scrollHeight || rect.height || 1));
+    const empty = (): PreparedNoteDrawExportOverlay => ({
+      cleanup: () => undefined,
+      data: null,
+      widthPx: width,
+      heightPx: height
+    });
+    const plugins = (this.app as unknown as {
+      plugins?: { plugins?: Record<string, { api?: NoteDrawApiRuntime }> };
+    }).plugins?.plugins;
+    const api = plugins?.notedraw?.api;
+    if (!api?.readDrawings) return empty();
+
+    let rawData: unknown;
+    try {
+      rawData = await api.readDrawings(file);
+    } catch (error) {
+      console.warn("Mobile PDF Exporter could not read NoteDraw data", error);
+      return empty();
+    }
+
+    if ((rawData as { visible?: unknown } | null)?.visible === false) return empty();
+    const data = normalizeNoteDoodleData(rawData, file);
+    const hasLiveCanvas = Array.from(host.querySelectorAll<HTMLCanvasElement>(
+      ".notedraw-canvas, .note-doodle-canvas"
+    )).some((canvas) => {
+      const surface = canvas.closest<HTMLElement>(".notedraw-shell, .note-doodle-shell");
+      if (!surface) return false;
+      const kind = surface.classList.contains("notedraw-shell") ? "notedraw" : "note-doodle";
+      const controller = getLiveDrawingController(surface, kind);
+      return controller?.file?.path === file.path &&
+        isVisibleLiveDrawingSurface(surface, kind) &&
+        isVisibleLiveDrawingCanvas(canvas);
+    });
+
+    const existingImageLayers = new Set(host.querySelectorAll(".notedraw-export-image-canvas-layer"));
+    if (!hasLiveCanvas && api.injectExportSnapshot) {
+      try {
+        await api.injectExportSnapshot(file, host);
+      } catch (error) {
+        console.warn("Mobile PDF Exporter could not inject NoteDraw export assets", error);
+      }
+    }
+    const injectedImageLayers = Array.from(host.querySelectorAll<HTMLElement>(
+      ".notedraw-export-image-canvas-layer"
+    )).filter((element) => !existingImageLayers.has(element));
+
+    let canvas: HTMLCanvasElement | null = null;
+    let changedPosition = false;
+    const previousInlinePosition = host.style.position;
+    if (!hasLiveCanvas && data?.strokes.length) {
+      const maxPixelScale = Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, width * height));
+      const ratio = clampNumber(Math.min(window.devicePixelRatio || 1, maxPixelScale), 0.5, 2, 1);
+      if (getComputedStyle(host).position === "static") {
+        host.style.position = "relative";
+        changedPosition = true;
+      }
+
+      canvas = appendElement(host, "canvas", {
+        cls: "mobile-pdf-exporter-note-doodle-canvas mobile-pdf-exporter-live-drawing-canvas notedraw-canvas"
+      });
+      canvas.width = Math.max(1, Math.ceil(width * ratio));
+      canvas.height = Math.max(1, Math.ceil(height * ratio));
+      canvas.setCssStyles({
+        width: `${width}px`,
+        height: `${height}px`,
+        position: "absolute",
+        left: "0",
+        top: "0",
+        pointerEvents: "none",
+        zIndex: "60"
+      });
+      canvas.setAttribute("aria-hidden", "true");
+      const context = canvas.getContext("2d");
+      if (context) {
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        drawNoteDoodleStrokes(context, data.strokes, width, height);
+      } else {
+        canvas.remove();
+        canvas = null;
+      }
+    }
+
+    return {
+      cleanup: () => {
+        canvas?.remove();
+        for (const layer of injectedImageLayers) layer.remove();
+        if (changedPosition) {
+          if (previousInlinePosition) host.style.position = previousInlinePosition;
+          else host.style.removeProperty("position");
+        }
+      },
+      data,
+      widthPx: width,
+      heightPx: height
+    };
+  }
+
   private async renderPreviewToSelectablePdf(
     file: TFile,
     model: PreviewPdfModel,
@@ -1502,15 +1663,19 @@ export default class MobilePdfExporterPlugin extends Plugin {
     pdfDoc.setSubject(PDF_SUBJECT);
     const exportFont = await this.loadExportFont(pdfDoc, fontkitModule, StandardFonts.Helvetica);
     const { font } = exportFont;
+    const visualModel = model.noteDrawInkStrokes?.length
+      ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
+      : model;
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
       const pageTopPx = model.pageBreaks[index];
       const pageBottomPx = model.pageBreaks[index + 1];
       const pdfPage = pdfDoc.addPage([model.pageWidthPt, model.pageHeightPt]);
-      const pngBytes = await renderPreviewPageToPngBytes(model, index, {
+      const pngBytes = await renderPreviewPageToPngBytes(visualModel, index, {
         colorMode: this.settings.colorMode,
-        rasterScale: Math.max(this.settings.imageRasterScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE)
+        rasterScale: Math.max(this.settings.imageRasterScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE),
+        includeText: false
       });
       throwIfExportCancelled(signal);
       const pageImage = await pdfDoc.embedPng(pngBytes);
@@ -1531,13 +1696,20 @@ export default class MobilePdfExporterPlugin extends Plugin {
         contentTopInsetPx: model.bodyTopInsetPx,
         colorMode: this.settings.colorMode,
         opacity: SELECTABLE_TEXT_LAYER_OPACITY,
-        drawUnderlines: false
+        drawUnderlines: true
       });
 
       drawLinkAnnotationLayer(pdfPage, model.linkFragments, {
         pageTopPx,
         pageBottomPx,
         pageWidthPt: model.pageWidthPt,
+        pageHeightPt: model.pageHeightPt,
+        pxToPt: model.pxToPt,
+        contentTopInsetPx: model.bodyTopInsetPx
+      });
+      drawNoteDrawInkAnnotationLayer(pdfPage, model.noteDrawInkStrokes ?? [], {
+        pageTopPx,
+        pageBottomPx,
         pageHeightPt: model.pageHeightPt,
         pxToPt: model.pxToPt,
         contentTopInsetPx: model.bodyTopInsetPx
@@ -1572,10 +1744,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const pdfDoc = await PDFDocumentRuntime.create();
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
+    const visualModel = model.noteDrawInkStrokes?.length
+      ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
+      : model;
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
-      const pngBytes = await renderPreviewPageToPngBytes(model, index, {
+      const pngBytes = await renderPreviewPageToPngBytes(visualModel, index, {
         colorMode: this.settings.colorMode,
         rasterScale: this.settings.imageRasterScale
       });
@@ -1593,6 +1768,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pageTopPx: model.pageBreaks[index],
         pageBottomPx: model.pageBreaks[index + 1],
         pageWidthPt: model.pageWidthPt,
+        pageHeightPt: model.pageHeightPt,
+        pxToPt: model.pxToPt,
+        contentTopInsetPx: model.bodyTopInsetPx
+      });
+      drawNoteDrawInkAnnotationLayer(pdfPage, model.noteDrawInkStrokes ?? [], {
+        pageTopPx: model.pageBreaks[index],
+        pageBottomPx: model.pageBreaks[index + 1],
         pageHeightPt: model.pageHeightPt,
         pxToPt: model.pxToPt,
         contentTopInsetPx: model.bodyTopInsetPx
@@ -1618,17 +1800,26 @@ export default class MobilePdfExporterPlugin extends Plugin {
         ? this.renderPreviewToImagePdf(file, model, signal)
         : this.renderPreviewToSelectablePdf(file, model, signal);
     }
-    const pages = await this.renderModelPagesToPng(model, signal, format !== "docx" && format !== "pptx");
+    const editableOffice = format === "docx" || format === "pptx";
+    const pageModel = editableOffice
+      ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
+      : model;
+    if (format === "pptx") {
+      return buildEditablePptx(file, pageModel);
+    }
+    if (format === "docx") {
+      return buildEditableDocx(file, pageModel);
+    }
+    const pages = await this.renderModelPagesToPng(model, signal, true, true);
     if (format === "png") return combinePngPages(pages);
-    if (format === "html") return buildSelfContainedHtml(file, model, pages);
-    if (format === "pptx") return buildEditablePptx(file, model, pages);
-    return buildEditableDocx(file, model, pages);
+    return buildSelfContainedHtml(file, model, pages);
   }
 
   private async renderModelPagesToPng(
     model: PreviewPdfModel,
     signal?: AbortSignal,
-    includeText = true
+    includeText = true,
+    includeDecorations = true
   ): Promise<Uint8Array[]> {
     const pages: Uint8Array[] = [];
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
@@ -1636,7 +1827,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       pages.push(await renderPreviewPageToPngBytes(model, index, {
         colorMode: this.settings.colorMode,
         rasterScale: this.settings.imageRasterScale,
-        includeText
+        includeText,
+        includeDecorations
       }));
       await nextAnimationFrame();
     }
@@ -2862,6 +3054,30 @@ function normalizeNoteDoodleData(data: unknown, file: TFile): NoteDoodleData | n
   };
 }
 
+function projectNoteDrawInkStrokes(
+  data: NoteDoodleData | null,
+  widthPx: number,
+  heightPx: number,
+  offsetX: number,
+  offsetY: number,
+  scale: number
+): PdfInkStroke[] {
+  if (!data?.strokes.length) return [];
+  return data.strokes
+    .map((stroke) => ({
+      brush: stroke.brush,
+      color: stroke.color,
+      widthPx: Math.max(0.5, stroke.width * scale),
+      opacity: stroke.opacity,
+      count: stroke.count,
+      points: stroke.points.map((point) => ({
+        x: offsetX + point.x * widthPx * scale,
+        y: offsetY + point.y * heightPx * scale
+      }))
+    }))
+    .filter((stroke) => stroke.points.length > 0);
+}
+
 function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
   const candidate = stroke && typeof stroke === "object" ? stroke as {
     brush?: unknown;
@@ -3023,7 +3239,46 @@ async function combinePngPages(pages: Uint8Array[]): Promise<Blob> {
 function getPageTextFragments(model: PreviewPdfModel, pageIndex: number): TextFragment[] {
   const top = model.pageBreaks[pageIndex];
   const bottom = model.pageBreaks[pageIndex + 1];
-  return model.textFragments.filter((fragment) => fragment.bottom > top && fragment.top < bottom && fragment.text.trim());
+  const text = model.textFragments.filter((fragment) => (
+    fragment.bottom > top && fragment.top < bottom && fragment.text.trim()
+  ));
+  const decorations = model.decorationFragments
+    .filter((fragment) => fragment.bottom > top && fragment.top < bottom)
+    .map((fragment) => decorationToOfficeTextFragment(model, fragment))
+    .filter((fragment): fragment is TextFragment => Boolean(fragment));
+  return [...text, ...decorations];
+}
+
+function decorationToOfficeTextFragment(
+  model: PreviewPdfModel,
+  decoration: DecorationFragment
+): TextFragment | null {
+  const text = decoration.kind === "checkbox"
+    ? (decoration.checked ? "☑" : "☐")
+    : decoration.kind === "bullet"
+      ? "•"
+      : decoration.text?.trim() ?? "";
+  if (!text) return null;
+
+  return {
+    text,
+    left: decoration.left,
+    top: decoration.top,
+    right: decoration.right,
+    bottom: decoration.bottom,
+    fontSizePx: decoration.fontSizePx,
+    fontFamily: decoration.kind === "checkbox"
+      ? '"Segoe UI Symbol", "Noto Sans Symbols 2", "Noto Sans SC"'
+      : '"Noto Sans SC"',
+    fontWeight: "400",
+    fontStyle: "normal",
+    color: decoration.color,
+    underline: false,
+    lineThrough: false,
+    href: null,
+    officeDecoration: true,
+    mergeScope: model.ownerDocument.body
+  };
 }
 
 interface OfficeTextLine {
@@ -3048,8 +3303,14 @@ function getPageOfficeTextLines(model: PreviewPdfModel, pageIndex: number): Offi
 
   for (const fragment of fragments) {
     const matchingLine = [...lines].reverse().find((line) => {
-      const lineTolerance = Math.max(1.5, Math.min(fragment.fontSizePx, line.bottom - line.top) * 0.24);
-      return Math.abs(fragment.top - line.top) <= lineTolerance;
+      const fragmentHeight = Math.max(1, fragment.bottom - fragment.top);
+      const lineHeight = Math.max(1, line.bottom - line.top);
+      const overlap = Math.max(0, Math.min(fragment.bottom, line.bottom) - Math.max(fragment.top, line.top));
+      const minimumHeight = Math.min(fragmentHeight, lineHeight);
+      const fragmentCenter = (fragment.top + fragment.bottom) / 2;
+      const lineCenter = (line.top + line.bottom) / 2;
+      const centerTolerance = Math.max(2, Math.min(fragment.fontSizePx, lineHeight) * 0.55);
+      return overlap >= minimumHeight * 0.32 || Math.abs(fragmentCenter - lineCenter) <= centerTolerance;
     });
 
     if (matchingLine) {
@@ -3106,20 +3367,6 @@ function getPptTextBoxLayout(
   };
 }
 
-function getWordTextBoxLayout(
-  model: PreviewPdfModel,
-  pageIndex: number,
-  fragment: TextFragment
-): OfficeTextBoxLayout {
-  const layout = getOfficeTextFragmentLayout(model, pageIndex, fragment);
-  const fontSizePt = fragment.fontSizePx * model.pxToPt;
-  return {
-    ...layout,
-    yPt: layout.yPt + fontSizePt * 0.14,
-    heightPt: layout.heightPt + fontSizePt * 0.14
-  };
-}
-
 function getOfficeFontFamily(fragment: TextFragment): string {
   const candidates = fragment.fontFamily
     .split(",")
@@ -3143,7 +3390,10 @@ function colorToHex(color: Color): string {
     .join("");
 }
 
-async function buildEditablePptx(file: TFile, model: PreviewPdfModel, pages: Uint8Array[]): Promise<Blob> {
+async function buildEditablePptx(
+  file: TFile,
+  model: PreviewPdfModel
+): Promise<Blob> {
   const module = await import("pptxgenjs");
   const PptxGenJS = (module.default ?? module) as unknown as new () => any;
   const pptx = new PptxGenJS();
@@ -3154,10 +3404,10 @@ async function buildEditablePptx(file: TFile, model: PreviewPdfModel, pages: Uin
   pptx.author = "Obsidian Mobile PDF Exporter";
   pptx.subject = file.basename;
   pptx.title = file.basename;
-  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+  const pageCount = Math.max(0, model.pageBreaks.length - 1);
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
     const slide = pptx.addSlide();
     slide.background = { color: "FFFFFF" };
-    slide.addImage({ data: bytesToDataUrl(pages[pageIndex]), x: 0, y: 0, w: widthIn, h: heightIn });
     for (const line of getPageOfficeTextLines(model, pageIndex)) {
       for (const fragment of line.fragments) {
         const layout = getPptTextBoxLayout(model, pageIndex, fragment);
@@ -3177,30 +3427,40 @@ async function buildEditablePptx(file: TFile, model: PreviewPdfModel, pages: Uin
           underline: fragment.underline ? { color: colorToHex(fragment.color) } : undefined,
           strike: fragment.lineThrough ? "sngStrike" : undefined,
           color: colorToHex(fragment.color),
+          hyperlink: fragment.href ? { url: fragment.href } : undefined,
           breakLine: false
         });
       }
     }
   }
   const result = await pptx.write({ outputType: "blob" });
-  return result instanceof Blob ? result : new Blob([result as BlobPart], {
+  const blob = result instanceof Blob ? result : new Blob([result as BlobPart], {
     type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
   });
+  return blob;
 }
 
-async function buildEditableDocx(file: TFile, model: PreviewPdfModel, pages: Uint8Array[]): Promise<Blob> {
+interface WordPageDrawingOverlay {
+  data: Uint8Array;
+  leftPx: number;
+  topPx: number;
+  widthPx: number;
+  heightPx: number;
+}
+
+async function buildEditableDocx(
+  file: TFile,
+  model: PreviewPdfModel
+): Promise<Blob> {
   const {
     Document,
-    HorizontalPositionRelativeFrom,
-    ImageRun,
+    LineRuleType,
     Packer,
     Paragraph,
-    TextRun,
-    VerticalPositionRelativeFrom,
-    TextWrappingType
+    TextRun
   } = await import("docx");
-  const sections = pages.map((page, pageIndex) => {
-    return {
+  const pageCount = Math.max(0, model.pageBreaks.length - 1);
+  const sections = Array.from({ length: pageCount }, (_, pageIndex) => ({
       properties: {
         page: {
           size: { width: Math.round(model.pageWidthPt * 20), height: Math.round(model.pageHeightPt * 20) },
@@ -3208,24 +3468,9 @@ async function buildEditableDocx(file: TFile, model: PreviewPdfModel, pages: Uin
         }
       },
       children: [
-        new Paragraph({
-          children: [new ImageRun({
-            data: page,
-            transformation: { width: Math.round(model.pageWidthPt / 72 * 96), height: Math.round(model.pageHeightPt / 72 * 96) },
-            type: "png",
-            floating: {
-              horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: 0 },
-              verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: 0 },
-              behindDocument: true,
-              allowOverlap: true,
-              wrap: { type: TextWrappingType.NONE }
-            }
-          })]
-        }),
         new Paragraph({ children: [new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
       ]
-    };
-  });
+    }));
   const document = new Document({
     creator: "Obsidian Mobile PDF Exporter",
     title: file.basename,
@@ -3236,56 +3481,250 @@ async function buildEditableDocx(file: TFile, model: PreviewPdfModel, pages: Uin
   return injectEditableWordTextBoxes(packed, model);
 }
 
+async function injectOfficePreviewPages(
+  blob: Blob,
+  model: PreviewPdfModel,
+  pages: Uint8Array[]
+): Promise<Blob> {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+  zip.file("mpe/preview/manifest.json", JSON.stringify({
+    schemaVersion: 1,
+    generator: "Obsidian Mobile PDF Exporter",
+    pageCount: pages.length,
+    pageWidthPt: model.pageWidthPt,
+    pageHeightPt: model.pageHeightPt
+  }));
+  pages.forEach((page, pageIndex) => {
+    zip.file(`mpe/preview/page-${String(pageIndex + 1).padStart(4, "0")}.png`, page);
+  });
+  const bytes = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+  return new Blob([new Uint8Array(bytes).buffer], { type: blob.type });
+}
+
+async function renderNoteDrawPageOverlayToPngBytes(
+  model: PreviewPdfModel,
+  pageIndex: number,
+  colorMode: PdfColorMode,
+  rasterScale: number
+): Promise<WordPageDrawingOverlay | null> {
+  const pageTopPx = model.pageBreaks[pageIndex];
+  const pageBottomPx = model.pageBreaks[pageIndex + 1];
+  const fragments = model.canvasFragments.filter((fragment) => (
+    isNoteDrawCanvasFragment(fragment) &&
+    fragment.bottom > pageTopPx &&
+    fragment.top < pageBottomPx
+  ));
+  if (fragments.length === 0) return null;
+
+  const paddingPx = 2;
+  const leftPx = Math.max(0, Math.min(...fragments.map((fragment) => fragment.left)) - paddingPx);
+  const rightPx = Math.min(
+    model.sourceWidthPx,
+    Math.max(...fragments.map((fragment) => fragment.right)) + paddingPx
+  );
+  const contentTopPx = Math.max(pageTopPx, Math.min(...fragments.map((fragment) => fragment.top)));
+  const contentBottomPx = Math.min(pageBottomPx, Math.max(...fragments.map((fragment) => fragment.bottom)));
+  const topPx = Math.max(0, model.bodyTopInsetPx + contentTopPx - pageTopPx - paddingPx);
+  const bottomPx = Math.min(
+    model.pageHeightPx,
+    model.bodyTopInsetPx + contentBottomPx - pageTopPx + paddingPx
+  );
+  if (rightPx <= leftPx || bottomPx <= topPx) return null;
+
+  const scale = getSafePreviewImageScale(model.sourceWidthPx, model.pageHeightPx, rasterScale);
+  const pageCanvas = createCanvas(model.ownerDocument);
+  const pageContext = pageCanvas.getContext("2d");
+  if (!pageContext) return null;
+  pageCanvas.width = Math.max(1, Math.ceil(model.sourceWidthPx * scale));
+  pageCanvas.height = Math.max(1, Math.ceil(model.pageHeightPx * scale));
+  pageContext.setTransform(scale, 0, 0, scale, 0, 0);
+  pageContext.save();
+  pageContext.beginPath();
+  pageContext.rect(0, model.bodyTopInsetPx, model.sourceWidthPx, model.bodyHeightPx);
+  pageContext.clip();
+  pageContext.translate(0, model.bodyTopInsetPx);
+  drawCanvasBitmapLayer(pageContext, fragments, {
+    pageTopPx,
+    pageBottomPx,
+    sourceWidthPx: model.sourceWidthPx,
+    pageHeightPx: model.bodyHeightPx
+  });
+  pageContext.restore();
+  if (colorMode === "grayscale") applyCanvasGrayscale(pageContext, pageCanvas.width, pageCanvas.height);
+
+  const sourceLeft = Math.max(0, Math.floor(leftPx * scale));
+  const sourceTop = Math.max(0, Math.floor(topPx * scale));
+  const sourceRight = Math.min(pageCanvas.width, Math.ceil(rightPx * scale));
+  const sourceBottom = Math.min(pageCanvas.height, Math.ceil(bottomPx * scale));
+  const overlayCanvas = createCanvas(model.ownerDocument);
+  overlayCanvas.width = Math.max(1, sourceRight - sourceLeft);
+  overlayCanvas.height = Math.max(1, sourceBottom - sourceTop);
+  const overlayContext = overlayCanvas.getContext("2d");
+  if (!overlayContext) return null;
+  overlayContext.drawImage(
+    pageCanvas,
+    sourceLeft,
+    sourceTop,
+    overlayCanvas.width,
+    overlayCanvas.height,
+    0,
+    0,
+    overlayCanvas.width,
+    overlayCanvas.height
+  );
+
+  return {
+    data: dataUrlToUint8Array(overlayCanvas.toDataURL("image/png")),
+    leftPx: sourceLeft / scale,
+    topPx: sourceTop / scale,
+    widthPx: overlayCanvas.width / scale,
+    heightPx: overlayCanvas.height / scale
+  };
+}
+
 async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): Promise<Blob> {
   const { default: JSZip } = await import("jszip");
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
   const documentFile = zip.file("word/document.xml");
   if (!documentFile) throw new Error("DOCX document.xml is missing.");
   let xml = await documentFile.async("string");
-  if (!xml.includes("xmlns:v=")) {
-    xml = xml.replace(/<w:document\b/u, '<w:document xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"');
-  }
+  const hyperlinkIds = buildWordHyperlinkIdMap(model.textFragments);
   for (let pageIndex = 0; pageIndex < model.pageBreaks.length - 1; pageIndex += 1) {
     const marker = `__MPE_PAGE_${pageIndex}__`;
-    const markerParagraph = new RegExp(`<w:p(?=[ >])[\\s\\S]*?${marker}[\\s\\S]*?<\\/w:p>`, "u");
-    const textBoxes = getPageOfficeTextLines(model, pageIndex)
-      .flatMap((line) => line.fragments)
-      .map((fragment, fragmentIndex) => buildWordTextBoxXml(model, pageIndex, fragment, fragmentIndex))
-      .join("");
+    const markerParagraph = new RegExp(`<w:p(?=[ >])(?:(?!<\\/w:p>)[\\s\\S])*?${marker}(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`, "u");
+    const paragraphs = buildWordFlowTextParagraphsXml(model, pageIndex, hyperlinkIds);
     if (!markerParagraph.test(xml)) throw new Error(`DOCX page marker ${pageIndex + 1} is missing.`);
-    xml = xml.replace(markerParagraph, textBoxes);
+    xml = xml.replace(markerParagraph, paragraphs);
   }
   zip.file("word/document.xml", xml);
+  await injectWordHyperlinkRelationships(zip, hyperlinkIds);
   const bytes = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
   return new Blob([new Uint8Array(bytes).buffer], {
     type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
   });
 }
 
-function buildWordTextBoxXml(
+function buildWordFlowTextParagraphsXml(
   model: PreviewPdfModel,
   pageIndex: number,
-  fragment: TextFragment,
-  fragmentIndex: number
+  hyperlinkIds: ReadonlyMap<string, string>
 ): string {
-  const layout = getWordTextBoxLayout(model, pageIndex, fragment);
-  const shapeId = 1025 + pageIndex * 1000 + fragmentIndex;
-  const shapeType = pageIndex === 0 && fragmentIndex === 0
-    ? '<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>'
-    : "";
-  const run = buildWordTextRunXml(fragment, fragment.text);
-  const lineHeightTwips = Math.round(Math.max(fragment.fontSizePx * model.pxToPt * 1.15, 5) * 20);
-  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:pict>${shapeType}<v:shape id="_x0000_s${shapeId}" type="#_x0000_t202" stroked="f" filled="f" style="position:absolute;margin-left:${layout.xPt.toFixed(2)}pt;margin-top:${layout.yPt.toFixed(2)}pt;width:${layout.widthPt.toFixed(2)}pt;height:${layout.heightPt.toFixed(2)}pt;z-index:251659264;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-style:none"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="${lineHeightTwips}" w:lineRule="exact"/></w:pPr>${run}</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
+  const pageTop = model.pageBreaks[pageIndex];
+  const pageMarginTwips = 360;
+  let cursorPt = pageMarginTwips / 20 + 1;
+
+  return getPageOfficeTextLines(model, pageIndex).map((line) => {
+    const fragments = line.fragments.filter((fragment) => fragment.text.trim());
+    if (fragments.length === 0) return "";
+
+    const lineTopPt = Math.max(0, (line.top - pageTop + model.bodyTopInsetPx) * model.pxToPt);
+    const lineHeightPt = Math.max(
+      5,
+      (line.bottom - line.top) * model.pxToPt * 1.18,
+      ...fragments.map((fragment) => fragment.fontSizePx * model.pxToPt * 1.18)
+    );
+    const beforeTwips = Math.max(0, Math.round((lineTopPt - cursorPt) * 20));
+    const lineHeightTwips = Math.max(100, Math.round(lineHeightPt * 20));
+    const leftTwips = Math.max(-pageMarginTwips, Math.round(line.left * model.pxToPt * 20) - pageMarginTwips);
+    const separators = fragments.map((fragment, fragmentIndex): "none" | "space" | "tab" => {
+      if (fragmentIndex === 0) return "none";
+      const previous = fragments[fragmentIndex - 1];
+      const gapPx = fragment.left - previous.right;
+      const visibleGap = gapPx > Math.max(2, Math.min(fragment.fontSizePx, previous.fontSizePx) * 0.35);
+      if (!visibleGap) return "none";
+      const distinctScopes = fragment.mergeScope !== previous.mergeScope;
+      const columnGap = gapPx > Math.max(10, Math.min(fragment.fontSizePx, previous.fontSizePx) * 2.5);
+      return distinctScopes && columnGap && !fragment.officeDecoration && !previous.officeDecoration ? "tab" : "space";
+    });
+    const tabStops = fragments.slice(1).map((fragment, fragmentIndex) => {
+      if (separators[fragmentIndex + 1] !== "tab") return "";
+      const position = Math.max(0, Math.round(fragment.left * model.pxToPt * 20) - pageMarginTwips);
+      return `<w:tab w:val="left" w:pos="${position}"/>`;
+    }).join("");
+    const tabs = tabStops ? `<w:tabs>${tabStops}</w:tabs>` : "";
+    const runs = fragments.map((fragment, fragmentIndex) => {
+      const separator = separators[fragmentIndex] === "tab"
+        ? "<w:r><w:tab/></w:r>"
+        : separators[fragmentIndex] === "space"
+          ? '<w:r><w:t xml:space="preserve"> </w:t></w:r>'
+          : "";
+      const run = buildWordTextRunXml(model, fragment, fragment.text);
+      const relationshipId = fragment.href ? hyperlinkIds.get(fragment.href) : undefined;
+      const linkedRun = relationshipId
+        ? `<w:hyperlink r:id="${relationshipId}" w:history="1">${run}</w:hyperlink>`
+        : run;
+      return `${separator}${linkedRun}`;
+    }).join("");
+
+    const headingLevel = Math.min(...fragments.map((fragment) => fragment.headingLevel ?? 7));
+    const paragraphStyle = headingLevel <= 6 ? `<w:pStyle w:val="Heading${headingLevel}"/>` : "";
+    cursorPt = Math.max(cursorPt, lineTopPt) + lineHeightPt;
+    return `<w:p><w:pPr>${paragraphStyle}${tabs}<w:spacing w:before="${beforeTwips}" w:after="0" w:line="${lineHeightTwips}" w:lineRule="exact"/><w:ind w:left="${leftTwips}"/></w:pPr>${runs}</w:p>`;
+  }).join("");
 }
 
-function buildWordTextRunXml(fragment: TextFragment, text: string): string {
-  const fontSizeHalfPt = Math.max(8, Math.round(fragment.fontSizePx * 0.75 * 2));
+function buildWordHyperlinkIdMap(fragments: TextFragment[]): Map<string, string> {
+  const result = new Map<string, string>();
+  for (const fragment of fragments) {
+    if (!fragment.href || result.has(fragment.href)) continue;
+    result.set(fragment.href, `rIdMpeLink${result.size + 1}`);
+  }
+  return result;
+}
+
+async function injectWordHyperlinkRelationships(
+  zip: { file(path: string): { async(type: "string"): Promise<string> } | null; file(path: string, data: string): unknown },
+  hyperlinkIds: ReadonlyMap<string, string>
+): Promise<void> {
+  if (hyperlinkIds.size === 0) return;
+  const relationshipFile = zip.file("word/_rels/document.xml.rels");
+  if (!relationshipFile) throw new Error("DOCX document relationships are missing.");
+  let relationships = await relationshipFile.async("string");
+  const additions = Array.from(hyperlinkIds, ([href, relationshipId]) => (
+    `<Relationship Id="${relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${escapeXml(href)}" TargetMode="External"/>`
+  )).join("");
+  if (!/<\/Relationships>/u.test(relationships)) throw new Error("DOCX relationships XML is invalid.");
+  relationships = relationships.replace(/<\/Relationships>/u, `${additions}</Relationships>`);
+  zip.file("word/_rels/document.xml.rels", relationships);
+}
+
+function buildWordTextRunXml(model: PreviewPdfModel, fragment: TextFragment, text: string): string {
+  const fontSizeHalfPt = Math.max(8, Math.round(fragment.fontSizePx * model.pxToPt * 2));
   const fontFamily = escapeXml(getOfficeFontFamily(fragment));
   const bold = Number.parseInt(fragment.fontWeight, 10) >= 600 ? "<w:b/>" : "";
   const italic = fragment.fontStyle === "italic" ? "<w:i/>" : "";
   const underline = fragment.underline ? '<w:u w:val="single"/>' : "";
   const strike = fragment.lineThrough ? "<w:strike/>" : "";
-  return `<w:r><w:rPr><w:rFonts w:ascii="${fontFamily}" w:hAnsi="${fontFamily}" w:eastAsia="${fontFamily}"/>${bold}${italic}${underline}${strike}<w:color w:val="${colorToHex(fragment.color)}"/><w:sz w:val="${fontSizeHalfPt}"/><w:szCs w:val="${fontSizeHalfPt}"/></w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
+  return `<w:r><w:rPr><w:rFonts w:ascii="${fontFamily}" w:hAnsi="${fontFamily}" w:eastAsia="${fontFamily}"/>${bold}${italic}${underline}${strike}<w:color w:val="${colorToHex(fragment.color)}"/><w:sz w:val="${fontSizeHalfPt}"/><w:szCs w:val="${fontSizeHalfPt}"/></w:rPr>${buildWordTextPayloadXml(text)}</w:r>`;
+}
+
+function buildWordTextPayloadXml(text: string): string {
+  let xml = "";
+  let buffer = "";
+  const flush = () => {
+    if (!buffer) return;
+    xml += `<w:t xml:space="preserve">${escapeXml(buffer)}</w:t>`;
+    buffer = "";
+  };
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    const previous = index > 0 ? text[index - 1] : "";
+    const next = index < text.length - 1 ? text[index + 1] : "";
+    if (character === "-" && isAsciiDigit(previous) && isAsciiDigit(next)) {
+      flush();
+      xml += "<w:noBreakHyphen/>";
+    } else {
+      buffer += character;
+    }
+  }
+  flush();
+  return xml || '<w:t xml:space="preserve"></w:t>';
+}
+
+function isAsciiDigit(value: string): boolean {
+  return value >= "0" && value <= "9";
 }
 
 function escapeXml(value: string): string {
@@ -3768,9 +4207,11 @@ function appendSurfaceCapture(
     geometryKey(fragment),
     fragment.text,
     fragment.fontFamily,
-    fragment.fontWeight,
-    fragment.fontStyle,
-    JSON.stringify(fragment.color)
+      fragment.fontWeight,
+      fragment.fontStyle,
+      fragment.headingLevel ?? "",
+      fragment.officeDecoration ? "d" : "",
+      JSON.stringify(fragment.color)
   ].join("|"));
 
   const images = snapshot.imageFragments.map(offsetRect);
@@ -3826,6 +4267,8 @@ function dedupeOverlappingLiveTextFragments(fragments: TextFragment[]): TextFrag
       fragment.fontFamily,
       fragment.fontWeight,
       fragment.fontStyle,
+      fragment.headingLevel ?? "",
+      fragment.officeDecoration ? "d" : "",
       fragment.href ?? "",
       fragment.underline ? "u" : "",
       fragment.lineThrough ? "s" : "",
@@ -4342,6 +4785,7 @@ function captureBoxFragments(pageEl: HTMLElement): BoxFragment[] {
 
   for (const element of Array.from(pageEl.querySelectorAll<HTMLElement>("*"))) {
     if (!isExportableElement(element)) continue;
+    if (element.matches("input[type='checkbox']")) continue;
 
     const style = getComputedStyle(element);
     const background = normalizeVisibleCssColor(style.backgroundColor);
@@ -4869,11 +5313,17 @@ function withExportableElementCache<T>(callback: () => T): T {
   }
 }
 
+function isLivePreviewMarkdownSyntaxElement(element: Element): boolean {
+  const formatting = element.closest('[class*="cm-formatting"]');
+  return Boolean(formatting && !formatting.classList.contains("cm-formatting-hashtag"));
+}
+
 function isExportableElement(element: Element): boolean {
   const cached = exportableElementCache?.get(element);
   if (cached !== undefined) return cached;
 
   if (
+    isLivePreviewMarkdownSyntaxElement(element) ||
     element.closest(
       ".mobile-pdf-exporter-skip, .collapse-indicator, .heading-collapse-indicator, .markdown-embed-link, .copy-code-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-format-toolbar, .notedraw-selection-menu, .notedraw-fallback-button, .notedraw-header-button, style, script"
     )
@@ -4913,6 +5363,7 @@ function measureTextNode(
 ): TextFragment[] {
   const style = getComputedStyle(parent);
   const mergeScope = getTextMergeScope(parent);
+  const headingLevel = getTextHeadingLevel(parent);
   const fontSizePx = parseFloat(style.fontSize) || 16;
   const linkElement = parent.closest("a, .internal-link, .external-link");
   const href = resolveLinkHref(linkElement, linkContext);
@@ -4951,6 +5402,7 @@ function measureTextNode(
         underline: current.underline,
         lineThrough: current.lineThrough,
         href: current.href,
+        headingLevel: current.headingLevel,
         mergeScope: current.mergeScope
       });
     }
@@ -5007,6 +5459,7 @@ function measureTextNode(
         underline,
         lineThrough,
         href,
+        headingLevel,
         mergeScope
       };
     }
@@ -5021,6 +5474,18 @@ function measureTextNode(
   pushCurrent();
   range.detach();
   return fragments;
+}
+
+function getTextHeadingLevel(parent: HTMLElement): number | undefined {
+  const semanticHeading = parent.closest<HTMLElement>("h1, h2, h3, h4, h5, h6");
+  const semanticMatch = semanticHeading?.tagName.match(/^H([1-6])$/u);
+  if (semanticMatch) return Number(semanticMatch[1]);
+
+  const livePreviewHeading = parent.closest<HTMLElement>(
+    '.HyperMD-header, [class*="HyperMD-header-"], .cm-header, [class*="cm-header-"]'
+  );
+  const classMatch = livePreviewHeading?.className.match(/(?:HyperMD-header|cm-header)-([1-6])/u);
+  return classMatch ? Number(classMatch[1]) : undefined;
 }
 
 function getTextMergeScope(parent: HTMLElement): Element {
@@ -5654,6 +6119,96 @@ function addLinkAnnotation(page: PDFPage, href: string, x: number, y: number, wi
   }
 }
 
+function drawNoteDrawInkAnnotationLayer(
+  page: PDFPage,
+  strokes: PdfInkStroke[],
+  options: {
+    pageTopPx: number;
+    pageBottomPx: number;
+    pageHeightPt: number;
+    pxToPt: number;
+    contentTopInsetPx: number;
+  }
+): void {
+  for (const stroke of strokes) {
+    const offsets = stroke.brush === "watercolor"
+      ? [{ x: 0, y: 0 }]
+      : getNoteDoodlePenOffsets(stroke.count, stroke.widthPx);
+    const pagePaths = offsets.flatMap((offset) => splitInkPathForPage(
+      stroke.points.map((point) => ({ x: point.x + offset.x, y: point.y + offset.y })),
+      options.pageTopPx,
+      options.pageBottomPx
+    ));
+    if (!pagePaths.length) continue;
+
+    const pdfPaths = pagePaths.map((path) => path.map((point) => ({
+      x: point.x * options.pxToPt,
+      y: options.pageHeightPt - (
+        options.contentTopInsetPx + point.y - options.pageTopPx
+      ) * options.pxToPt
+    })));
+    const allPoints = pdfPaths.flat();
+    const widthPt = Math.max(
+      0.5,
+      stroke.widthPx * options.pxToPt * (stroke.brush === "watercolor" ? 2.15 : 1)
+    );
+    const padding = widthPt / 2 + 1;
+    const left = Math.max(0, Math.min(...allPoints.map((point) => point.x)) - padding);
+    const right = Math.min(page.getWidth(), Math.max(...allPoints.map((point) => point.x)) + padding);
+    const bottom = Math.max(0, Math.min(...allPoints.map((point) => point.y)) - padding);
+    const top = Math.min(page.getHeight(), Math.max(...allPoints.map((point) => point.y)) + padding);
+    if (right <= left || top <= bottom) continue;
+
+    const color = parseCssColor(stroke.color) ?? rgb(0.9, 0.12, 0.12);
+    const components = color as unknown as { red?: number; green?: number; blue?: number };
+    const opacity = clampNumber(stroke.opacity, 0.08, 1, 0.54);
+
+    try {
+      const context = page.doc.context;
+      const annotation = context.obj({
+        Type: "Annot",
+        Subtype: "Ink",
+        Rect: [left, bottom, right, top],
+        InkList: pdfPaths.map((path) => path.flatMap((point) => [point.x, point.y])),
+        C: [
+          clampNumber(components.red, 0, 1, 0.9),
+          clampNumber(components.green, 0, 1, 0.12),
+          clampNumber(components.blue, 0, 1, 0.12)
+        ],
+        CA: opacity,
+        Border: [0, 0, widthPt],
+        BS: { W: widthPt, S: "S" },
+        F: 4,
+        IT: "Ink"
+      });
+      page.node.addAnnot(context.register(annotation));
+    } catch (error) {
+      console.warn("Mobile PDF Exporter NoteDraw ink annotation failed", error);
+    }
+  }
+}
+
+function splitInkPathForPage(
+  points: Array<{ x: number; y: number }>,
+  pageTopPx: number,
+  pageBottomPx: number
+): Array<Array<{ x: number; y: number }>> {
+  const paths: Array<Array<{ x: number; y: number }>> = [];
+  let current: Array<{ x: number; y: number }> = [];
+  const finish = (): void => {
+    if (current.length === 1) current.push({ ...current[0], x: current[0].x + 0.01 });
+    if (current.length >= 2) paths.push(current);
+    current = [];
+  };
+
+  for (const point of points) {
+    if (point.y >= pageTopPx && point.y <= pageBottomPx) current.push(point);
+    else finish();
+  }
+  finish();
+  return paths;
+}
+
 function stripProblematicPdfChars(text: string): string {
   let stripped = "";
   for (const char of text) {
@@ -5697,6 +6252,7 @@ async function renderPreviewPageToPngBytes(
     colorMode: PdfColorMode;
     rasterScale: number;
     includeText?: boolean;
+    includeDecorations?: boolean;
   }
 ): Promise<Uint8Array> {
   const pageTopPx = model.pageBreaks[pageIndex];
@@ -5736,13 +6292,15 @@ async function renderPreviewPageToPngBytes(
     pageHeightPx: model.bodyHeightPx,
     rasterScale: scale
   });
-  drawCanvasDecorationLayer(context, model.decorationFragments, {
-    pageTopPx,
-    pageBottomPx,
-    sourceWidthPx: model.sourceWidthPx,
-    pageHeightPx: model.bodyHeightPx,
-    colorMode: "color"
-  });
+  if (options.includeDecorations !== false) {
+    drawCanvasDecorationLayer(context, model.decorationFragments, {
+      pageTopPx,
+      pageBottomPx,
+      sourceWidthPx: model.sourceWidthPx,
+      pageHeightPx: model.bodyHeightPx,
+      colorMode: "color"
+    });
+  }
   if (options.includeText !== false) {
     drawCanvasTextLayer(context, model.textFragments, {
       pageTopPx,
@@ -6096,6 +6654,15 @@ function drawCanvasBitmapLayer(
       console.warn("Mobile PDF Exporter canvas bitmap draw failed", error);
     }
   }
+}
+
+function isNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
+  const canvas = fragment.element;
+  return canvas.matches(
+    ".mobile-pdf-exporter-note-doodle-canvas, .notedraw-canvas, .notedraw-static-canvas, .note-doodle-canvas, .notedraw-export-image-canvas"
+  ) || Boolean(canvas.closest(
+    ".notedraw-shell, .note-doodle-shell, .notedraw-export-image-canvas-layer"
+  ));
 }
 
 function drawCanvasDecorationLayer(

@@ -830,7 +830,17 @@ export default class MobilePdfExporterPlugin extends Plugin {
       throwIfExportCancelled(signal);
       let outputBlob: Blob;
       let model: PreviewPdfModel | null = null;
-      if (format === "pdf" && isMarkdown && isExcalidrawMarkdownFile(file, markdown)) {
+      if (format === "html" && isMarkdown) {
+        rendered = await this.renderMarkdownPreview(file, markdown, "html");
+        const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
+        const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(noteDrawFile, noteDrawHost);
+        try {
+          await nextAnimationFrame();
+          outputBlob = await buildRenderedDomHtml(file, rendered.pageEl, signal);
+        } finally {
+          preparedNoteDraw.cleanup();
+        }
+      } else if (format === "pdf" && isMarkdown && isExcalidrawMarkdownFile(file, markdown)) {
         outputBlob = await this.renderExcalidrawToImagePdf(file, signal);
       } else {
         const liveSurface = this.getActiveExportSurface(file);
@@ -1347,10 +1357,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
     };
   }
 
-  private async renderMarkdownPreview(file: TFile, markdown: string): Promise<RenderedPreview> {
+  private async renderMarkdownPreview(
+    file: TFile,
+    markdown: string,
+    layout: "pdf" | "html" = "pdf"
+  ): Promise<RenderedPreview> {
     const pageSizeMm = getConfiguredPageSizeMm(this.settings);
-    const renderWidthPx = mmToPx(pageSizeMm.width);
-    const paddingPx = mmToPx(this.settings.marginMm);
+    const renderWidthPx = layout === "html" ? 960 : mmToPx(pageSizeMm.width);
+    const paddingPx = layout === "html" ? 48 : mmToPx(this.settings.marginMm);
     const pageHeightPx = mmToPx(pageSizeMm.height);
     const { bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
     const isExcalidrawFile = isExcalidrawMarkdownFile(file, markdown);
@@ -1810,9 +1824,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (format === "docx") {
       return buildEditableDocx(file, pageModel);
     }
+    if (format === "html") {
+      return buildSemanticHtml(file, model);
+    }
     const pages = await this.renderModelPagesToPng(model, signal, true, true);
     if (format === "png") return combinePngPages(pages);
-    return buildSelfContainedHtml(file, model, pages);
+    throw new Error("Unsupported export format.");
   }
 
   private async renderModelPagesToPng(
@@ -3390,6 +3407,94 @@ function colorToHex(color: Color): string {
     .join("");
 }
 
+interface OfficeMediaFragment {
+  data: Uint8Array;
+  leftPx: number;
+  topPx: number;
+  widthPx: number;
+  heightPx: number;
+}
+
+async function getOfficeMediaFragments(model: PreviewPdfModel, pageIndex: number): Promise<OfficeMediaFragment[]> {
+  const pageTopPx = model.pageBreaks[pageIndex];
+  const pageBottomPx = model.pageBreaks[pageIndex + 1];
+  const options = {
+    pageTopPx,
+    pageBottomPx,
+    sourceWidthPx: model.sourceWidthPx,
+    pageHeightPx: model.bodyHeightPx
+  };
+  const media: OfficeMediaFragment[] = [];
+  const append = (data: Uint8Array | null, slice: MediaPageSlice): void => {
+    if (!data || data.length === 0) return;
+    media.push({
+      data,
+      leftPx: slice.x,
+      topPx: model.bodyTopInsetPx + slice.y,
+      widthPx: slice.width,
+      heightPx: slice.height
+    });
+  };
+
+  for (const fragment of model.imageFragments) {
+    const slice = getMediaPageSlice(fragment, options);
+    if (!slice) continue;
+    try {
+      append(await imageFragmentSliceToPngBytes(fragment.element, slice.offsetTopPx, slice.height, slice.fragmentHeightPx), slice);
+    } catch (error) {
+      console.warn("Mobile PDF Exporter Office image export failed", error);
+    }
+  }
+
+  for (const fragment of model.canvasFragments) {
+    const slice = getMediaPageSlice(fragment, options);
+    if (!slice) continue;
+    try {
+      append(canvasFragmentSliceToPngBytes(fragment, slice), slice);
+    } catch (error) {
+      console.warn("Mobile PDF Exporter Office canvas export failed", error);
+    }
+  }
+
+  for (const fragment of model.svgFragments) {
+    const slice = getMediaPageSlice(fragment, options);
+    if (!slice) continue;
+    try {
+      const fullBytes = await svgElementToPngBytes(fragment.element, 1.5, SVG_IMAGE_LOAD_TIMEOUT_MS, "color");
+      if (!fullBytes) continue;
+      const image = await imageBytesToHtmlImage(fullBytes);
+      const sourceHeight = Math.max(1, image.naturalHeight || image.height);
+      const sourceY = (slice.offsetTopPx / slice.fragmentHeightPx) * sourceHeight;
+      const sourceSliceHeight = (slice.height / slice.fragmentHeightPx) * sourceHeight;
+      append(await imageSliceToPngBytes(image, sourceY, sourceSliceHeight), slice);
+    } catch (error) {
+      console.warn("Mobile PDF Exporter Office SVG export failed", error);
+    }
+  }
+
+  return media;
+}
+
+function canvasFragmentSliceToPngBytes(fragment: CanvasFragment, slice: MediaPageSlice): Uint8Array | null {
+  const cssWidth = Math.max(1, fragment.right - fragment.left);
+  const cssHeight = Math.max(1, fragment.bottom - fragment.top);
+  const sourceWidth = Math.max(1, fragment.sourceRightPx - fragment.sourceLeftPx);
+  const sourceHeight = Math.max(1, fragment.sourceBottomPx - fragment.sourceTopPx);
+  const ratioX = sourceWidth / cssWidth;
+  const ratioY = sourceHeight / cssHeight;
+  const sourceX = fragment.sourceLeftPx;
+  const sourceY = Math.max(fragment.sourceTopPx, Math.floor(fragment.sourceTopPx + slice.offsetTopPx * ratioY));
+  const cropWidth = Math.max(1, Math.min(sourceWidth, Math.ceil(slice.width * ratioX)));
+  const cropHeight = Math.max(1, Math.min(fragment.sourceBottomPx - sourceY, Math.ceil(slice.height * ratioY)));
+  const canvas = createCanvas(fragment.element);
+  canvas.width = Math.max(1, Math.ceil(slice.width));
+  canvas.height = Math.max(1, Math.ceil(slice.height));
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.drawImage(fragment.element, sourceX, sourceY, cropWidth, cropHeight, 0, 0, canvas.width, canvas.height);
+  return dataUrlToUint8Array(canvas.toDataURL("image/png"));
+}
+
 async function buildEditablePptx(
   file: TFile,
   model: PreviewPdfModel
@@ -3408,6 +3513,15 @@ async function buildEditablePptx(
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
     const slide = pptx.addSlide();
     slide.background = { color: "FFFFFF" };
+    for (const media of await getOfficeMediaFragments(model, pageIndex)) {
+      slide.addImage({
+        data: bytesToDataUrl(media.data),
+        x: media.leftPx * model.pxToPt / 72,
+        y: media.topPx * model.pxToPt / 72,
+        w: media.widthPx * model.pxToPt / 72,
+        h: media.heightPx * model.pxToPt / 72
+      });
+    }
     for (const line of getPageOfficeTextLines(model, pageIndex)) {
       for (const fragment of line.fragments) {
         const layout = getPptTextBoxLayout(model, pageIndex, fragment);
@@ -3454,23 +3568,51 @@ async function buildEditableDocx(
 ): Promise<Blob> {
   const {
     Document,
-    LineRuleType,
+    HorizontalPositionRelativeFrom,
+    ImageRun,
     Packer,
     Paragraph,
-    TextRun
+    TextRun,
+    TextWrappingType,
+    VerticalPositionRelativeFrom
   } = await import("docx");
   const pageCount = Math.max(0, model.pageBreaks.length - 1);
-  const sections = Array.from({ length: pageCount }, (_, pageIndex) => ({
-      properties: {
-        page: {
-          size: { width: Math.round(model.pageWidthPt * 20), height: Math.round(model.pageHeightPt * 20) },
-          margin: { top: 360, right: 360, bottom: 360, left: 360 }
-        }
+  const sections = await Promise.all(Array.from({ length: pageCount }, async (_, pageIndex) => {
+    const imageRuns = (await getOfficeMediaFragments(model, pageIndex)).map((media) => new ImageRun({
+      type: "png",
+      data: media.data,
+      transformation: {
+        width: Math.max(1, Math.round(media.widthPx)),
+        height: Math.max(1, Math.round(media.heightPx))
       },
-      children: [
-        new Paragraph({ children: [new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
-      ]
+      floating: {
+        horizontalPosition: {
+          relative: HorizontalPositionRelativeFrom.PAGE,
+          offset: Math.round(media.leftPx * 9525)
+        },
+        verticalPosition: {
+          relative: VerticalPositionRelativeFrom.PAGE,
+          offset: Math.round(media.topPx * 9525)
+        },
+        wrap: { type: TextWrappingType.NONE },
+        behindDocument: true,
+        allowOverlap: true,
+        lockAnchor: true,
+        zIndex: 1
+      }
     }));
+    return {
+     properties: {
+       page: {
+         size: { width: Math.round(model.pageWidthPt * 20), height: Math.round(model.pageHeightPt * 20) },
+         margin: { top: 360, right: 360, bottom: 360, left: 360 }
+       }
+     },
+     children: [
+        new Paragraph({ children: [...imageRuns, new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
+     ]
+    };
+  }));
   const document = new Document({
     creator: "Obsidian Mobile PDF Exporter",
     title: file.basename,
@@ -3594,8 +3736,15 @@ async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): 
     const marker = `__MPE_PAGE_${pageIndex}__`;
     const markerParagraph = new RegExp(`<w:p(?=[ >])(?:(?!<\\/w:p>)[\\s\\S])*?${marker}(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`, "u");
     const paragraphs = buildWordFlowTextParagraphsXml(model, pageIndex, hyperlinkIds);
-    if (!markerParagraph.test(xml)) throw new Error(`DOCX page marker ${pageIndex + 1} is missing.`);
-    xml = xml.replace(markerParagraph, paragraphs);
+    const markerMatch = xml.match(markerParagraph);
+    if (!markerMatch) throw new Error(`DOCX page marker ${pageIndex + 1} is missing.`);
+    const markerXml = markerMatch[0];
+    const drawingRuns = markerXml.match(/<w:r(?=[ >])[\s\S]*?<w:drawing[\s\S]*?<\/w:r>/gu) ?? [];
+    const paragraphProperties = markerXml.match(/<w:pPr(?=[ >])[\s\S]*?<\/w:pPr>/u)?.[0] ?? "";
+    const mediaParagraph = drawingRuns.length > 0
+      ? `<w:p>${paragraphProperties}${drawingRuns.join("")}</w:p>`
+      : "";
+    xml = xml.replace(markerParagraph, `${mediaParagraph}${paragraphs}`);
   }
   zip.file("word/document.xml", xml);
   await injectWordHyperlinkRelationships(zip, hyperlinkIds);
@@ -3737,6 +3886,130 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
   })[character] ?? character);
+}
+
+const HTML_INLINE_STYLE_PROPERTIES = [
+  "display", "visibility", "position", "float", "clear", "box-sizing",
+  "width", "min-width", "max-width", "height", "min-height", "max-height",
+  "margin-top", "margin-right", "margin-bottom", "margin-left",
+  "padding-top", "padding-right", "padding-bottom", "padding-left",
+  "overflow", "overflow-x", "overflow-y", "color", "background-color",
+  "background-image", "background-position", "background-size", "background-repeat",
+  "border-top", "border-right", "border-bottom", "border-left", "border-radius", "box-shadow",
+  "font-family", "font-size", "font-weight", "font-style", "font-variant", "line-height",
+  "letter-spacing", "word-spacing", "text-align", "text-indent", "text-decoration",
+  "text-transform", "white-space", "word-break", "overflow-wrap", "vertical-align",
+  "list-style-type", "list-style-position", "table-layout", "border-collapse", "border-spacing",
+  "object-fit", "object-position", "opacity", "filter", "transform", "transform-origin",
+  "gap", "row-gap", "column-gap", "grid-template-columns", "grid-template-rows", "grid-auto-flow",
+  "align-items", "justify-content", "align-content", "flex-direction", "flex-wrap",
+  "flex-grow", "flex-shrink", "flex-basis", "order", "z-index", "top", "right", "bottom", "left"
+] as const;
+
+const HTML_FLOW_SIZE_PROPERTIES = new Set<string>([
+  "width", "min-width", "max-width", "height", "min-height", "max-height"
+]);
+const HTML_POSITION_OFFSET_PROPERTIES = new Set<string>(["top", "right", "bottom", "left"]);
+
+async function buildRenderedDomHtml(file: TFile, pageEl: HTMLElement, signal?: AbortSignal): Promise<Blob> {
+  throwIfExportCancelled(signal);
+  await waitForImages(pageEl, IMAGE_WAIT_TIMEOUT_MS);
+  const clone = pageEl.cloneNode(true) as HTMLElement;
+  const sourceElements = [pageEl, ...Array.from(pageEl.querySelectorAll<HTMLElement>("*"))];
+  const clonedElements = [clone, ...Array.from(clone.querySelectorAll<HTMLElement>("*"))];
+  for (let index = 0; index < Math.min(sourceElements.length, clonedElements.length); index += 1) {
+    copyRenderedHtmlStyle(sourceElements[index], clonedElements[index]);
+  }
+  await inlineRenderedHtmlMedia(sourceElements, clonedElements, signal);
+  clone.querySelectorAll("script,style,link,button,.collapse-indicator,.heading-collapse-indicator,.markdown-embed-link,.edit-block-button,.copy-code-button,.notedraw-toolbar,.note-doodle-toolbar").forEach((element) => element.remove());
+  clone.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {
+    const dataHref = anchor.getAttribute("data-href");
+    if (dataHref && /^(?:app|obsidian):\/\//iu.test(anchor.href)) anchor.setAttribute("href", dataHref);
+    if (/^https?:\/\//iu.test(anchor.href)) {
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+    }
+  });
+  const widthPx = Math.max(320, Math.ceil(pageEl.getBoundingClientRect().width || pageEl.scrollWidth));
+  clone.classList.add("mpe-rendered-document");
+  clone.setAttribute("contenteditable", "true");
+  clone.setAttribute("spellcheck", "false");
+  clone.style.setProperty("width", "100%", "important");
+  clone.style.setProperty("max-width", `${widthPx}px`, "important");
+  clone.style.setProperty("height", "auto", "important");
+  clone.style.setProperty("min-height", "0", "important");
+  clone.style.setProperty("overflow", "visible", "important");
+  clone.style.setProperty("transform", "none", "important");
+  const html = `<!doctype html><html lang="zh-CN" data-mpe-format="rendered-dom"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(file.basename)}</title><style>*{box-sizing:border-box}html{background:#eef1f5}body{margin:0;padding:24px;background:#eef1f5;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}.mpe-rendered-document{margin:0 auto!important;background:#fff;box-shadow:0 8px 28px #0002}.mpe-rendered-document .markdown-preview-view{width:100%!important;max-width:100%!important;height:auto!important;overflow:visible!important}.mpe-rendered-document img{max-width:100%;height:auto!important}.mpe-rendered-document table{width:100%;max-width:100%;}.mpe-rendered-document:focus{outline:none}@media(max-width:${widthPx + 48}px){body{padding:12px}.mpe-rendered-document{box-shadow:none}}@media print{html,body{padding:0;background:#fff}.mpe-rendered-document{max-width:none!important;box-shadow:none}}</style></head><body><main>${clone.outerHTML}</main></body></html>`;
+  return new Blob([html], { type: "text/html;charset=utf-8" });
+}
+
+function copyRenderedHtmlStyle(source: HTMLElement, target: HTMLElement): void {
+  const style = getComputedStyle(source);
+  const preservesSize = source.matches("img,picture,svg,canvas,video,iframe,object,embed") ||
+    style.position === "absolute" || style.position === "fixed";
+  for (const property of HTML_INLINE_STYLE_PROPERTIES) {
+    if (!preservesSize && HTML_FLOW_SIZE_PROPERTIES.has(property)) continue;
+    if (style.position !== "absolute" && style.position !== "fixed" && HTML_POSITION_OFFSET_PROPERTIES.has(property)) continue;
+    const value = style.getPropertyValue(property);
+    if (value) target.style.setProperty(property, value);
+  }
+}
+
+async function inlineRenderedHtmlMedia(
+  sourceElements: HTMLElement[],
+  clonedElements: HTMLElement[],
+  signal?: AbortSignal
+): Promise<void> {
+  for (let index = 0; index < Math.min(sourceElements.length, clonedElements.length); index += 1) {
+    throwIfExportCancelled(signal);
+    const source = sourceElements[index];
+    const target = clonedElements[index];
+    if (source instanceof HTMLImageElement && target instanceof HTMLImageElement) {
+      try {
+        const height = Math.max(1, source.getBoundingClientRect().height || source.height || source.naturalHeight);
+        const bytes = await imageFragmentSliceToPngBytes(source, 0, height, height, "color");
+        target.src = bytesToDataUrl(bytes);
+        target.removeAttribute("srcset");
+        target.removeAttribute("loading");
+      } catch (error) {
+        console.warn("Mobile PDF Exporter HTML image inline failed", error);
+      }
+      continue;
+    }
+    if (source instanceof HTMLCanvasElement && target instanceof HTMLCanvasElement) {
+      try {
+        const image = target.ownerDocument.createElement("img");
+        image.className = `${target.className} mpe-export-canvas`;
+        image.style.cssText = target.style.cssText;
+        image.src = source.toDataURL("image/png");
+        target.replaceWith(image);
+      } catch (error) {
+        console.warn("Mobile PDF Exporter HTML canvas inline failed", error);
+      }
+      continue;
+    }
+    if (source instanceof SVGSVGElement && target instanceof SVGSVGElement) {
+      try {
+        const bytes = await svgElementToPngBytes(source, 2, SVG_IMAGE_LOAD_TIMEOUT_MS, "color");
+        if (!bytes) continue;
+        const image = target.ownerDocument.createElement("img");
+        image.className = `${target.getAttribute("class") ?? ""} mpe-export-svg`;
+        image.style.cssText = target.style.cssText;
+        image.src = bytesToDataUrl(bytes);
+        target.replaceWith(image);
+      } catch (error) {
+        console.warn("Mobile PDF Exporter HTML SVG inline failed", error);
+      }
+      continue;
+    }
+    if (source instanceof HTMLInputElement && target instanceof HTMLInputElement) {
+      target.checked = source.checked;
+      target.value = source.value;
+      if (source.checked) target.setAttribute("checked", "");
+    }
+    if (source instanceof HTMLDetailsElement && target instanceof HTMLDetailsElement) target.open = source.open;
+  }
 }
 
 function buildSelfContainedHtml(file: TFile, model: PreviewPdfModel, pages: Uint8Array[]): Blob {
@@ -5311,6 +5584,42 @@ function withExportableElementCache<T>(callback: () => T): T {
   } finally {
     exportableElementCache = previousCache;
   }
+}
+
+async function buildSemanticHtml(file: TFile, model: PreviewPdfModel): Promise<Blob> {
+  const pageWidthCssPx = model.pageWidthPt / 72 * 96;
+  const pageHeightCssPx = model.pageHeightPt / 72 * 96;
+  const pageCount = Math.max(0, model.pageBreaks.length - 1);
+  const pageMarkup = (await Promise.all(Array.from({ length: pageCount }, async (_, pageIndex) => {
+    const pageTop = model.pageBreaks[pageIndex];
+    const pageBottom = model.pageBreaks[pageIndex + 1];
+    const toCssPx = (value: number): number => value * model.pxToPt / 72 * 96;
+    const boxes = model.boxFragments.filter((box) => box.bottom > pageTop && box.top < pageBottom).map((box) => {
+      const top = Math.max(box.top, pageTop) - pageTop + model.bodyTopInsetPx;
+      const bottom = Math.min(box.bottom, pageBottom) - pageTop + model.bodyTopInsetPx;
+      const left = Math.max(0, box.left);
+      const right = Math.min(model.sourceWidthPx, box.right);
+      if (bottom <= top || right <= left) return "";
+      const border = (side: CssBorderFragment | null): string => side
+        ? `${side.widthPx}px solid ${escapeHtml(side.color)}`
+        : "none";
+      return `<div class="page-box" style="left:${toCssPx(left)}px;top:${toCssPx(top)}px;width:${toCssPx(right - left)}px;height:${toCssPx(bottom - top)}px;background:${escapeHtml(box.background ?? "transparent")};border-top:${border(box.borderTop)};border-right:${border(box.borderRight)};border-bottom:${border(box.borderBottom)};border-left:${border(box.borderLeft)};border-radius:${toCssPx(box.borderRadiusPx)}px"></div>`;
+    }).join("");
+    const media = (await getOfficeMediaFragments(model, pageIndex)).map((fragment) => (
+      `<img class="page-media" alt="" draggable="false" src="${bytesToDataUrl(fragment.data)}" style="left:${toCssPx(fragment.leftPx)}px;top:${toCssPx(fragment.topPx)}px;width:${toCssPx(fragment.widthPx)}px;height:${toCssPx(fragment.heightPx)}px">`
+    )).join("");
+    const text = getPageTextFragments(model, pageIndex).map((fragment) => {
+      const style = `left:${toCssPx(fragment.left)}px;top:${toCssPx(fragment.top - pageTop + model.bodyTopInsetPx)}px;width:${Math.max(1, toCssPx(fragment.right - fragment.left))}px;min-height:${Math.max(1, toCssPx(fragment.bottom - fragment.top))}px;font-family:${escapeHtml(fragment.fontFamily)};font-size:${Math.max(4, toCssPx(fragment.fontSizePx))}px;font-weight:${escapeHtml(fragment.fontWeight)};font-style:${escapeHtml(fragment.fontStyle)};line-height:${Math.max(1, toCssPx(fragment.bottom - fragment.top))}px;color:#${colorToHex(fragment.color)};text-decoration:${fragment.underline ? "underline" : fragment.lineThrough ? "line-through" : "none"};`;
+      const content = escapeHtml(fragment.text);
+      return fragment.href
+        ? `<a class="page-text" contenteditable="true" href="${escapeHtml(fragment.href)}" target="_blank" rel="noopener" style="${style}">${content}</a>`
+        : `<span class="page-text" contenteditable="true" style="${style}">${content}</span>`;
+    }).join("");
+    return `<section class="page" aria-label="Page ${pageIndex + 1}"><div class="page-content">${boxes}${media}${text}</div></section>`;
+  }))).join("");
+  const background = colorToCss(model.background, "color");
+  const html = `<!doctype html><html lang="zh-CN" data-mpe-format="semantic-layout"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(file.basename)}</title><style>*{box-sizing:border-box}html{background:#e9edf2}body{margin:0;padding:24px;background:#e9edf2;font-family:system-ui,sans-serif;color:#1f2937}.page{position:relative;width:min(100%,${pageWidthCssPx}px);height:${pageHeightCssPx}px;margin:0 auto 24px;background:${escapeHtml(background)};box-shadow:0 8px 28px #0002;overflow:hidden}.page-content{position:absolute;inset:0;overflow:hidden}.page-box{position:absolute;z-index:0;pointer-events:none}.page-media{position:absolute;z-index:1;display:block;max-width:none;object-fit:fill;user-select:none}.page-text{position:absolute;z-index:2;display:block;overflow:visible;white-space:pre-wrap;word-break:normal;overflow-wrap:normal;outline:none;text-decoration-thickness:from-font}.page-text:focus{z-index:4;background:#fff;box-shadow:0 0 0 2px #2f6feb;border-radius:2px}.page-text[href]{cursor:pointer}@media print{html,body{padding:0;background:#fff}.page{width:100%;height:auto;min-height:${pageHeightCssPx}px;margin:0;box-shadow:none;break-after:page}.page-content{position:relative;min-height:${pageHeightCssPx}px}}</style></head><body>${pageMarkup}</body></html>`;
+  return new Blob([html], { type: "text/html;charset=utf-8" });
 }
 
 function isLivePreviewMarkdownSyntaxElement(element: Element): boolean {

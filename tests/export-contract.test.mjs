@@ -150,10 +150,17 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /for \(const line of getPageOfficeTextLines\(model, pageIndex\)\)/);
   assert.match(source, /slide\.addText\(fragment\.text,/);
   assert.doesNotMatch(source, /slide\.addImage\(\{ data: bytesToDataUrl\(pages\[pageIndex\]\)/);
-  assert.doesNotMatch(source, /new ImageRun\(/);
+  assert.match(source, /async function getOfficeMediaFragments\(model: PreviewPdfModel, pageIndex: number\)/);
+  assert.match(source, /for \(const media of await getOfficeMediaFragments\(model, pageIndex\)\)/);
+  assert.match(source, /slide\.addImage\(\{\s*data: bytesToDataUrl\(media\.data\)/);
+  assert.match(source, /new ImageRun\(\{/);
+  assert.match(source, /behindDocument: true/);
+  assert.match(source, /wrap: \{ type: TextWrappingType\.NONE \}/);
   assert.doesNotMatch(source, /new Header\(/);
-  assert.match(source, /new Paragraph\(\{ children: \[new TextRun\(`__MPE_PAGE_\$\{pageIndex\}__`\)\] \}\)/);
+  assert.match(source, /new Paragraph\(\{ children: \[\.\.\.imageRuns, new TextRun\(`__MPE_PAGE_\$\{pageIndex\}__`\)\] \}\)/);
   assert.match(source, /const markerParagraph = new RegExp\(`<w:p\(\?=\[ >\]\)\(\?:\(\?!/);
+  assert.match(source, /const drawingRuns = markerXml\.match\(/);
+  assert.match(source, /const mediaParagraph = drawingRuns\.length > 0/);
   assert.match(source, /<w:tabs>\$\{tabStops\}<\/w:tabs>/);
   assert.match(source, /const visibleGap = gapPx > Math\.max\(2,/);
   assert.match(source, /return distinctScopes && columnGap && !fragment\.officeDecoration && !previous\.officeDecoration \? "tab" : "space"/);
@@ -182,6 +189,24 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.doesNotMatch(source, /const officePreviewPages = editableOffice/);
   assert.doesNotMatch(source, /injectOfficePreviewPages\(blob, model, previewPages\)/);
   assert.doesNotMatch(source, /injectOfficePreviewPages\(editable, model, previewPages\)/);
+});
+
+test("HTML export uses semantic layers instead of a full-page PNG wrapper", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /if \(format === "html" && isMarkdown\)/);
+  assert.match(source, /outputBlob = await buildRenderedDomHtml\(file, rendered\.pageEl, signal\)/);
+  assert.match(source, /async function buildRenderedDomHtml\(file: TFile, pageEl: HTMLElement, signal\?: AbortSignal\)/);
+  assert.match(source, /data-mpe-format="rendered-dom"/);
+  assert.match(source, /copyRenderedHtmlStyle\(sourceElements\[index\], clonedElements\[index\]\)/);
+  assert.match(source, /const HTML_FLOW_SIZE_PROPERTIES = new Set<string>/);
+  assert.match(source, /if \(!preservesSize && HTML_FLOW_SIZE_PROPERTIES\.has\(property\)\) continue/);
+  assert.match(source, /\.mpe-rendered-document img\{max-width:100%;height:auto!important\}/);
+  assert.match(source, /await inlineRenderedHtmlMedia\(sourceElements, clonedElements, signal\)/);
+  assert.match(source, /target\.src = bytesToDataUrl\(bytes\)/);
+  assert.match(source, /source\.toDataURL\("image\/png"\)/);
+  assert.match(source, /target\.replaceWith\(image\)/);
+  assert.doesNotMatch(source, /return buildSelfContainedHtml\(file, model, pages\)/);
 });
 
 test("live preview Markdown syntax is omitted without removing hashtag text", async () => {

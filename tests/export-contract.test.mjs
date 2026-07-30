@@ -132,3 +132,15 @@ test("remote images fall back to Obsidian requests when canvas export is cross-o
   assert.match(source, /if \(crossOrigin\) image\.crossOrigin = crossOrigin/);
   assert.match(source, /new Blob\(\[bytes\.buffer\], \{ type: contentType\.split\(";", 1\)\[0\] \}\)/);
 });
+
+test("Office exports keep editable text anchored to PDF fragment coordinates", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /function getOfficeTextFragmentLayout\(/);
+  assert.match(source, /for \(const line of getPageOfficeTextLines\(model, pageIndex\)\) \{\s*for \(const fragment of line\.fragments\)/);
+  assert.match(source, /const layout = getPptTextBoxLayout\(model, pageIndex, fragment\)/);
+  assert.doesNotMatch(source, /fit:\s*"shrink"/);
+  assert.match(source, /\.flatMap\(\(line\) => line\.fragments\)/);
+  assert.match(source, /buildWordTextBoxXml\(model, pageIndex, fragment, fragmentIndex\)/);
+  assert.match(source, /return usable \|\| "Noto Sans SC"/);
+});

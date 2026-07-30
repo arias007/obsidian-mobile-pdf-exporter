@@ -1618,20 +1618,25 @@ export default class MobilePdfExporterPlugin extends Plugin {
         ? this.renderPreviewToImagePdf(file, model, signal)
         : this.renderPreviewToSelectablePdf(file, model, signal);
     }
-    const pages = await this.renderModelPagesToPng(model, signal);
+    const pages = await this.renderModelPagesToPng(model, signal, format !== "docx" && format !== "pptx");
     if (format === "png") return combinePngPages(pages);
     if (format === "html") return buildSelfContainedHtml(file, model, pages);
     if (format === "pptx") return buildEditablePptx(file, model, pages);
     return buildEditableDocx(file, model, pages);
   }
 
-  private async renderModelPagesToPng(model: PreviewPdfModel, signal?: AbortSignal): Promise<Uint8Array[]> {
+  private async renderModelPagesToPng(
+    model: PreviewPdfModel,
+    signal?: AbortSignal,
+    includeText = true
+  ): Promise<Uint8Array[]> {
     const pages: Uint8Array[] = [];
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
       pages.push(await renderPreviewPageToPngBytes(model, index, {
         colorMode: this.settings.colorMode,
-        rasterScale: this.settings.imageRasterScale
+        rasterScale: this.settings.imageRasterScale,
+        includeText
       }));
       await nextAnimationFrame();
     }
@@ -3045,19 +3050,25 @@ async function buildEditablePptx(file: TFile, model: PreviewPdfModel, pages: Uin
     slide.addImage({ data: bytesToDataUrl(pages[pageIndex]), x: 0, y: 0, w: widthIn, h: heightIn });
     const pageTop = model.pageBreaks[pageIndex];
     for (const fragment of getPageTextFragments(model, pageIndex)) {
+      const xPt = fragment.left * model.pxToPt;
+      const yPt = (fragment.top - pageTop + model.bodyTopInsetPx) * model.pxToPt;
+      const widthPt = Math.max(4, (fragment.right - fragment.left) * model.pxToPt + 1.5);
+      const heightPt = Math.max(5, (fragment.bottom - fragment.top) * model.pxToPt * 1.08);
       slide.addText(fragment.text, {
-        x: Math.max(0, fragment.left * model.pxToPt / 72),
-        y: Math.max(0, (fragment.top - pageTop + model.bodyTopInsetPx) * model.pxToPt / 72),
-        w: Math.max(0.05, (fragment.right - fragment.left) * model.pxToPt / 72),
-        h: Math.max(0.05, (fragment.bottom - fragment.top) * model.pxToPt / 72),
+        x: Math.max(0, xPt / 72),
+        y: Math.max(0, yPt / 72),
+        w: Math.max(0.05, widthPt / 72),
+        h: Math.max(0.05, heightPt / 72),
         fontFace: fragment.fontFamily.split(",")[0].replace(/["']/g, ""),
         fontSize: Math.max(4, fragment.fontSizePx * model.pxToPt),
         bold: Number.parseInt(fragment.fontWeight, 10) >= 600,
         italic: fragment.fontStyle === "italic",
         color: colorToHex(fragment.color),
         margin: 0,
-        breakLine: false,
-        transparency: 100,
+        valign: "mid",
+        paraSpaceAfterPt: 0,
+        lineSpacingMultiple: 1,
+        isTextBox: true,
         fit: "shrink"
       });
     }
@@ -3069,17 +3080,17 @@ async function buildEditablePptx(file: TFile, model: PreviewPdfModel, pages: Uin
 }
 
 async function buildEditableDocx(file: TFile, model: PreviewPdfModel, pages: Uint8Array[]): Promise<Blob> {
-  const { Document, ImageRun, Packer, Paragraph, TextRun } = await import("docx");
+  const {
+    Document,
+    HorizontalPositionRelativeFrom,
+    ImageRun,
+    Packer,
+    Paragraph,
+    TextRun,
+    VerticalPositionRelativeFrom,
+    TextWrappingType
+  } = await import("docx");
   const sections = pages.map((page, pageIndex) => {
-    const textRuns = getPageTextFragments(model, pageIndex)
-      .sort((left, right) => left.top - right.top || left.left - right.left)
-      .map((fragment) => new TextRun({
-        text: fragment.text,
-        bold: Number.parseInt(fragment.fontWeight, 10) >= 600,
-        italics: fragment.fontStyle === "italic",
-        color: colorToHex(fragment.color),
-        size: Math.max(16, Math.round(fragment.fontSizePx * 1.5))
-      }));
     return {
       properties: {
         page: {
@@ -3092,10 +3103,17 @@ async function buildEditableDocx(file: TFile, model: PreviewPdfModel, pages: Uin
           children: [new ImageRun({
             data: page,
             transformation: { width: Math.round(model.pageWidthPt / 72 * 96), height: Math.round(model.pageHeightPt / 72 * 96) },
-            type: "png"
+            type: "png",
+            floating: {
+              horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: 0 },
+              verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: 0 },
+              behindDocument: true,
+              allowOverlap: true,
+              wrap: { type: TextWrappingType.NONE }
+            }
           })]
         }),
-        new Paragraph({ children: textRuns, style: "Caption" })
+        new Paragraph({ children: [new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
       ]
     };
   });
@@ -3105,7 +3123,63 @@ async function buildEditableDocx(file: TFile, model: PreviewPdfModel, pages: Uin
     description: "High-fidelity export with an editable text layer.",
     sections
   });
-  return Packer.toBlob(document);
+  const packed = await Packer.toBlob(document);
+  return injectEditableWordTextBoxes(packed, model);
+}
+
+async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): Promise<Blob> {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+  const documentFile = zip.file("word/document.xml");
+  if (!documentFile) throw new Error("DOCX document.xml is missing.");
+  let xml = await documentFile.async("string");
+  if (!xml.includes("xmlns:v=")) {
+    xml = xml.replace(/<w:document\b/u, '<w:document xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"');
+  }
+  for (let pageIndex = 0; pageIndex < model.pageBreaks.length - 1; pageIndex += 1) {
+    const marker = `__MPE_PAGE_${pageIndex}__`;
+    const markerParagraph = new RegExp(`<w:p(?=[ >])[\\s\\S]*?${marker}[\\s\\S]*?<\\/w:p>`, "u");
+    const textBoxes = getPageTextFragments(model, pageIndex)
+      .map((fragment, fragmentIndex) => buildWordTextBoxXml(model, pageIndex, fragment, fragmentIndex))
+      .join("");
+    if (!markerParagraph.test(xml)) throw new Error(`DOCX page marker ${pageIndex + 1} is missing.`);
+    xml = xml.replace(markerParagraph, textBoxes);
+  }
+  zip.file("word/document.xml", xml);
+  const bytes = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+  return new Blob([new Uint8Array(bytes).buffer], {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  });
+}
+
+function buildWordTextBoxXml(
+  model: PreviewPdfModel,
+  pageIndex: number,
+  fragment: TextFragment,
+  fragmentIndex: number
+): string {
+  const pageTop = model.pageBreaks[pageIndex];
+  const leftPt = Math.max(0, fragment.left * model.pxToPt);
+  const topPt = Math.max(0, (fragment.top - pageTop + model.bodyTopInsetPx) * model.pxToPt);
+  const widthPt = Math.max(4, (fragment.right - fragment.left) * model.pxToPt + 1.5);
+  const heightPt = Math.max(5, (fragment.bottom - fragment.top) * model.pxToPt * 1.08);
+  const fontSizeHalfPt = Math.max(8, Math.round(fragment.fontSizePx * model.pxToPt * 2));
+  const fontFamily = escapeXml(fragment.fontFamily.split(",")[0].replace(/["']/g, "") || "Arial");
+  const bold = Number.parseInt(fragment.fontWeight, 10) >= 600 ? "<w:b/>" : "";
+  const italic = fragment.fontStyle === "italic" ? "<w:i/>" : "";
+  const underline = fragment.underline ? '<w:u w:val="single"/>' : "";
+  const strike = fragment.lineThrough ? "<w:strike/>" : "";
+  const shapeId = 1025 + pageIndex * 1000 + fragmentIndex;
+  const shapeType = pageIndex === 0 && fragmentIndex === 0
+    ? '<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>'
+    : "";
+  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:pict>${shapeType}<v:shape id="_x0000_s${shapeId}" type="#_x0000_t202" stroked="f" filled="f" style="position:absolute;margin-left:${leftPt.toFixed(2)}pt;margin-top:${topPt.toFixed(2)}pt;width:${widthPt.toFixed(2)}pt;height:${heightPt.toFixed(2)}pt;z-index:251659264;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-style:none"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="${Math.round(heightPt * 20)}" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="${fontFamily}" w:hAnsi="${fontFamily}" w:eastAsia="${fontFamily}"/>${bold}${italic}${underline}${strike}<w:color w:val="${colorToHex(fragment.color)}"/><w:sz w:val="${fontSizeHalfPt}"/><w:szCs w:val="${fontSizeHalfPt}"/></w:rPr><w:t xml:space="preserve">${escapeXml(fragment.text)}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
+}
+
+function escapeXml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&apos;"
+  })[character] ?? character);
 }
 
 function escapeHtml(value: string): string {
@@ -5510,6 +5584,7 @@ async function renderPreviewPageToPngBytes(
   options: {
     colorMode: PdfColorMode;
     rasterScale: number;
+    includeText?: boolean;
   }
 ): Promise<Uint8Array> {
   const pageTopPx = model.pageBreaks[pageIndex];
@@ -5556,12 +5631,14 @@ async function renderPreviewPageToPngBytes(
     pageHeightPx: model.bodyHeightPx,
     colorMode: "color"
   });
-  drawCanvasTextLayer(context, model.textFragments, {
-    pageTopPx,
-    pageBottomPx,
-    sourceWidthPx: model.sourceWidthPx,
-    colorMode: "color"
-  });
+  if (options.includeText !== false) {
+    drawCanvasTextLayer(context, model.textFragments, {
+      pageTopPx,
+      pageBottomPx,
+      sourceWidthPx: model.sourceWidthPx,
+      colorMode: "color"
+    });
+  }
   drawCanvasBitmapLayer(context, model.canvasFragments, {
     pageTopPx,
     pageBottomPx,

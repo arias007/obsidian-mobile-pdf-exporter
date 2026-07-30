@@ -24,8 +24,11 @@ type ResolvedUiLanguage = Exclude<UiLanguage, "auto">;
 const NOTE_PDF_EXPORT_MODES = ["selectable", "image"] as const;
 type NotePdfExportMode = typeof NOTE_PDF_EXPORT_MODES[number];
 
-const PDF_PAGE_PRESETS = ["mobile", "a4", "a5", "letter"] as const;
+const PDF_PAGE_PRESETS = ["current", "mobile", "a4", "a5", "letter"] as const;
 type PdfPagePreset = typeof PDF_PAGE_PRESETS[number];
+
+const EXPORT_FORMATS = ["pdf", "docx", "pptx", "png", "html"] as const;
+type ExportFormat = typeof EXPORT_FORMATS[number];
 
 const PDF_ORIENTATIONS = ["portrait", "landscape"] as const;
 type PdfOrientation = typeof PDF_ORIENTATIONS[number];
@@ -53,6 +56,8 @@ interface MobilePdfExporterSettings {
   colorMode: PdfColorMode;
   contentScalePercent: number;
   imageRasterScale: number;
+  currentPageWidthPx: number;
+  currentPageHeightPx: number;
 }
 
 interface RenderedPreview {
@@ -64,7 +69,7 @@ interface RenderedPreview {
 interface LiveMarkdownSurface {
   rootEl: HTMLElement;
   scrollEl: HTMLElement;
-  mode: "source" | "preview";
+  mode: "source" | "preview" | "generic";
 }
 
 interface LivePreviewRendererPosition {
@@ -110,6 +115,7 @@ interface ExportFileOptions {
   outputBaseName?: string;
   busyPrompt?: PdfExportBusyPrompt;
   signal?: AbortSignal;
+  format?: ExportFormat;
 }
 
 interface PdfLinkContext {
@@ -342,7 +348,7 @@ const UI_TEXT = {
   zh: {
     ribbonTitle: "导出预览版 PDF",
     commandName: "Mobile PDF Exporter: 导出当前笔记为预览版 PDF",
-    noMarkdownNotice: "先打开一个 Markdown 笔记。",
+    noMarkdownNotice: "先打开一个可导出的文件。",
     optionsTitle: "PDF 导出选项",
     exportModeName: "导出方式",
     exportModeDesc: "可复制文字版适合阅读、检索、复制；图片版适合保持视觉固定。",
@@ -368,8 +374,8 @@ const UI_TEXT = {
     headerTextDesc: "留空关闭；支持 {title}、{page}、{pages}、{date}。",
     footerTextName: "页脚",
     footerTextDesc: "留空关闭；支持 {title}、{page}、{pages}、{date}。",
-    openAfterExportName: "导出后打开 PDF（用于打印）",
-    openAfterExportDesc: "默认开启。导出完成后直接打开 PDF，可继续打印或查看。",
+    openAfterExportName: "导出后打开",
+    openAfterExportDesc: "导出完成后自动打开生成的文件。",
     shareAfterExportName: "导出后分享",
     rememberLastExportOptionsName: "使用上次导出选项",
     rememberLastExportOptionsDesc: "默认开启。每次成功开始导出时保存本次选项，供下次直接使用。",
@@ -381,7 +387,7 @@ const UI_TEXT = {
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF 名称",
     exportPdfButton: "导出 PDF",
-    cancelButton: "取消",
+    cancelButton: "导出其他格式",
     busyExporting: "正在导出 PDF",
     busyCancelButton: "取消导出",
     busyCancelledTitle: "已取消导出",
@@ -415,7 +421,7 @@ const UI_TEXT = {
   en: {
     ribbonTitle: "Export preview PDF",
     commandName: "Mobile PDF Exporter: Export preview PDF",
-    noMarkdownNotice: "Open a Markdown note first.",
+    noMarkdownNotice: "Open an exportable file first.",
     optionsTitle: "PDF export options",
     exportModeName: "Export mode",
     exportModeDesc: "Selectable text is best for reading, search, and copy; image PDF keeps a fixed visual layout.",
@@ -441,8 +447,8 @@ const UI_TEXT = {
     headerTextDesc: "Leave blank to disable. Supports {title}, {page}, {pages}, and {date}.",
     footerTextName: "Footer",
     footerTextDesc: "Leave blank to disable. Supports {title}, {page}, {pages}, and {date}.",
-    openAfterExportName: "Open PDF after export for printing",
-    openAfterExportDesc: "Enabled by default. Opens the finished PDF so it can be viewed or printed.",
+    openAfterExportName: "Open after export",
+    openAfterExportDesc: "Open the generated file when export finishes.",
     shareAfterExportName: "Show mobile share sheet",
     rememberLastExportOptionsName: "Use last export options",
     rememberLastExportOptionsDesc: "Enabled by default. Saves the options used for this export for next time.",
@@ -454,7 +460,7 @@ const UI_TEXT = {
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF name",
     exportPdfButton: "Export PDF",
-    cancelButton: "Cancel",
+    cancelButton: "Other formats",
     busyExporting: "Exporting PDF",
     busyCancelButton: "Cancel export",
     busyCancelledTitle: "Export cancelled",
@@ -501,14 +507,17 @@ const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   shareAfterExport: true,
   openAfterExport: true,
   noteExportMode: "selectable",
-  pagePreset: "mobile",
+  pagePreset: "current",
   pageOrientation: "portrait",
   colorMode: "color",
   contentScalePercent: 100,
-  imageRasterScale: 3
+  imageRasterScale: 3,
+  currentPageWidthPx: 794,
+  currentPageHeightPx: 1123
 };
 
 const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
+  current: { width: 210, height: 297 },
   mobile: { width: 104, height: 225 },
   a4: { width: 210, height: 297 },
   a5: { width: 148, height: 210 },
@@ -516,6 +525,7 @@ const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
 };
 
 const PDF_PAGE_LABELS: Record<PdfPagePreset, string> = {
+  current: "当前页面大小（默认）",
   mobile: "手机长页 104 x 225 mm",
   a4: "A4 210 x 297 mm",
   a5: "A5 148 x 210 mm",
@@ -597,6 +607,8 @@ function translate(language: ResolvedUiLanguage, key: TranslationKey): string {
 function getPageLabel(preset: PdfPagePreset, language: ResolvedUiLanguage): string {
   if (language === "zh") return PDF_PAGE_LABELS[preset];
   switch (preset) {
+    case "current":
+      return "Current page size (default)";
     case "mobile":
       return "Mobile long page 104 x 225 mm";
     case "a4":
@@ -689,7 +701,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       id: "export-current-note-preview-pdf",
       name: this.t("commandName"),
       checkCallback: (checking) => {
-        const file = this.getActiveMarkdownFile();
+        const file = this.app.workspace.getActiveFile();
         if (!file) return false;
         if (!checking) this.openExportOptionsModal(file);
         return true;
@@ -698,7 +710,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
-        if (!(file instanceof TFile) || file.extension.toLowerCase() !== "md") return;
+        if (!(file instanceof TFile)) return;
         menu.addItem((item) => {
           item
             .setTitle(this.t("ribbonTitle"))
@@ -710,7 +722,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu) => {
-        const file = this.getActiveMarkdownFile();
+        const file = this.app.workspace.getActiveFile();
         if (!file) return;
         menu.addItem((item) => {
           item
@@ -745,7 +757,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   async exportCurrentFile(): Promise<void> {
-    const file = this.getActiveMarkdownFile();
+    const file = this.app.workspace.getActiveFile();
     if (!file) {
       new Notice(this.t("noMarkdownNotice"));
       return;
@@ -755,6 +767,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   openExportOptionsModal(file: TFile): void {
+    const surface = this.getActiveExportSurface(file);
+    if (surface) {
+      const rect = surface.rootEl.getBoundingClientRect();
+      this.settings.currentPageWidthPx = Math.max(240, surface.scrollEl.clientWidth || rect.width);
+      this.settings.currentPageHeightPx = Math.max(240, surface.scrollEl.clientHeight || rect.height);
+    }
     new MobilePdfExportOptionsModal(this.app, this, file).open();
   }
 
@@ -776,33 +794,35 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await exportingPrompt.waitUntilPainted();
       throwIfExportCancelled(signal);
       cleanupRenderRoots();
-      const markdown = await this.app.vault.cachedRead(file);
+      const format = options.format ?? "pdf";
+      const isMarkdown = file.extension.toLowerCase() === "md";
+      const markdown = isMarkdown ? await this.app.vault.cachedRead(file) : "";
       throwIfExportCancelled(signal);
-      let pdfBlob: Blob;
-      if (isExcalidrawMarkdownFile(file, markdown)) {
-        pdfBlob = await this.renderExcalidrawToImagePdf(file, signal);
+      let outputBlob: Blob;
+      let model: PreviewPdfModel | null = null;
+      if (format === "pdf" && isMarkdown && isExcalidrawMarkdownFile(file, markdown)) {
+        outputBlob = await this.renderExcalidrawToImagePdf(file, signal);
       } else {
-        const liveSurface = this.getActiveMarkdownSurface(file);
-        let model: PreviewPdfModel;
+        const liveSurface = this.getActiveExportSurface(file);
         if (liveSurface) {
           model = await this.captureLiveViewPdfModel(file, liveSurface, signal);
-        } else {
+        } else if (isMarkdown) {
           rendered = await this.renderMarkdownPreview(file, markdown);
           throwIfExportCancelled(signal);
           model = this.capturePreviewPdfModel(file, rendered.pageEl);
+        } else {
+          throw new Error(this.t("previewNoContentError"));
         }
-        pdfBlob = this.settings.noteExportMode === "image"
-          ? await this.renderPreviewToImagePdf(file, model, signal)
-          : await this.renderPreviewToSelectablePdf(file, model, signal);
+        outputBlob = await this.renderModelToFormat(file, model, format, signal);
       }
 
       throwIfExportCancelled(signal);
       const outputFolder = resolveOutputFolder(file, this.settings);
       await this.ensureFolderExists(outputFolder);
       throwIfExportCancelled(signal);
-      const outputPath = await this.getAvailableOutputPath(file, outputFolder, options.outputBaseName);
+      const outputPath = await this.getAvailableOutputPath(file, outputFolder, options.outputBaseName, format);
       throwIfExportCancelled(signal);
-      await this.app.vault.adapter.writeBinary(outputPath, await pdfBlob.arrayBuffer());
+      await this.app.vault.adapter.writeBinary(outputPath, await outputBlob.arrayBuffer());
       writtenOutputPath = outputPath;
       throwIfExportCancelled(signal);
 
@@ -812,7 +832,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
       throwIfExportCancelled(signal);
       if (this.settings.shareAfterExport) {
-        await this.sharePdfIfAvailable(pdfBlob, outputPath);
+        await this.shareFileIfAvailable(outputBlob, outputPath);
       }
       exportingPrompt.done();
     } catch (error) {
@@ -1018,6 +1038,22 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension.toLowerCase() !== "md") return null;
     return file;
+  }
+
+  private getActiveExportSurface(file: TFile): LiveMarkdownSurface | null {
+    const markdownSurface = this.getActiveMarkdownSurface(file);
+    if (markdownSurface) return markdownSurface;
+    if (this.app.workspace.getActiveFile()?.path !== file.path) return null;
+    const leafView = this.app.workspace.activeLeaf?.view as unknown as { containerEl?: HTMLElement };
+    const containerEl = leafView?.containerEl;
+    if (!containerEl) return null;
+    const candidates = Array.from(containerEl.querySelectorAll<HTMLElement>(
+      ".view-content, .pdf-viewer-container, .canvas-wrapper, .bases-view, .image-container"
+    )).filter(isScreenVisibleElement);
+    const rootEl = candidates.sort((left, right) => getVisibleElementScore(right) - getVisibleElementScore(left))[0];
+    if (!rootEl) return null;
+    const scrollEl = findScrollableExportSurface(rootEl);
+    return { rootEl, scrollEl, mode: "generic" };
   }
 
   private getActiveMarkdownSurface(file: TFile): LiveMarkdownSurface | null {
@@ -1571,6 +1607,37 @@ export default class MobilePdfExporterPlugin extends Plugin {
     return new Blob([pdfBuffer], { type: "application/pdf" });
   }
 
+  private async renderModelToFormat(
+    file: TFile,
+    model: PreviewPdfModel,
+    format: ExportFormat,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    if (format === "pdf") {
+      return this.settings.noteExportMode === "image"
+        ? this.renderPreviewToImagePdf(file, model, signal)
+        : this.renderPreviewToSelectablePdf(file, model, signal);
+    }
+    const pages = await this.renderModelPagesToPng(model, signal);
+    if (format === "png") return combinePngPages(pages);
+    if (format === "html") return buildSelfContainedHtml(file, model, pages);
+    if (format === "pptx") return buildEditablePptx(file, model, pages);
+    return buildEditableDocx(file, model, pages);
+  }
+
+  private async renderModelPagesToPng(model: PreviewPdfModel, signal?: AbortSignal): Promise<Uint8Array[]> {
+    const pages: Uint8Array[] = [];
+    for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
+      throwIfExportCancelled(signal);
+      pages.push(await renderPreviewPageToPngBytes(model, index, {
+        colorMode: this.settings.colorMode,
+        rasterScale: this.settings.imageRasterScale
+      }));
+      await nextAnimationFrame();
+    }
+    return pages;
+  }
+
   private capturePreviewPdfModel(file: TFile, pageEl: HTMLElement): PreviewPdfModel {
     return withExportableElementCache(() => {
       const linkContext = createPdfLinkContext(this.app, file);
@@ -1772,7 +1839,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
     return this.app.vault.adapter.getResourcePath(assetPath);
   }
 
-  private async getAvailableOutputPath(file: TFile, outputFolder: string, requestedBaseName?: string): Promise<string> {
+  private async getAvailableOutputPath(
+    file: TFile,
+    outputFolder: string,
+    requestedBaseName?: string,
+    format: ExportFormat = "pdf"
+  ): Promise<string> {
     const folder = normalizeVaultFolderPath(outputFolder);
     const date = new Date();
     const stamp = [
@@ -1784,7 +1856,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
     for (let index = 0; index < 1000; index += 1) {
       const suffix = index === 0 ? "" : `-${index + 1}`;
-      const path = normalizePath(`${folder ? `${folder}/` : ""}${baseName}${suffix}.pdf`);
+      const path = normalizePath(`${folder ? `${folder}/` : ""}${baseName}${suffix}.${format}`);
       if (!(await this.app.vault.adapter.exists(path))) return path;
     }
 
@@ -1804,13 +1876,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
   }
 
-  private async sharePdfIfAvailable(pdfBlob: Blob, outputPath: string): Promise<void> {
+  private async shareFileIfAvailable(blob: Blob, outputPath: string): Promise<void> {
     const share = navigator.share?.bind(navigator);
     const canShare = navigator.canShare?.bind(navigator);
     if (!share || !canShare || typeof File === "undefined") return;
 
-    const fileName = outputPath.split("/").pop() ?? "export.pdf";
-    const file = new File([pdfBlob], fileName, { type: "application/pdf" });
+    const fileName = outputPath.split("/").pop() ?? "export";
+    const file = new File([blob], fileName, { type: blob.type || "application/octet-stream" });
     const shareData: ShareData = {
       files: [file],
       title: fileName
@@ -2048,7 +2120,7 @@ class MobilePdfExportOptionsModal extends Modal {
     this.contentEl.empty();
   }
 
-  private async exportWithDraft(): Promise<void> {
+  private async exportWithDraft(format: ExportFormat = "pdf"): Promise<void> {
     if (this.exporting) return;
     this.exporting = true;
     const exportSettings = cloneSettings(this.draft);
@@ -2062,7 +2134,7 @@ class MobilePdfExportOptionsModal extends Modal {
       if (exportSettings.rememberLastExportOptions) {
         this.plugin.settings = cloneSettings(exportSettings);
         await this.plugin.saveSettings();
-        await this.plugin.exportFile(this.file, undefined, { outputBaseName, busyPrompt: exportingPrompt });
+        await this.plugin.exportFile(this.file, undefined, { outputBaseName, busyPrompt: exportingPrompt, format });
         return;
       }
 
@@ -2071,7 +2143,7 @@ class MobilePdfExportOptionsModal extends Modal {
         await this.plugin.saveSettings();
       }
 
-      await this.plugin.exportFile(this.file, exportSettings, { outputBaseName, busyPrompt: exportingPrompt });
+      await this.plugin.exportFile(this.file, exportSettings, { outputBaseName, busyPrompt: exportingPrompt, format });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       exportingPrompt.fail(message);
@@ -2123,12 +2195,29 @@ class MobilePdfExportOptionsModal extends Modal {
       });
     });
 
-    const cancelButton = appendElement(innerEl, "button", {
-      cls: "mobile-pdf-exporter-options-button",
-      text: this.plugin.t("cancelButton")
+    const formatSelect = appendElement(innerEl, "select", {
+      cls: "dropdown mobile-pdf-exporter-options-button"
     });
-    cancelButton.type = "button";
-    cancelButton.addEventListener("click", () => this.close());
+    for (const [value, label] of [
+      ["", this.plugin.t("cancelButton")],
+      ["docx", "Word (.docx)"],
+      ["pptx", "PowerPoint (.pptx)"],
+      ["png", "PNG 图片"],
+      ["html", "HTML"]
+    ] as const) {
+      const option = appendElement(formatSelect, "option", { text: label });
+      option.value = value;
+    }
+    formatSelect.value = "";
+    formatSelect.addEventListener("change", () => {
+      const format = formatSelect.value as ExportFormat;
+      if (!EXPORT_FORMATS.includes(format) || format === "pdf") return;
+      formatSelect.disabled = true;
+      void this.exportWithDraft(format).catch(() => {
+        formatSelect.disabled = false;
+        formatSelect.value = "";
+      });
+    });
   }
 }
 
@@ -2560,7 +2649,9 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     pageOrientation: normalizeChoice(saved.pageOrientation, PDF_ORIENTATIONS, DEFAULT_SETTINGS.pageOrientation),
     colorMode: normalizeChoice(saved.colorMode, PDF_COLOR_MODES, DEFAULT_SETTINGS.colorMode),
     contentScalePercent: clampNumber(saved.contentScalePercent, 80, 125, DEFAULT_SETTINGS.contentScalePercent),
-    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale)
+    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale),
+    currentPageWidthPx: clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx),
+    currentPageHeightPx: clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx)
   };
 }
 
@@ -2581,7 +2672,9 @@ function cloneSettings(settings: MobilePdfExporterSettings): MobilePdfExporterSe
     pageOrientation: settings.pageOrientation,
     colorMode: settings.colorMode,
     contentScalePercent: settings.contentScalePercent,
-    imageRasterScale: settings.imageRasterScale
+    imageRasterScale: settings.imageRasterScale,
+    currentPageWidthPx: settings.currentPageWidthPx,
+    currentPageHeightPx: settings.currentPageHeightPx
   };
 }
 
@@ -2855,7 +2948,12 @@ function formatExportDate(date: Date): string {
 }
 
 function getConfiguredPageSizeMm(settings: MobilePdfExporterSettings): PdfPageSizeMm {
-  const preset = PDF_PAGE_SIZES_MM[settings.pagePreset] ?? PDF_PAGE_SIZES_MM.mobile;
+  const preset = settings.pagePreset === "current"
+    ? {
+      width: Math.max(50, settings.currentPageWidthPx / 96 * 25.4),
+      height: Math.max(50, settings.currentPageHeightPx / 96 * 25.4)
+    }
+    : PDF_PAGE_SIZES_MM[settings.pagePreset] ?? PDF_PAGE_SIZES_MM.mobile;
   if (settings.pageOrientation === "landscape") {
     return {
       width: Math.max(preset.width, preset.height),
@@ -2866,6 +2964,170 @@ function getConfiguredPageSizeMm(settings: MobilePdfExporterSettings): PdfPageSi
     width: Math.min(preset.width, preset.height),
     height: Math.max(preset.width, preset.height)
   };
+}
+
+function findScrollableExportSurface(rootEl: HTMLElement): HTMLElement {
+  const candidates = [rootEl, ...Array.from(rootEl.querySelectorAll<HTMLElement>("*"))];
+  return candidates
+    .filter((element) => element.scrollHeight > element.clientHeight + 2 || element.scrollWidth > element.clientWidth + 2)
+    .sort((left, right) => (right.clientWidth * right.clientHeight) - (left.clientWidth * left.clientHeight))[0] ?? rootEl;
+}
+
+function bytesToDataUrl(bytes: Uint8Array, mime = "image/png"): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return `data:${mime};base64,${btoa(binary)}`;
+}
+
+async function loadPngBytesAsImage(bytes: Uint8Array): Promise<HTMLImageElement> {
+  const image = new Image();
+  image.decoding = "async";
+  image.src = bytesToDataUrl(bytes);
+  await image.decode();
+  return image;
+}
+
+async function combinePngPages(pages: Uint8Array[]): Promise<Blob> {
+  if (pages.length === 1) return new Blob([new Uint8Array(pages[0]).buffer], { type: "image/png" });
+  const images = await Promise.all(pages.map(loadPngBytesAsImage));
+  const width = Math.max(...images.map((image) => image.naturalWidth));
+  const height = images.reduce((sum, image) => sum + image.naturalHeight, 0);
+  const scale = Math.min(1, Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, width * height)));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Could not create PNG export canvas.");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  let top = 0;
+  for (const image of images) {
+    const drawHeight = image.naturalHeight * scale;
+    context.drawImage(image, 0, top, image.naturalWidth * scale, drawHeight);
+    top += drawHeight;
+  }
+  return new Promise((resolve, reject) => canvas.toBlob(
+    (blob) => blob ? resolve(blob) : reject(new Error("PNG export failed.")),
+    "image/png"
+  ));
+}
+
+function getPageTextFragments(model: PreviewPdfModel, pageIndex: number): TextFragment[] {
+  const top = model.pageBreaks[pageIndex];
+  const bottom = model.pageBreaks[pageIndex + 1];
+  return model.textFragments.filter((fragment) => fragment.bottom > top && fragment.top < bottom && fragment.text.trim());
+}
+
+function colorToHex(color: Color): string {
+  const candidate = color as unknown as { red?: number; green?: number; blue?: number };
+  return [candidate.red, candidate.green, candidate.blue]
+    .map((value) => Math.round(clampNumber(value, 0, 1, 0) * 255).toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function buildEditablePptx(file: TFile, model: PreviewPdfModel, pages: Uint8Array[]): Promise<Blob> {
+  const module = await import("pptxgenjs");
+  const PptxGenJS = (module.default ?? module) as unknown as new () => any;
+  const pptx = new PptxGenJS();
+  const widthIn = model.pageWidthPt / 72;
+  const heightIn = model.pageHeightPt / 72;
+  pptx.defineLayout({ name: "OBSIDIAN_EXPORT", width: widthIn, height: heightIn });
+  pptx.layout = "OBSIDIAN_EXPORT";
+  pptx.author = "Obsidian Mobile PDF Exporter";
+  pptx.subject = file.basename;
+  pptx.title = file.basename;
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+    const slide = pptx.addSlide();
+    slide.background = { color: "FFFFFF" };
+    slide.addImage({ data: bytesToDataUrl(pages[pageIndex]), x: 0, y: 0, w: widthIn, h: heightIn });
+    const pageTop = model.pageBreaks[pageIndex];
+    for (const fragment of getPageTextFragments(model, pageIndex)) {
+      slide.addText(fragment.text, {
+        x: Math.max(0, fragment.left * model.pxToPt / 72),
+        y: Math.max(0, (fragment.top - pageTop + model.bodyTopInsetPx) * model.pxToPt / 72),
+        w: Math.max(0.05, (fragment.right - fragment.left) * model.pxToPt / 72),
+        h: Math.max(0.05, (fragment.bottom - fragment.top) * model.pxToPt / 72),
+        fontFace: fragment.fontFamily.split(",")[0].replace(/["']/g, ""),
+        fontSize: Math.max(4, fragment.fontSizePx * model.pxToPt),
+        bold: Number.parseInt(fragment.fontWeight, 10) >= 600,
+        italic: fragment.fontStyle === "italic",
+        color: colorToHex(fragment.color),
+        margin: 0,
+        breakLine: false,
+        transparency: 100,
+        fit: "shrink"
+      });
+    }
+  }
+  const result = await pptx.write({ outputType: "blob" });
+  return result instanceof Blob ? result : new Blob([result as BlobPart], {
+    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  });
+}
+
+async function buildEditableDocx(file: TFile, model: PreviewPdfModel, pages: Uint8Array[]): Promise<Blob> {
+  const { Document, ImageRun, Packer, Paragraph, TextRun } = await import("docx");
+  const sections = pages.map((page, pageIndex) => {
+    const textRuns = getPageTextFragments(model, pageIndex)
+      .sort((left, right) => left.top - right.top || left.left - right.left)
+      .map((fragment) => new TextRun({
+        text: fragment.text,
+        bold: Number.parseInt(fragment.fontWeight, 10) >= 600,
+        italics: fragment.fontStyle === "italic",
+        color: colorToHex(fragment.color),
+        size: Math.max(16, Math.round(fragment.fontSizePx * 1.5))
+      }));
+    return {
+      properties: {
+        page: {
+          size: { width: Math.round(model.pageWidthPt * 20), height: Math.round(model.pageHeightPt * 20) },
+          margin: { top: 360, right: 360, bottom: 360, left: 360 }
+        }
+      },
+      children: [
+        new Paragraph({
+          children: [new ImageRun({
+            data: page,
+            transformation: { width: Math.round(model.pageWidthPt / 72 * 96), height: Math.round(model.pageHeightPt / 72 * 96) },
+            type: "png"
+          })]
+        }),
+        new Paragraph({ children: textRuns, style: "Caption" })
+      ]
+    };
+  });
+  const document = new Document({
+    creator: "Obsidian Mobile PDF Exporter",
+    title: file.basename,
+    description: "High-fidelity export with an editable text layer.",
+    sections
+  });
+  return Packer.toBlob(document);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+  })[character] ?? character);
+}
+
+function buildSelfContainedHtml(file: TFile, model: PreviewPdfModel, pages: Uint8Array[]): Blob {
+  const pageMarkup = pages.map((page, pageIndex) => {
+    const pageTop = model.pageBreaks[pageIndex];
+    const text = getPageTextFragments(model, pageIndex).map((fragment) => {
+      const left = fragment.left * model.pxToPt / model.pageWidthPt * 100;
+      const top = (fragment.top - pageTop + model.bodyTopInsetPx) * model.pxToPt / model.pageHeightPt * 100;
+      const width = (fragment.right - fragment.left) * model.pxToPt / model.pageWidthPt * 100;
+      const height = (fragment.bottom - fragment.top) * model.pxToPt / model.pageHeightPt * 100;
+      return `<span contenteditable="true" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%;font:${escapeHtml(fragment.fontStyle)} ${escapeHtml(fragment.fontWeight)} ${fragment.fontSizePx * model.pxToPt}px/${height}% ${escapeHtml(fragment.fontFamily)};color:#${colorToHex(fragment.color)}">${escapeHtml(fragment.text)}</span>`;
+    }).join("");
+    return `<section class="page"><img alt="Page ${pageIndex + 1}" src="${bytesToDataUrl(page)}">${text}</section>`;
+  }).join("");
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(file.basename)}</title><style>*{box-sizing:border-box}body{margin:0;padding:24px;background:#e9edf2;font-family:system-ui,sans-serif}.page{position:relative;width:min(100%,${model.pageWidthPt / 72 * 96}px);aspect-ratio:${model.pageWidthPt}/${model.pageHeightPt};margin:0 auto 24px;background:#fff;box-shadow:0 8px 28px #0002;overflow:hidden}.page img{display:block;width:100%;height:100%}.page span{position:absolute;display:block;overflow:hidden;white-space:pre-wrap;outline:none;opacity:.01}.page span:focus{opacity:1;background:#fff;box-shadow:0 0 0 2px #2f6feb}@media print{body{padding:0;background:#fff}.page{width:100%;margin:0;box-shadow:none;break-after:page}}</style></head><body>${pageMarkup}</body></html>`;
+  return new Blob([html], { type: "text/html;charset=utf-8" });
 }
 
 function isExcalidrawMarkdownFile(file: TFile, markdown: string): boolean {
@@ -6838,6 +7100,7 @@ async function waitForImagesInElements(elements: Iterable<Element>, timeoutMs: n
 }
 
 async function nextAnimationFrame(timeoutMs = FRAME_WAIT_TIMEOUT_MS): Promise<void> {
+  if (activeDocument.hidden) return;
   let frame = 0;
   let timeout = 0;
   await new Promise<void>((resolve) => {
@@ -6852,5 +7115,6 @@ async function nextAnimationFrame(timeoutMs = FRAME_WAIT_TIMEOUT_MS): Promise<vo
 }
 
 async function delay(ms: number): Promise<void> {
+  if (activeDocument.hidden) return;
   await new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }

@@ -193,9 +193,12 @@
 }
 
 .mobile-pdf-exporter-options-modal {
-  max-width: 560px;
+  width: min(560px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
   padding-top: 0;
-  overflow: visible;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .mobile-pdf-exporter-options-subtitle {
@@ -256,14 +259,47 @@
   min-width: 86px;
 }
 
-@media (max-width: 420px) {
+@media (max-width: 600px) {
   .mobile-pdf-exporter-options-toolbar-inner {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(112px, auto);
     gap: 8px;
+    align-items: end;
   }
 
   .mobile-pdf-exporter-options-name {
-    flex-basis: 100%;
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .mobile-pdf-exporter-options-button {
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mobile-pdf-exporter-options-modal .setting-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .mobile-pdf-exporter-options-modal .setting-item-control {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .mobile-pdf-exporter-options-modal .setting-item-control :is(select, input[type="text"]) {
+    max-width: 100%;
+  }
+
+  .mobile-pdf-exporter-page .markdown-source-view .cm-content,
+  .mobile-pdf-exporter-page .markdown-source-view .cm-line {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
   }
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mobile-pdf-exporter",
-  "version": "0.3.65",
+  "version": "0.4.0",
   "description": "One-click selectable preview PDF export plugin.",
   "main": "main.js",
   "scripts": {
@@ -25,6 +25,8 @@
   },
   "dependencies": {
     "@pdf-lib/fontkit": "^1.1.1",
-    "pdf-lib": "^1.17.1"
+    "docx": "^9.7.1",
+    "pdf-lib": "^1.17.1",
+    "pptxgenjs": "^4.0.1"
   }
 }

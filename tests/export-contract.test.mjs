@@ -271,7 +271,7 @@ test("plugin UI follows Obsidian window and settings conventions", async () => {
   assert.match(source, /activeDocument\.createElement\("canvas"\)/);
   assert.match(source, /activeDocument\.createElement\("img"\)/);
   assert.match(source, /activeWindow\.setTimeout/);
-  assert.match(source, /new Setting\(containerEl\)\.setName\("Mobile PDF Exporter"\)\.setHeading\(\)/);
+  assert.doesNotMatch(source, /new Setting\(containerEl\)\.setName\("Mobile PDF Exporter"\)\.setHeading\(\)/);
   assert.doesNotMatch(source, /appendElement\(containerEl, "h[23]"/);
 });
 

@@ -72,6 +72,12 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.4.8
+
+- Passes the official `eslint-plugin-obsidianmd` review checks and runs them in every tagged release.
+- Replaces review-blocking direct style assignments and redundant settings headings with Obsidian-compatible helpers and structure.
+- Keeps PPTX generation fully typed so invalid export options are caught before release.
+
 ### 0.4.7
 
 - Uses a complete rendered Markdown DOM for DOCX and PPTX export so off-screen text and embedded images are captured consistently.

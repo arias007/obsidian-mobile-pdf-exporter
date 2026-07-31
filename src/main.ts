@@ -1654,7 +1654,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const maxPixelScale = Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, width * height));
       const ratio = clampNumber(Math.min(activeWindow.devicePixelRatio || 1, maxPixelScale), 0.5, 2, 1);
       if (getComputedStyle(host).position === "static") {
-        host.style.position = "relative";
+        host.setCssStyles({ position: "relative" });
         changedPosition = true;
       }
 
@@ -2030,7 +2030,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         lastError = error;
       }
     }
-    throw lastError ?? new Error("No local CJK font asset found.");
+    if (lastError instanceof Error) throw lastError;
+    throw new Error(typeof lastError === "string" && lastError ? lastError : "No local CJK font asset found.");
   }
 
   private async downloadRemoteFontBytes(): Promise<ArrayBuffer> {
@@ -2046,7 +2047,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         lastError = error;
       }
     }
-    throw lastError ?? new Error("Font download failed.");
+    if (lastError instanceof Error) throw lastError;
+    throw new Error(typeof lastError === "string" && lastError ? lastError : "Font download failed.");
   }
 
   private getRemoteFontUrls(): string[] {
@@ -2610,7 +2612,6 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.replaceChildren();
-    new Setting(containerEl).setName("Mobile PDF Exporter").setHeading();
     appendElement(containerEl, "p", { text: this.plugin.t("settingsIntro") });
 
     new Setting(containerEl).setName(this.plugin.t("settingsGeneralHeading")).setHeading();
@@ -3575,7 +3576,7 @@ async function buildEditablePptx(
   options: OfficeRenderOptions
 ): Promise<Blob> {
   const module = await import("pptxgenjs");
-  const PptxGenJS = (module.default ?? module) as unknown as new () => any;
+  const PptxGenJS = module.default;
   const pptx = new PptxGenJS();
   const widthIn = model.pageWidthPt / 72;
   const heightIn = model.pageHeightPt / 72;
@@ -3616,7 +3617,7 @@ async function buildEditablePptx(
           h: layout.heightPt / 72,
           margin: 0,
           valign: "top",
-          paraSpaceAfterPt: 0,
+          paraSpaceAfter: 0,
           isTextBox: true,
           fit: "shrink",
           wrap: false,
@@ -3627,9 +3628,17 @@ async function buildEditablePptx(
     }
   }
   const result = await pptx.write({ outputType: "blob" });
-  const blob = result instanceof Blob ? result : new Blob([result as BlobPart], {
-    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-  });
+  let blob: Blob;
+  if (result instanceof Blob) {
+    blob = result;
+  } else {
+    const content = result instanceof Uint8Array
+      ? Uint8Array.from(result).buffer
+      : result;
+    blob = new Blob([content], {
+      type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    });
+  }
   return injectOfficePreviewPages(blob, model, await renderOfficePreviewPages(model, options));
 }
 
@@ -4200,13 +4209,8 @@ async function buildRenderedDomHtml(file: TFile, pageEl: HTMLElement, signal?: A
   clone.classList.add("mpe-rendered-document");
   clone.setAttribute("contenteditable", "true");
   clone.setAttribute("spellcheck", "false");
-  clone.style.setProperty("width", "100%", "important");
-  clone.style.setProperty("max-width", `${widthPx}px`, "important");
-  clone.style.setProperty("height", "auto", "important");
-  clone.style.setProperty("min-height", "0", "important");
-  clone.style.setProperty("overflow", "visible", "important");
-  clone.style.setProperty("transform", "none", "important");
-  const html = `<!doctype html><html lang="zh-CN" data-mpe-format="rendered-dom"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(file.basename)}</title><style>*{box-sizing:border-box}html{background:#eef1f5}body{margin:0;padding:24px;background:#eef1f5;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}.mpe-rendered-document{margin:0 auto!important;background:#fff;box-shadow:0 8px 28px #0002}.mpe-rendered-document .markdown-preview-view{width:100%!important;max-width:100%!important;height:auto!important;overflow:visible!important}.mpe-rendered-document img{max-width:100%;height:auto!important}.mpe-rendered-document .mpe-export-canvas.mobile-pdf-exporter-note-doodle-canvas{display:block!important}.mpe-rendered-document table{width:100%;max-width:100%;}.mpe-rendered-document:focus{outline:none}@media(max-width:${widthPx + 48}px){body{padding:12px}.mpe-rendered-document{box-shadow:none}}@media print{html,body{padding:0;background:#fff}.mpe-rendered-document{max-width:none!important;box-shadow:none}}</style></head><body><main>${clone.outerHTML}</main></body></html>`;
+  clone.setCssProps({ "--mpe-export-max-width": `${widthPx}px` });
+  const html = `<!doctype html><html lang="zh-CN" data-mpe-format="rendered-dom"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(file.basename)}</title><style>*{box-sizing:border-box}html{background:#eef1f5}body{margin:0;padding:24px;background:#eef1f5;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}.mpe-rendered-document{width:100%!important;max-width:var(--mpe-export-max-width)!important;height:auto!important;min-height:0!important;overflow:visible!important;transform:none!important;margin:0 auto!important;background:#fff;box-shadow:0 8px 28px #0002}.mpe-rendered-document .markdown-preview-view{width:100%!important;max-width:100%!important;height:auto!important;overflow:visible!important}.mpe-rendered-document img{max-width:100%;height:auto!important}.mpe-rendered-document .mpe-export-canvas.mobile-pdf-exporter-note-doodle-canvas{display:block!important}.mpe-rendered-document table{width:100%;max-width:100%;}.mpe-rendered-document:focus{outline:none}@media(max-width:${widthPx + 48}px){body{padding:12px}.mpe-rendered-document{box-shadow:none}}@media print{html,body{padding:0;background:#fff}.mpe-rendered-document{max-width:none!important;box-shadow:none}}</style></head><body><main>${clone.outerHTML}</main></body></html>`;
   return new Blob([html], { type: "text/html;charset=utf-8" });
 }
 
@@ -4405,10 +4409,9 @@ interface SurfaceCaptureSeenState {
 }
 
 function getLivePreviewRenderer(app: App, rootEl: HTMLElement): LivePreviewRenderer | null {
-  const view = app.workspace.getActiveViewOfType(MarkdownView) as (MarkdownView & {
-    previewMode?: { renderer?: LivePreviewRenderer };
-  }) | null;
-  const renderer = view?.previewMode?.renderer;
+  const view = app.workspace.getActiveViewOfType(MarkdownView);
+  const previewMode = view?.previewMode as unknown as { renderer?: LivePreviewRenderer } | undefined;
+  const renderer = previewMode?.renderer;
   if (!renderer?.sections?.length) return null;
 
   const previewEl = renderer.previewEl;

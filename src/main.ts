@@ -80,9 +80,11 @@ interface LivePreviewRendererPosition {
 
 interface LivePreviewRendererSection {
   rendered?: boolean;
+  computed?: boolean;
   height?: number;
   shown?: boolean;
   el?: HTMLElement;
+  render?: () => void;
   start?: LivePreviewRendererPosition;
   end?: LivePreviewRendererPosition;
 }
@@ -92,6 +94,8 @@ interface LivePreviewRenderer {
   sizerEl?: HTMLElement;
   sections: LivePreviewRendererSection[];
   topSpace?: number;
+  measureSection?: (section: LivePreviewRendererSection) => void;
+  updateVirtualDisplay?: (scrollTop?: number) => void;
 }
 
 interface CapturedLivePreviewSection {
@@ -856,28 +860,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
         } finally {
           preparedNoteDraw.cleanup();
         }
-      } else if ((format === "docx" || format === "pptx") && isMarkdown) {
-        rendered = await this.renderMarkdownPreview(file, markdown);
-        throwIfExportCancelled(signal);
-        const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
-        const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(noteDrawFile, noteDrawHost);
-        try {
-          await nextAnimationFrame();
-          model = this.capturePreviewPdfModel(file, rendered.pageEl);
-          const pageRect = rendered.pageEl.getBoundingClientRect();
-          const hostRect = noteDrawHost.getBoundingClientRect();
-          model.noteDrawInkStrokes = projectNoteDrawInkStrokes(
-            preparedNoteDraw.data,
-            preparedNoteDraw.widthPx,
-            preparedNoteDraw.heightPx,
-            hostRect.left - pageRect.left,
-            hostRect.top - pageRect.top,
-            1
-          );
-        } finally {
-          preparedNoteDraw.cleanup();
-        }
-        outputBlob = await this.renderModelToFormat(file, model, format, signal);
       } else if (format === "pdf" && isMarkdown && isExcalidrawMarkdownFile(file, markdown)) {
         outputBlob = await this.renderExcalidrawToImagePdf(file, signal);
       } else {
@@ -1200,6 +1182,17 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, rootEl);
 
     try {
+      if (previewRenderer) {
+        await primeLivePreviewLayout(rootEl, scrollEl, previewRenderer, signal);
+        contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
+        captureConnectedLivePreviewSections(
+          rootEl,
+          scrollEl,
+          previewRenderer,
+          linkContext,
+          previewSectionCaptures
+        );
+      }
       const viewportHeight = Math.max(160, scrollEl.clientHeight || rootRect.height || 640);
       const captureStep = Math.max(120, viewportHeight * 0.72);
       const overlapHeight = Math.max(0, viewportHeight - captureStep);
@@ -1216,7 +1209,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
         );
       const capturedActualTops = new Set<number>();
       let appendedFinalWindows = false;
-      let appendedPreviewMissingWindows = false;
       scrollEl.scrollLeft = 0;
 
       for (let index = 0; index < scrollPositions.length; index += 1) {
@@ -1247,16 +1239,18 @@ export default class MobilePdfExporterPlugin extends Plugin {
         const actualKey = Math.round(actualTop * 10) / 10;
         contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
         const maxScrollTop = Math.max(0, scrollEl.scrollHeight - viewportHeight);
+        if (previewRenderer) {
+          captureConnectedLivePreviewSections(
+            rootEl,
+            scrollEl,
+            previewRenderer,
+            linkContext,
+            previewSectionCaptures
+          );
+        }
         if (!capturedActualTops.has(actualKey)) {
           capturedActualTops.add(actualKey);
           if (previewRenderer) {
-            captureConnectedLivePreviewSections(
-              rootEl,
-              scrollEl,
-              previewRenderer,
-              linkContext,
-              previewSectionCaptures
-            );
             if (!capturedPreviewOverlays && actualTop <= 0.5) {
               capturedPreviewOverlays = true;
               appendSurfaceCapture(
@@ -1313,24 +1307,35 @@ export default class MobilePdfExporterPlugin extends Plugin {
           scrollPositions.push(...finalPositions);
         }
 
-        if (previewRenderer && !appendedPreviewMissingWindows && index === scrollPositions.length - 1) {
-          appendedPreviewMissingWindows = true;
-          const missingPositions = buildMissingLivePreviewSectionScrollPositions(
-            previewRenderer,
-            previewSectionCaptures,
-            maxScrollTop,
-            viewportHeight
-          );
-          for (const position of missingPositions) {
-            const positionKey = Math.round(position * 10) / 10;
-            if (!capturedActualTops.has(positionKey) && !scrollPositions.includes(position)) {
-              scrollPositions.push(position);
-            }
-          }
-        }
       }
 
       if (previewRenderer) {
+        for (let retry = 0; retry < 4 && countMissingLivePreviewSections(previewRenderer, previewSectionCaptures) > 0; retry += 1) {
+          const missingPositions = buildMissingLivePreviewSectionScrollPositions(
+            previewRenderer,
+            previewSectionCaptures,
+            Math.max(0, scrollEl.scrollHeight - viewportHeight),
+            viewportHeight
+          );
+          for (const position of missingPositions) {
+            await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
+            const connectedSections = getUncapturedConnectedPreviewSectionElements(
+              rootEl,
+              previewRenderer,
+              previewSectionCaptures
+            );
+            if (await waitForImagesInElements(connectedSections, 900)) {
+              await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
+            }
+            captureConnectedLivePreviewSections(
+              rootEl,
+              scrollEl,
+              previewRenderer,
+              linkContext,
+              previewSectionCaptures
+            );
+          }
+        }
         appendLivePreviewSectionCaptures(captured, previewRenderer, previewSectionCaptures, seen);
         const missingSections = countMissingLivePreviewSections(previewRenderer, previewSectionCaptures);
         if (missingSections > 0) {
@@ -3625,7 +3630,7 @@ async function buildEditablePptx(
   const blob = result instanceof Blob ? result : new Blob([result as BlobPart], {
     type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
   });
-  return blob;
+  return injectOfficePreviewPages(blob, model, await renderOfficePreviewPages(model, options));
 }
 
 interface WordPageDrawingOverlay {
@@ -3653,32 +3658,6 @@ async function buildEditableDocx(
   } = await import("docx");
   const pageCount = Math.max(0, model.pageBreaks.length - 1);
   const sections = await Promise.all(Array.from({ length: pageCount }, async (_, pageIndex) => {
-    const background = await renderOfficePageVisualBackground(model, pageIndex, options);
-    const pageWidthPx = model.pageWidthPt / 72 * 96;
-    const pageHeightPx = model.pageHeightPt / 72 * 96;
-    const backgroundRun = new ImageRun({
-      type: "png",
-      data: background,
-      transformation: {
-        width: Math.max(1, Math.round(pageWidthPx)),
-        height: Math.max(1, Math.round(pageHeightPx))
-      },
-      floating: {
-        horizontalPosition: {
-          relative: HorizontalPositionRelativeFrom.PAGE,
-          offset: 0
-        },
-        verticalPosition: {
-          relative: VerticalPositionRelativeFrom.PAGE,
-          offset: 0
-        },
-        wrap: { type: TextWrappingType.NONE },
-        behindDocument: true,
-        allowOverlap: true,
-        lockAnchor: true,
-        zIndex: 0
-      }
-    });
     const imageRuns = (await getOfficeMediaFragments(model, pageIndex, options)).map((media) => new ImageRun({
       type: "png",
       data: media.data,
@@ -3710,7 +3689,7 @@ async function buildEditableDocx(
        }
       },
       children: [
-        new Paragraph({ children: [backgroundRun, ...imageRuns, new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
+        new Paragraph({ children: [...imageRuns, new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
       ]
     };
   }));
@@ -3721,7 +3700,8 @@ async function buildEditableDocx(
     sections
   });
   const packed = await Packer.toBlob(document);
-  return injectEditableWordTextBoxes(packed, model);
+  const editable = await injectEditableWordTextBoxes(packed, model);
+  return injectOfficePreviewPages(editable, model, await renderOfficePreviewPages(model, options));
 }
 
 function toWordPixel(model: PreviewPdfModel, valuePx: number): number {
@@ -3836,6 +3816,21 @@ async function renderOfficePageVisualBackground(
   });
 }
 
+async function renderOfficePreviewPages(
+  model: PreviewPdfModel,
+  options: OfficeRenderOptions
+): Promise<Uint8Array[]> {
+  return Promise.all(Array.from({ length: model.pageBreaks.length - 1 }, (_, pageIndex) => (
+    renderPreviewPageToPngBytes(model, pageIndex, {
+      colorMode: options.colorMode,
+      rasterScale: options.rasterScale,
+      includeText: true,
+      includeDecorations: true,
+      includeNoteDraw: true
+    })
+  )));
+}
+
 async function injectOfficePreviewPages(
   blob: Blob,
   model: PreviewPdfModel,
@@ -3948,16 +3943,17 @@ async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): 
   for (let pageIndex = 0; pageIndex < model.pageBreaks.length - 1; pageIndex += 1) {
     const marker = `__MPE_PAGE_${pageIndex}__`;
     const markerParagraph = new RegExp(`<w:p(?=[ >])(?:(?!<\\/w:p>)[\\s\\S])*?${marker}(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`, "u");
-    const paragraphs = buildWordFlowTextParagraphsXml(model, pageIndex, hyperlinkIds);
     const markerMatch = xml.match(markerParagraph);
     if (!markerMatch) throw new Error(`DOCX page marker ${pageIndex + 1} is missing.`);
     const markerXml = markerMatch[0];
     const drawingRuns = markerXml.match(/<w:r(?=[ >])[\s\S]*?<w:drawing[\s\S]*?<\/w:r>/gu) ?? [];
-    const paragraphProperties = markerXml.match(/<w:pPr(?=[ >])[\s\S]*?<\/w:pPr>/u)?.[0] ?? "";
-    const mediaParagraph = drawingRuns.length > 0
-      ? `<w:p>${paragraphProperties}${drawingRuns.join("")}</w:p>`
-      : "";
-    xml = xml.replace(markerParagraph, `${mediaParagraph}${paragraphs}`);
+    const paragraphs = buildWordFlowTextParagraphsXml(
+      model,
+      pageIndex,
+      hyperlinkIds,
+      drawingRuns.map(buildInlineWordMediaRun).filter((item): item is WordInlineMediaRun => Boolean(item))
+    );
+    xml = xml.replace(markerParagraph, paragraphs);
   }
   zip.file("word/document.xml", xml);
   await injectWordHyperlinkRelationships(zip, hyperlinkIds);
@@ -3967,18 +3963,63 @@ async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): 
   });
 }
 
+interface WordInlineMediaRun {
+  runXml: string;
+  leftPt: number;
+  topPt: number;
+  widthPt: number;
+  heightPt: number;
+}
+
+function buildInlineWordMediaRun(runXml: string): WordInlineMediaRun | null {
+  const anchor = runXml.match(/<wp:anchor(?=[ >])[^>]*>([\s\S]*?)<\/wp:anchor>/u);
+  if (!anchor) return null;
+  const body = anchor[1];
+  const positionH = Number.parseInt(body.match(/<wp:positionH(?=[ >])[\s\S]*?<wp:posOffset>(-?\d+)<\/wp:posOffset>[\s\S]*?<\/wp:positionH>/u)?.[1] ?? "0", 10);
+  const positionV = Number.parseInt(body.match(/<wp:positionV(?=[ >])[\s\S]*?<wp:posOffset>(-?\d+)<\/wp:posOffset>[\s\S]*?<\/wp:positionV>/u)?.[1] ?? "0", 10);
+  const extent = body.match(/<wp:extent cx="(\d+)" cy="(\d+)"\s*\/>/u);
+  const graphic = body.match(/<a:graphic(?=[ >])[\s\S]*<\/a:graphic>/u)?.[0];
+  if (!extent || !graphic) return null;
+  const effectExtent = body.match(/<wp:effectExtent(?=[ >])[^>]*\/>/u)?.[0] ?? "";
+  const docProperties = body.match(/<wp:docPr(?=[ >])[^>]*\/>/u)?.[0] ?? '<wp:docPr id="1" name="Image"/>';
+  const frameProperties = body.match(/<wp:cNvGraphicFramePr(?=[ >])[\s\S]*?<\/wp:cNvGraphicFramePr>/u)?.[0] ?? "";
+  const inlineDrawing = `<wp:inline distT="0" distB="0" distL="0" distR="0">${extent[0]}${effectExtent}${docProperties}${frameProperties}${graphic}</wp:inline>`;
+  return {
+    runXml: runXml.replace(anchor[0], inlineDrawing),
+    leftPt: positionH / 12700,
+    topPt: positionV / 12700,
+    widthPt: Number.parseInt(extent[1], 10) / 12700,
+    heightPt: Number.parseInt(extent[2], 10) / 12700
+  };
+}
+
 function buildWordFlowTextParagraphsXml(
   model: PreviewPdfModel,
   pageIndex: number,
-  hyperlinkIds: ReadonlyMap<string, string>
+  hyperlinkIds: ReadonlyMap<string, string>,
+  mediaRuns: WordInlineMediaRun[] = []
 ): string {
   const pageTop = model.pageBreaks[pageIndex];
   const pageMarginTwips = 360;
   let cursorPt = pageMarginTwips / 20 + 1;
+  const entries: Array<{ topPt: number; order: number; render: () => string }> = [];
 
-  return getPageOfficeTextLines(model, pageIndex).map((line) => {
+  for (const media of mediaRuns) {
+    entries.push({
+      topPt: media.topPt,
+      order: 0,
+      render: () => {
+        const beforeTwips = Math.max(0, Math.round((media.topPt - cursorPt) * 20));
+        const leftTwips = Math.max(-pageMarginTwips, Math.round(media.leftPt * 20) - pageMarginTwips);
+        cursorPt = Math.max(cursorPt, media.topPt) + media.heightPt;
+        return `<w:p><w:pPr><w:spacing w:before="${beforeTwips}" w:after="0"/><w:ind w:left="${leftTwips}"/></w:pPr>${media.runXml}</w:p>`;
+      }
+    });
+  }
+
+  for (const line of getPageOfficeTextLines(model, pageIndex)) {
     const fragments = line.fragments.filter((fragment) => fragment.text.trim());
-    if (fragments.length === 0) return "";
+    if (fragments.length === 0) continue;
 
     const lineTopPt = Math.max(0, (line.top - pageTop + model.bodyTopInsetPx) * model.pxToPt);
     const lineHeightPt = Math.max(
@@ -3986,7 +4027,6 @@ function buildWordFlowTextParagraphsXml(
       (line.bottom - line.top) * model.pxToPt * 1.18,
       ...fragments.map((fragment) => fragment.fontSizePx * model.pxToPt * 1.18)
     );
-    const beforeTwips = Math.max(0, Math.round((lineTopPt - cursorPt) * 20));
     const lineHeightTwips = Math.max(100, Math.round(lineHeightPt * 20));
     const leftTwips = Math.max(-pageMarginTwips, Math.round(line.left * model.pxToPt * 20) - pageMarginTwips);
     const separators = fragments.map((fragment, fragmentIndex): "none" | "space" | "tab" => {
@@ -4021,9 +4061,21 @@ function buildWordFlowTextParagraphsXml(
 
     const headingLevel = Math.min(...fragments.map((fragment) => fragment.headingLevel ?? 7));
     const paragraphStyle = headingLevel <= 6 ? `<w:pStyle w:val="Heading${headingLevel}"/>` : "";
-    cursorPt = Math.max(cursorPt, lineTopPt) + lineHeightPt;
-    return `<w:p><w:pPr>${paragraphStyle}${tabs}<w:spacing w:before="${beforeTwips}" w:after="0" w:line="${lineHeightTwips}" w:lineRule="exact"/><w:ind w:left="${leftTwips}"/></w:pPr>${runs}</w:p>`;
-  }).join("");
+    entries.push({
+      topPt: lineTopPt,
+      order: 1,
+      render: () => {
+        const beforeTwips = Math.max(0, Math.round((lineTopPt - cursorPt) * 20));
+        cursorPt = Math.max(cursorPt, lineTopPt) + lineHeightPt;
+        return `<w:p><w:pPr>${paragraphStyle}${tabs}<w:spacing w:before="${beforeTwips}" w:after="0" w:line="${lineHeightTwips}" w:lineRule="exact"/><w:ind w:left="${leftTwips}"/></w:pPr>${runs}</w:p>`;
+      }
+    });
+  }
+
+  return entries
+    .sort((left, right) => left.topPt - right.topPt || left.order - right.order)
+    .map((entry) => entry.render())
+    .join("");
 }
 
 function buildWordHyperlinkIdMap(fragments: TextFragment[]): Map<string, string> {
@@ -4895,6 +4947,61 @@ function buildLiveSurfaceCaptureScrollPositions(maxScrollTop: number, viewportHe
   }
 
   return [...positions].sort((a, b) => a - b);
+}
+
+async function primeLivePreviewLayout(
+  rootEl: HTMLElement,
+  scrollEl: HTMLElement,
+  renderer: LivePreviewRenderer,
+  signal?: AbortSignal
+): Promise<void> {
+  const viewportHeight = Math.max(160, scrollEl.clientHeight || rootEl.getBoundingClientRect().height || 640);
+  let previousHeight = 0;
+
+  const sectionElements = renderer.sections.flatMap((section) => {
+    try {
+      section.render?.();
+    } catch (error) {
+      console.warn("Mobile PDF Exporter could not render a reading-view section", error);
+    }
+    return section.el ? [section.el] : [];
+  });
+  if (renderer.sizerEl && sectionElements.length > 0) {
+    renderer.sizerEl.append(...sectionElements);
+    await nextAnimationFrame();
+    await waitForImagesInElements(sectionElements, IMAGE_WAIT_TIMEOUT_MS);
+    for (const section of renderer.sections) {
+      try {
+        renderer.measureSection?.(section);
+      } catch (error) {
+        console.warn("Mobile PDF Exporter could not measure a reading-view section", error);
+      }
+    }
+    await nextAnimationFrame();
+  }
+
+  for (let pass = 0; pass < 3; pass += 1) {
+    const positions = buildLiveSurfaceCaptureScrollPositions(
+      Math.max(0, scrollEl.scrollHeight - viewportHeight),
+      viewportHeight
+    );
+    for (const position of positions) {
+      await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, renderer);
+      const connectedSections = getUncapturedConnectedPreviewSectionElements(rootEl, renderer, new Map());
+      if (await waitForImagesInElements(connectedSections, 900)) {
+        await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, renderer);
+      }
+    }
+
+    const currentHeight = Math.max(scrollEl.scrollHeight, rootEl.scrollHeight);
+    const hasUnmeasuredSection = renderer.sections.some((section) => (
+      section.shown !== false && getLivePreviewSectionHeight(section) <= 0.5
+    ));
+    if (!hasUnmeasuredSection && Math.abs(currentHeight - previousHeight) <= 1) break;
+    previousHeight = currentHeight;
+  }
+
+  await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, 0, signal, renderer);
 }
 
 function buildLivePreviewGapScrollPositions(

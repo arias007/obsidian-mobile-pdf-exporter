@@ -1,6 +1,6 @@
 # Obsidian Mobile PDF Exporter
 
-One-click preview-style PDF export for Obsidian mobile and desktop.
+High-fidelity PDF, DOCX, PPTX, PNG, and self-contained HTML export for Obsidian mobile and desktop.
 
 ## What it does
 
@@ -8,6 +8,8 @@ One-click preview-style PDF export for Obsidian mobile and desktop.
 - Shows a PDF export options panel before exporting, so each export can choose common PDF settings.
 - Supports Auto / Chinese / English UI text for export buttons, menus, commands, options, settings, and export prompts.
 - Exports the current Markdown preview to a phone-width PDF.
+- Exports editable DOCX and PPTX files with native text, embedded images, links, and a visual layout layer for tables, callouts, separators, and NoteDraw ink.
+- Exports PNG with persisted NoteDraw strokes and self-contained HTML with editable rendered content and embedded images.
 - Keeps text selectable/copyable by writing a real PDF text layer.
 - Adds PDF options for page size, orientation, color/grayscale, per-page margins, content scale, headers, footers, selectable-text PDF, and image PDF.
 - Saves beside the current note by default, with a combined export-location control for switching to a custom vault folder.
@@ -69,6 +71,14 @@ Markor creates PDF through Android WebView printing, so its preview PDF text is 
 The exporter walks the active reading or editing surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. Editing view stays on the real CodeMirror DOM: the exporter scrolls through virtualized windows, waits for each window to settle, assigns each document band to one window, and deduplicates remounted fragments. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
 
 ## Changelog
+
+### 0.4.7
+
+- Uses a complete rendered Markdown DOM for DOCX and PPTX export so off-screen text and embedded images are captured consistently.
+- Keeps DOCX/PPTX text editable while adding table, callout, separator, and NoteDraw visuals behind it; embedded images remain independent foreground objects.
+- Groups related PPTX text runs into editable rich-text boxes to reduce broken wrapping while preserving font style, color, emphasis, and links.
+- Draws persisted NoteDraw ink explicitly into PNG and Office visual layers, even when the live NoteDraw canvas is hidden or outside the captured note surface.
+- Keeps exported HTML NoteDraw canvases visible and updates the manifest description for all supported formats.
 
 ### 0.3.64
 

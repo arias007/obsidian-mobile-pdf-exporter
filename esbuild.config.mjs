@@ -5,6 +5,26 @@ import esbuild from "esbuild";
 
 const prod = process.argv[2] === "production";
 const builtins = Array.from(new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]));
+const pptxGenBrowserRuntime = {
+  name: "pptxgen-browser-runtime",
+  setup(build) {
+    build.onLoad({ filter: /pptxgen\.es\.js$/ }, async (args) => {
+      const source = await readFile(args.path, "utf8");
+      let replacements = 0;
+      const contents = source.replace(
+        /const isNode = typeof process !== 'undefined'[^\r\n]*;/gu,
+        () => {
+          replacements += 1;
+          return "const isNode = false;";
+        }
+      );
+      if (replacements !== 2) {
+        throw new Error(`Expected two PptxGenJS runtime checks, found ${replacements}.`);
+      }
+      return { contents, loader: "js" };
+    });
+  }
+};
 
 const context = await esbuild.context({
   banner: {
@@ -39,6 +59,7 @@ const context = await esbuild.context({
   minify: prod,
   outfile: "main.js",
   platform: "browser",
+  plugins: [pptxGenBrowserRuntime],
   sourcemap: prod ? false : "inline",
   target: "es2021",
   treeShaking: true

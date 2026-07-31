@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const sourceUrl = new URL("../src/main.ts", import.meta.url);
 const stylesUrl = new URL("../styles.css", import.meta.url);
+const buildConfigUrl = new URL("../esbuild.config.mjs", import.meta.url);
 
 test("the visible export prompt can cancel every expensive phase", async () => {
   const [source, styles] = await Promise.all([
@@ -124,7 +125,9 @@ test("remote images fall back to Obsidian requests when canvas export is cross-o
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /function imageFragmentSliceToPngBytes/);
-  assert.match(source, /catch \(directError\) \{\s*const remoteImage = await loadRemoteImageForCanvas\(image\)/);
+  assert.match(source, /catch \(directError\) \{\s*const vaultImage = await loadVaultImageForCanvas\(fallback\);/);
+  assert.match(source, /const remoteImage = await loadRemoteImageForCanvas\(image\)/);
+  assert.match(source, /async function loadVaultImageForCanvas\(fallback\?: ImageExportFallback\)/);
   assert.match(source, /function loadRemoteImageForCanvas/);
   assert.match(source, /const remoteCanvasImageCache = new WeakMap/);
   assert.match(source, /return await loadImage\(source, REMOTE_IMAGE_CORS_TIMEOUT_MS, "anonymous"\)/);
@@ -138,26 +141,33 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
 
   assert.match(source, /function getOfficeTextFragmentLayout\(/);
   assert.match(source, /overlap >= minimumHeight \* 0\.32 \|\| Math\.abs\(fragmentCenter - lineCenter\) <= centerTolerance/);
-  assert.match(source, /for \(const line of getPageOfficeTextLines\(model, pageIndex\)\) \{\s*for \(const fragment of line\.fragments\)/);
-  assert.match(source, /const layout = getPptTextBoxLayout\(model, pageIndex, fragment\)/);
-  assert.doesNotMatch(source, /fit:\s*"shrink"/);
+  assert.match(source, /for \(const line of getPageOfficeTextLines\(model, pageIndex\)\) \{\s*for \(const group of groupPptTextLine\(line\)\)/);
+  assert.match(source, /const layout = getPptTextGroupLayout\(model, pageIndex, group\)/);
+  assert.match(source, /const richText = buildPptRichTextRuns\(model, group\.fragments\)/);
+  assert.match(source, /fit:\s*"shrink"/);
+  assert.match(source, /wrap:\s*false/);
   assert.match(source, /function buildWordFlowTextParagraphsXml\([\s\S]*?model: PreviewPdfModel,[\s\S]*?pageIndex: number,[\s\S]*?hyperlinkIds: ReadonlyMap<string, string>/);
   assert.match(source, /const paragraphs = buildWordFlowTextParagraphsXml\(model, pageIndex, hyperlinkIds\)/);
-  assert.match(source, /const pageModel = editableOffice/);
-  assert.match(source, /if \(format === "pptx"\) \{\s*return buildEditablePptx\(file, pageModel\);\s*\}/);
-  assert.match(source, /if \(format === "docx"\) \{\s*return buildEditableDocx\(file, pageModel\);\s*\}/);
+  assert.match(source, /const needsExplicitNoteDraw = format === "docx" \|\| format === "pptx" \|\| format === "png"/);
+  assert.match(source, /return buildEditablePptx\(file, pageModel, \{/);
+  assert.match(source, /return buildEditableDocx\(file, pageModel, \{/);
   assert.match(source, /return injectEditableWordTextBoxes\(packed, model\)/);
   assert.match(source, /for \(const line of getPageOfficeTextLines\(model, pageIndex\)\)/);
-  assert.match(source, /slide\.addText\(fragment\.text,/);
+  assert.match(source, /slide\.addText\(richText,/);
   assert.doesNotMatch(source, /slide\.addImage\(\{ data: bytesToDataUrl\(pages\[pageIndex\]\)/);
-  assert.match(source, /async function getOfficeMediaFragments\(model: PreviewPdfModel, pageIndex: number\)/);
-  assert.match(source, /for \(const media of await getOfficeMediaFragments\(model, pageIndex\)\)/);
+  assert.match(source, /async function getOfficeMediaFragments\([\s\S]*?renderOptions: OfficeRenderOptions/);
+  assert.match(source, /for \(const media of await getOfficeMediaFragments\(model, pageIndex, options\)\)/);
   assert.match(source, /slide\.addImage\(\{\s*data: bytesToDataUrl\(media\.data\)/);
+  assert.match(source, /const visualBackground = await renderOfficePageVisualBackground\(model, pageIndex, options\)/);
+  assert.match(source, /textFragments: \[\],[\s\S]*imageFragments: model\.imageFragments,[\s\S]*canvasFragments: model\.canvasFragments/);
+  assert.match(source, /sourcePath: getImageFragmentSourcePath\(image\)/);
+  assert.match(source, /linkPath: fragment\.sourcePath/);
   assert.match(source, /new ImageRun\(\{/);
   assert.match(source, /behindDocument: true/);
+  assert.match(source, /behindDocument: false/);
   assert.match(source, /wrap: \{ type: TextWrappingType\.NONE \}/);
   assert.doesNotMatch(source, /new Header\(/);
-  assert.match(source, /new Paragraph\(\{ children: \[\.\.\.imageRuns, new TextRun\(`__MPE_PAGE_\$\{pageIndex\}__`\)\] \}\)/);
+  assert.match(source, /new Paragraph\(\{ children: \[backgroundRun, \.\.\.imageRuns, new TextRun\(`__MPE_PAGE_\$\{pageIndex\}__`\)\] \}\)/);
   assert.match(source, /const markerParagraph = new RegExp\(`<w:p\(\?=\[ >\]\)\(\?:\(\?!/);
   assert.match(source, /const drawingRuns = markerXml\.match\(/);
   assert.match(source, /const mediaParagraph = drawingRuns\.length > 0/);
@@ -169,8 +179,10 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /<w:ind w:left="\$\{leftTwips\}"\/>/);
   assert.match(source, /decoration\.checked \? "☑" : "☐"/);
   assert.match(source, /decoration\.kind === "bullet"[\s\S]*?"•"/);
-  assert.match(source, /includeText,\s*includeDecorations/);
+  assert.match(source, /includeText,\s*includeDecorations,\s*includeNoteDraw: true/);
   assert.match(source, /if \(options\.includeDecorations !== false\)/);
+  assert.match(source, /if \(options\.includeNoteDraw === true\)/);
+  assert.match(source, /function drawCanvasNoteDrawInkLayer\(/);
   assert.match(source, /<w:pStyle w:val="Heading\$\{headingLevel\}"\/>/);
   assert.match(source, /fragment\.fontSizePx \* model\.pxToPt \* 2/);
   assert.match(source, /function buildWordTextPayloadXml\(text: string\)/);
@@ -203,6 +215,9 @@ test("HTML export uses semantic layers instead of a full-page PNG wrapper", asyn
   assert.match(source, /if \(!preservesSize && HTML_FLOW_SIZE_PROPERTIES\.has\(property\)\) continue/);
   assert.match(source, /\.mpe-rendered-document img\{max-width:100%;height:auto!important\}/);
   assert.match(source, /await inlineRenderedHtmlMedia\(sourceElements, clonedElements, signal\)/);
+  assert.match(source, /removeObsidianOnlyHtmlUrls\(clone\)/);
+  assert.match(source, /function removeObsidianOnlyHtmlUrls\(root: HTMLElement\)/);
+  assert.match(source, /\["src", "srcset", "poster", "data", "aria-label"\]/);
   assert.match(source, /target\.src = bytesToDataUrl\(bytes\)/);
   assert.match(source, /source\.toDataURL\("image\/png"\)/);
   assert.match(source, /target\.replaceWith\(image\)/);
@@ -238,4 +253,23 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /function isNoteDrawCanvasFragment\(fragment: CanvasFragment\)/);
   assert.match(source, /canvas\.closest\(\s*"\.notedraw-shell, \.note-doodle-shell, \.notedraw-export-image-canvas-layer"/);
   assert.match(source, /canvasFragments: model\.canvasFragments\.filter\(\(fragment\) => !isNoteDrawCanvasFragment\(fragment\)\)/);
+});
+
+test("plugin UI follows Obsidian window and settings conventions", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /activeDocument\.createElement\("canvas"\)/);
+  assert.match(source, /activeDocument\.createElement\("img"\)/);
+  assert.match(source, /activeWindow\.setTimeout/);
+  assert.match(source, /new Setting\(containerEl\)\.setName\("Mobile PDF Exporter"\)\.setHeading\(\)/);
+  assert.doesNotMatch(source, /appendElement\(containerEl, "h[23]"/);
+});
+
+test("PptxGenJS is bundled in browser mode for the Electron renderer", async () => {
+  const config = await readFile(buildConfigUrl, "utf8");
+
+  assert.match(config, /name: "pptxgen-browser-runtime"/);
+  assert.match(config, /const isNode = false;/);
+  assert.match(config, /if \(replacements !== 2\)/);
+  assert.match(config, /plugins: \[pptxGenBrowserRuntime\]/);
 });

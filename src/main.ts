@@ -164,6 +164,7 @@ interface TextLineDraft {
 
 interface ImageFragment {
   element: HTMLImageElement;
+  sourcePath: string | null;
   left: number;
   top: number;
   right: number;
@@ -621,8 +622,8 @@ function isExportCancelledError(error: unknown): boolean {
 
 function resolveUiLanguage(language: UiLanguage): ResolvedUiLanguage {
   if (language === "zh" || language === "en") return language;
-  const browserLanguage = (window.navigator.language || "").toLowerCase();
-  const browserLanguages = (window.navigator.languages || []).map((item) => item.toLowerCase());
+  const browserLanguage = (activeWindow.navigator.language || "").toLowerCase();
+  const browserLanguages = (activeWindow.navigator.languages || []).map((item) => item.toLowerCase());
   return [browserLanguage, ...browserLanguages].some((item) => item.startsWith("zh")) ? "zh" : "en";
 }
 
@@ -793,13 +794,27 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   openExportOptionsModal(file: TFile): void {
-    const surface = this.getActiveExportSurface(file);
-    if (surface) {
-      const rect = surface.rootEl.getBoundingClientRect();
-      this.settings.currentPageWidthPx = Math.max(240, surface.scrollEl.clientWidth || rect.width);
-      this.settings.currentPageHeightPx = Math.max(240, surface.scrollEl.clientHeight || rect.height);
-    }
+    this.refreshCurrentPageSizeFromActiveSurface(file);
     new MobilePdfExportOptionsModal(this.app, this, file).open();
+  }
+
+  private refreshCurrentPageSizeFromActiveSurface(file: TFile): void {
+    if (this.settings.pagePreset !== "current") return;
+    const surface = this.getActiveExportSurface(file);
+    if (!surface) return;
+    const rect = surface.rootEl.getBoundingClientRect();
+    this.settings.currentPageWidthPx = clampNumber(
+      Math.max(surface.scrollEl.clientWidth || 0, rect.width || 0),
+      240,
+      4096,
+      DEFAULT_SETTINGS.currentPageWidthPx
+    );
+    this.settings.currentPageHeightPx = clampNumber(
+      Math.max(surface.scrollEl.clientHeight || 0, rect.height || 0),
+      240,
+      8192,
+      DEFAULT_SETTINGS.currentPageHeightPx
+    );
   }
 
   warmupExportRuntime(): void {
@@ -811,6 +826,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   async exportFile(file: TFile, exportSettings?: MobilePdfExporterSettings, options: ExportFileOptions = {}): Promise<void> {
     const previousSettings = this.settings;
     if (exportSettings) this.settings = cloneSettings(exportSettings);
+    this.refreshCurrentPageSizeFromActiveSurface(file);
     const exportingPrompt = options.busyPrompt ?? new PdfExportBusyPrompt(file.basename, this.getResolvedLanguage());
     const signal = options.signal ?? exportingPrompt.signal;
     let rendered: RenderedPreview | null = null;
@@ -840,6 +856,28 @@ export default class MobilePdfExporterPlugin extends Plugin {
         } finally {
           preparedNoteDraw.cleanup();
         }
+      } else if ((format === "docx" || format === "pptx") && isMarkdown) {
+        rendered = await this.renderMarkdownPreview(file, markdown);
+        throwIfExportCancelled(signal);
+        const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
+        const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(noteDrawFile, noteDrawHost);
+        try {
+          await nextAnimationFrame();
+          model = this.capturePreviewPdfModel(file, rendered.pageEl);
+          const pageRect = rendered.pageEl.getBoundingClientRect();
+          const hostRect = noteDrawHost.getBoundingClientRect();
+          model.noteDrawInkStrokes = projectNoteDrawInkStrokes(
+            preparedNoteDraw.data,
+            preparedNoteDraw.widthPx,
+            preparedNoteDraw.heightPx,
+            hostRect.left - pageRect.left,
+            hostRect.top - pageRect.top,
+            1
+          );
+        } finally {
+          preparedNoteDraw.cleanup();
+        }
+        outputBlob = await this.renderModelToFormat(file, model, format, signal);
       } else if (format === "pdf" && isMarkdown && isExcalidrawMarkdownFile(file, markdown)) {
         outputBlob = await this.renderExcalidrawToImagePdf(file, signal);
       } else {
@@ -927,7 +965,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     try {
       const exportSettings = lease.api.getExportSettings?.(true, true, false);
       const loader = lease.api.getEmbeddedFilesLoader?.(false);
-      const preferredScale = Math.min(2, Math.max(1.25, window.devicePixelRatio || 1.5));
+      const preferredScale = Math.min(2, Math.max(1.25, activeWindow.devicePixelRatio || 1.5));
       const scales = getExcalidrawExportScaleCandidates(preferredScale);
 
       // Prefer SVG so Excalidraw's own createPNG path does not show "PNG too large" notices.
@@ -1488,7 +1526,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private getExcalidrawAutomateLease(): ExcalidrawAutomateLease | null {
-    const globalApi = (window as unknown as { ExcalidrawAutomate?: ExcalidrawAutomateRuntime }).ExcalidrawAutomate;
+    const globalApi = (activeWindow as unknown as { ExcalidrawAutomate?: ExcalidrawAutomateRuntime }).ExcalidrawAutomate;
     if (globalApi?.getAPI) {
       const api = globalApi.getAPI();
       if (api?.createPNG || api?.createSVG) return { api, destroyAfterUse: true };
@@ -1519,7 +1557,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const width = Math.max(1, Math.ceil(markdownEl.scrollWidth || rect.width || 1));
     const height = Math.max(1, Math.ceil(markdownEl.scrollHeight || rect.height || 1));
     const maxPixelScale = Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, width * height));
-    const ratio = clampNumber(Math.min(window.devicePixelRatio || 1, maxPixelScale), 0.5, 2, 1);
+    const ratio = clampNumber(Math.min(activeWindow.devicePixelRatio || 1, maxPixelScale), 0.5, 2, 1);
     const previousPosition = getComputedStyle(markdownEl).position;
     if (previousPosition === "static") markdownEl.setCssStyles({ position: "relative" });
 
@@ -1609,7 +1647,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const previousInlinePosition = host.style.position;
     if (!hasLiveCanvas && data?.strokes.length) {
       const maxPixelScale = Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, width * height));
-      const ratio = clampNumber(Math.min(window.devicePixelRatio || 1, maxPixelScale), 0.5, 2, 1);
+      const ratio = clampNumber(Math.min(activeWindow.devicePixelRatio || 1, maxPixelScale), 0.5, 2, 1);
       if (getComputedStyle(host).position === "static") {
         host.style.position = "relative";
         changedPosition = true;
@@ -1814,15 +1852,25 @@ export default class MobilePdfExporterPlugin extends Plugin {
         ? this.renderPreviewToImagePdf(file, model, signal)
         : this.renderPreviewToSelectablePdf(file, model, signal);
     }
-    const editableOffice = format === "docx" || format === "pptx";
-    const pageModel = editableOffice
+    const needsExplicitNoteDraw = format === "docx" || format === "pptx" || format === "png";
+    const pageModel = needsExplicitNoteDraw && model.noteDrawInkStrokes?.length
       ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
       : model;
     if (format === "pptx") {
-      return buildEditablePptx(file, pageModel);
+      return buildEditablePptx(file, pageModel, {
+        colorMode: this.settings.colorMode,
+        rasterScale: this.settings.imageRasterScale,
+        app: this.app,
+        sourcePath: file.path
+      });
     }
     if (format === "docx") {
-      return buildEditableDocx(file, pageModel);
+      return buildEditableDocx(file, pageModel, {
+        colorMode: this.settings.colorMode,
+        rasterScale: this.settings.imageRasterScale,
+        app: this.app,
+        sourcePath: file.path
+      });
     }
     if (format === "html") {
       return buildSemanticHtml(file, model);
@@ -1845,7 +1893,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         colorMode: this.settings.colorMode,
         rasterScale: this.settings.imageRasterScale,
         includeText,
-        includeDecorations
+        includeDecorations,
+        includeNoteDraw: true
       }));
       await nextAnimationFrame();
     }
@@ -2472,7 +2521,7 @@ class PdfExportBusyPrompt {
     });
     this.cancelButtonEl.type = "button";
     this.cancelButtonEl.addEventListener("click", () => this.requestCancel());
-    this.timer = window.setInterval(() => this.updateElapsed(), 1000);
+    this.timer = activeWindow.setInterval(() => this.updateElapsed(), 1000);
   }
 
   async waitUntilPainted(): Promise<void> {
@@ -2493,7 +2542,7 @@ class PdfExportBusyPrompt {
     this.elapsedEl.textContent = translate(this.language, "busyCompleteStatus");
     this.cancelButtonEl.disabled = true;
     this.cancelButtonEl.setCssStyles({ display: "none" });
-    window.clearInterval(this.timer);
+    activeWindow.clearInterval(this.timer);
   }
 
   fail(message: string): void {
@@ -2515,12 +2564,12 @@ class PdfExportBusyPrompt {
     this.elapsedEl.textContent = translate(this.language, "busyCancelledStatus");
     this.cancelButtonEl.disabled = true;
     this.cancelButtonEl.setCssStyles({ display: "none" });
-    window.clearInterval(this.timer);
+    activeWindow.clearInterval(this.timer);
   }
 
   closeSoon(): void {
     if (this.closed || this.closeTimer) return;
-    this.closeTimer = window.setTimeout(() => this.close(), this.failed ? 5200 : this.cancelled ? 1800 : 1400);
+    this.closeTimer = activeWindow.setTimeout(() => this.close(), this.failed ? 5200 : this.cancelled ? 1800 : 1400);
   }
 
   private updateElapsed(): void {
@@ -2542,8 +2591,8 @@ class PdfExportBusyPrompt {
   private close(): void {
     if (this.closed) return;
     this.closed = true;
-    window.clearInterval(this.timer);
-    if (this.closeTimer) window.clearTimeout(this.closeTimer);
+    activeWindow.clearInterval(this.timer);
+    if (this.closeTimer) activeWindow.clearTimeout(this.closeTimer);
     this.rootEl.remove();
   }
 }
@@ -2556,10 +2605,10 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.replaceChildren();
-    appendElement(containerEl, "h2", { text: "Mobile PDF Exporter" });
+    new Setting(containerEl).setName("Mobile PDF Exporter").setHeading();
     appendElement(containerEl, "p", { text: this.plugin.t("settingsIntro") });
 
-    appendElement(containerEl, "h3", { text: this.plugin.t("settingsGeneralHeading") });
+    new Setting(containerEl).setName(this.plugin.t("settingsGeneralHeading")).setHeading();
 
     new Setting(containerEl)
       .setName(this.plugin.t("languageName"))
@@ -2578,7 +2627,7 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
           });
       });
 
-    appendElement(containerEl, "h3", { text: this.plugin.t("settingsNoteOptionsHeading") });
+    new Setting(containerEl).setName(this.plugin.t("settingsNoteOptionsHeading")).setHeading();
 
     new Setting(containerEl)
       .setName(this.plugin.t("exportModeName"))
@@ -2694,7 +2743,7 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
 
     this.addHeaderFooterSettings(containerEl);
 
-    appendElement(containerEl, "h3", { text: this.plugin.t("settingsSaveAndShareHeading") });
+    new Setting(containerEl).setName(this.plugin.t("settingsSaveAndShareHeading")).setHeading();
 
     this.addOutputLocationSetting(containerEl);
 
@@ -3221,7 +3270,7 @@ function bytesToDataUrl(bytes: Uint8Array, mime = "image/png"): string {
 }
 
 async function loadPngBytesAsImage(bytes: Uint8Array): Promise<HTMLImageElement> {
-  const image = new Image();
+  const image = activeDocument.createElement("img");
   image.decoding = "async";
   image.src = bytesToDataUrl(bytes);
   await image.decode();
@@ -3234,7 +3283,7 @@ async function combinePngPages(pages: Uint8Array[]): Promise<Blob> {
   const width = Math.max(...images.map((image) => image.naturalWidth));
   const height = images.reduce((sum, image) => sum + image.naturalHeight, 0);
   const scale = Math.min(1, Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, width * height)));
-  const canvas = document.createElement("canvas");
+  const canvas = activeDocument.createElement("canvas");
   canvas.width = Math.max(1, Math.round(width * scale));
   canvas.height = Math.max(1, Math.round(height * scale));
   const context = canvas.getContext("2d");
@@ -3415,7 +3464,18 @@ interface OfficeMediaFragment {
   heightPx: number;
 }
 
-async function getOfficeMediaFragments(model: PreviewPdfModel, pageIndex: number): Promise<OfficeMediaFragment[]> {
+interface OfficeRenderOptions {
+  colorMode: PdfColorMode;
+  rasterScale: number;
+  app?: App;
+  sourcePath?: string;
+}
+
+async function getOfficeMediaFragments(
+  model: PreviewPdfModel,
+  pageIndex: number,
+  renderOptions: OfficeRenderOptions
+): Promise<OfficeMediaFragment[]> {
   const pageTopPx = model.pageBreaks[pageIndex];
   const pageBottomPx = model.pageBreaks[pageIndex + 1];
   const options = {
@@ -3440,7 +3500,16 @@ async function getOfficeMediaFragments(model: PreviewPdfModel, pageIndex: number
     const slice = getMediaPageSlice(fragment, options);
     if (!slice) continue;
     try {
-      append(await imageFragmentSliceToPngBytes(fragment.element, slice.offsetTopPx, slice.height, slice.fragmentHeightPx), slice);
+      append(await imageFragmentSliceToPngBytes(
+        fragment.element,
+        slice.offsetTopPx,
+        slice.height,
+        slice.fragmentHeightPx,
+        renderOptions.colorMode,
+        renderOptions.app && renderOptions.sourcePath
+          ? { app: renderOptions.app, sourcePath: renderOptions.sourcePath, linkPath: fragment.sourcePath }
+          : undefined
+      ), slice);
     } catch (error) {
       console.warn("Mobile PDF Exporter Office image export failed", error);
     }
@@ -3497,7 +3566,8 @@ function canvasFragmentSliceToPngBytes(fragment: CanvasFragment, slice: MediaPag
 
 async function buildEditablePptx(
   file: TFile,
-  model: PreviewPdfModel
+  model: PreviewPdfModel,
+  options: OfficeRenderOptions
 ): Promise<Blob> {
   const module = await import("pptxgenjs");
   const PptxGenJS = (module.default ?? module) as unknown as new () => any;
@@ -3512,8 +3582,16 @@ async function buildEditablePptx(
   const pageCount = Math.max(0, model.pageBreaks.length - 1);
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
     const slide = pptx.addSlide();
-    slide.background = { color: "FFFFFF" };
-    for (const media of await getOfficeMediaFragments(model, pageIndex)) {
+    slide.background = { color: colorToHex(model.background) };
+    const visualBackground = await renderOfficePageVisualBackground(model, pageIndex, options);
+    slide.addImage({
+      data: bytesToDataUrl(visualBackground),
+      x: 0,
+      y: 0,
+      w: widthIn,
+      h: heightIn
+    });
+    for (const media of await getOfficeMediaFragments(model, pageIndex, options)) {
       slide.addImage({
         data: bytesToDataUrl(media.data),
         x: media.leftPx * model.pxToPt / 72,
@@ -3523,9 +3601,10 @@ async function buildEditablePptx(
       });
     }
     for (const line of getPageOfficeTextLines(model, pageIndex)) {
-      for (const fragment of line.fragments) {
-        const layout = getPptTextBoxLayout(model, pageIndex, fragment);
-        slide.addText(fragment.text, {
+      for (const group of groupPptTextLine(line)) {
+        const layout = getPptTextGroupLayout(model, pageIndex, group);
+        const richText = buildPptRichTextRuns(model, group.fragments);
+        slide.addText(richText, {
           x: layout.xPt / 72,
           y: layout.yPt / 72,
           w: layout.widthPt / 72,
@@ -3534,15 +3613,10 @@ async function buildEditablePptx(
           valign: "top",
           paraSpaceAfterPt: 0,
           isTextBox: true,
-          fontFace: getOfficeFontFamily(fragment),
-          fontSize: Math.max(4, fragment.fontSizePx * model.pxToPt),
-          bold: Number.parseInt(fragment.fontWeight, 10) >= 600,
-          italic: fragment.fontStyle === "italic",
-          underline: fragment.underline ? { color: colorToHex(fragment.color) } : undefined,
-          strike: fragment.lineThrough ? "sngStrike" : undefined,
-          color: colorToHex(fragment.color),
-          hyperlink: fragment.href ? { url: fragment.href } : undefined,
-          breakLine: false
+          fit: "shrink",
+          wrap: false,
+          breakLine: false,
+          autoFit: false
         });
       }
     }
@@ -3564,7 +3638,8 @@ interface WordPageDrawingOverlay {
 
 async function buildEditableDocx(
   file: TFile,
-  model: PreviewPdfModel
+  model: PreviewPdfModel,
+  options: OfficeRenderOptions
 ): Promise<Blob> {
   const {
     Document,
@@ -3578,27 +3653,53 @@ async function buildEditableDocx(
   } = await import("docx");
   const pageCount = Math.max(0, model.pageBreaks.length - 1);
   const sections = await Promise.all(Array.from({ length: pageCount }, async (_, pageIndex) => {
-    const imageRuns = (await getOfficeMediaFragments(model, pageIndex)).map((media) => new ImageRun({
+    const background = await renderOfficePageVisualBackground(model, pageIndex, options);
+    const pageWidthPx = model.pageWidthPt / 72 * 96;
+    const pageHeightPx = model.pageHeightPt / 72 * 96;
+    const backgroundRun = new ImageRun({
       type: "png",
-      data: media.data,
+      data: background,
       transformation: {
-        width: Math.max(1, Math.round(media.widthPx)),
-        height: Math.max(1, Math.round(media.heightPx))
+        width: Math.max(1, Math.round(pageWidthPx)),
+        height: Math.max(1, Math.round(pageHeightPx))
       },
       floating: {
         horizontalPosition: {
           relative: HorizontalPositionRelativeFrom.PAGE,
-          offset: Math.round(media.leftPx * 9525)
+          offset: 0
         },
         verticalPosition: {
           relative: VerticalPositionRelativeFrom.PAGE,
-          offset: Math.round(media.topPx * 9525)
+          offset: 0
         },
         wrap: { type: TextWrappingType.NONE },
         behindDocument: true,
         allowOverlap: true,
         lockAnchor: true,
-        zIndex: 1
+        zIndex: 0
+      }
+    });
+    const imageRuns = (await getOfficeMediaFragments(model, pageIndex, options)).map((media) => new ImageRun({
+      type: "png",
+      data: media.data,
+      transformation: {
+        width: Math.max(1, Math.round(toWordPixel(model, media.widthPx))),
+        height: Math.max(1, Math.round(toWordPixel(model, media.heightPx)))
+      },
+      floating: {
+        horizontalPosition: {
+          relative: HorizontalPositionRelativeFrom.PAGE,
+          offset: Math.round(toWordPixel(model, media.leftPx) * 9525)
+        },
+        verticalPosition: {
+          relative: VerticalPositionRelativeFrom.PAGE,
+          offset: Math.round(toWordPixel(model, media.topPx) * 9525)
+        },
+        wrap: { type: TextWrappingType.NONE },
+        behindDocument: false,
+        allowOverlap: true,
+        lockAnchor: true,
+        zIndex: 2
       }
     }));
     return {
@@ -3607,10 +3708,10 @@ async function buildEditableDocx(
          size: { width: Math.round(model.pageWidthPt * 20), height: Math.round(model.pageHeightPt * 20) },
          margin: { top: 360, right: 360, bottom: 360, left: 360 }
        }
-     },
-     children: [
-        new Paragraph({ children: [...imageRuns, new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
-     ]
+      },
+      children: [
+        new Paragraph({ children: [backgroundRun, ...imageRuns, new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
+      ]
     };
   }));
   const document = new Document({
@@ -3621,6 +3722,118 @@ async function buildEditableDocx(
   });
   const packed = await Packer.toBlob(document);
   return injectEditableWordTextBoxes(packed, model);
+}
+
+function toWordPixel(model: PreviewPdfModel, valuePx: number): number {
+  return valuePx * model.pxToPt / 72 * 96;
+}
+
+interface PptTextGroup {
+  fragments: TextFragment[];
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function groupPptTextLine(line: OfficeTextLine): PptTextGroup[] {
+  const groups: PptTextGroup[] = [];
+  for (const fragment of line.fragments) {
+    const previous = groups[groups.length - 1];
+    const joinsPrevious = Boolean(
+      previous &&
+      !fragment.officeDecoration &&
+      !previous.fragments.some((item) => item.officeDecoration) &&
+      previous.fragments[0]?.mergeScope === fragment.mergeScope
+    );
+    if (joinsPrevious) {
+      previous.fragments.push(fragment);
+      previous.left = Math.min(previous.left, fragment.left);
+      previous.top = Math.min(previous.top, fragment.top);
+      previous.right = Math.max(previous.right, fragment.right);
+      previous.bottom = Math.max(previous.bottom, fragment.bottom);
+    } else {
+      groups.push({
+        fragments: [fragment],
+        left: fragment.left,
+        top: fragment.top,
+        right: fragment.right,
+        bottom: fragment.bottom
+      });
+    }
+  }
+  return groups;
+}
+
+function getPptTextGroupLayout(
+  model: PreviewPdfModel,
+  pageIndex: number,
+  group: PptTextGroup
+): OfficeTextBoxLayout {
+  const first = group.fragments[0];
+  const pageTop = model.pageBreaks[pageIndex];
+  const maxFontSizePt = Math.max(...group.fragments.map((fragment) => fragment.fontSizePx * model.pxToPt));
+  const xPt = Math.max(0, group.left * model.pxToPt);
+  const yPt = Math.max(0, (group.top - pageTop + model.bodyTopInsetPx) * model.pxToPt - maxFontSizePt * 0.12);
+  const availableWidthPt = Math.max(4, model.pageWidthPt - xPt);
+  const naturalWidthPt = Math.max(4, (group.right - group.left) * model.pxToPt);
+  const widthSlackPt = first?.officeDecoration ? 2 : Math.max(12, maxFontSizePt * 1.25);
+  return {
+    xPt,
+    yPt,
+    widthPt: Math.min(availableWidthPt, naturalWidthPt + widthSlackPt),
+    heightPt: Math.max(5, (group.bottom - group.top) * model.pxToPt * 1.42, maxFontSizePt * 1.48)
+  };
+}
+
+function buildPptRichTextRuns(
+  model: PreviewPdfModel,
+  fragments: TextFragment[]
+): Array<{ text: string; options: Record<string, unknown> }> {
+  return fragments.map((fragment, index) => {
+    const previous = fragments[index - 1];
+    const visibleGap = previous && fragment.left - previous.right > Math.max(
+      1.5,
+      Math.min(fragment.fontSizePx, previous.fontSizePx) * 0.18
+    );
+    return {
+      text: `${visibleGap ? " " : ""}${fragment.text}`,
+      options: {
+        fontFace: getOfficeFontFamily(fragment),
+        fontSize: Math.max(4, fragment.fontSizePx * model.pxToPt),
+        bold: Number.parseInt(fragment.fontWeight, 10) >= 600,
+        italic: fragment.fontStyle === "italic",
+        underline: fragment.underline ? { color: colorToHex(fragment.color) } : undefined,
+        strike: fragment.lineThrough ? "sngStrike" : undefined,
+        color: colorToHex(fragment.color),
+        hyperlink: fragment.href ? { url: fragment.href } : undefined,
+        breakLine: false
+      }
+    };
+  });
+}
+
+async function renderOfficePageVisualBackground(
+  model: PreviewPdfModel,
+  pageIndex: number,
+  options: OfficeRenderOptions
+): Promise<Uint8Array> {
+  const visualModel: PreviewPdfModel = {
+    ...model,
+    textFragments: [],
+    imageFragments: model.imageFragments,
+    canvasFragments: model.canvasFragments,
+    linkFragments: [],
+    svgFragments: model.svgFragments,
+    decorationFragments: []
+  };
+  return renderPreviewPageToPngBytes(visualModel, pageIndex, {
+    colorMode: options.colorMode,
+    rasterScale: options.rasterScale,
+    includeText: false,
+    includeDecorations: false,
+    includeNoteDraw: true
+  });
 }
 
 async function injectOfficePreviewPages(
@@ -3922,6 +4135,7 @@ async function buildRenderedDomHtml(file: TFile, pageEl: HTMLElement, signal?: A
   }
   await inlineRenderedHtmlMedia(sourceElements, clonedElements, signal);
   clone.querySelectorAll("script,style,link,button,.collapse-indicator,.heading-collapse-indicator,.markdown-embed-link,.edit-block-button,.copy-code-button,.notedraw-toolbar,.note-doodle-toolbar").forEach((element) => element.remove());
+  removeObsidianOnlyHtmlUrls(clone);
   clone.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {
     const dataHref = anchor.getAttribute("data-href");
     if (dataHref && /^(?:app|obsidian):\/\//iu.test(anchor.href)) anchor.setAttribute("href", dataHref);
@@ -3940,8 +4154,27 @@ async function buildRenderedDomHtml(file: TFile, pageEl: HTMLElement, signal?: A
   clone.style.setProperty("min-height", "0", "important");
   clone.style.setProperty("overflow", "visible", "important");
   clone.style.setProperty("transform", "none", "important");
-  const html = `<!doctype html><html lang="zh-CN" data-mpe-format="rendered-dom"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(file.basename)}</title><style>*{box-sizing:border-box}html{background:#eef1f5}body{margin:0;padding:24px;background:#eef1f5;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}.mpe-rendered-document{margin:0 auto!important;background:#fff;box-shadow:0 8px 28px #0002}.mpe-rendered-document .markdown-preview-view{width:100%!important;max-width:100%!important;height:auto!important;overflow:visible!important}.mpe-rendered-document img{max-width:100%;height:auto!important}.mpe-rendered-document table{width:100%;max-width:100%;}.mpe-rendered-document:focus{outline:none}@media(max-width:${widthPx + 48}px){body{padding:12px}.mpe-rendered-document{box-shadow:none}}@media print{html,body{padding:0;background:#fff}.mpe-rendered-document{max-width:none!important;box-shadow:none}}</style></head><body><main>${clone.outerHTML}</main></body></html>`;
+  const html = `<!doctype html><html lang="zh-CN" data-mpe-format="rendered-dom"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(file.basename)}</title><style>*{box-sizing:border-box}html{background:#eef1f5}body{margin:0;padding:24px;background:#eef1f5;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}.mpe-rendered-document{margin:0 auto!important;background:#fff;box-shadow:0 8px 28px #0002}.mpe-rendered-document .markdown-preview-view{width:100%!important;max-width:100%!important;height:auto!important;overflow:visible!important}.mpe-rendered-document img{max-width:100%;height:auto!important}.mpe-rendered-document .mpe-export-canvas.mobile-pdf-exporter-note-doodle-canvas{display:block!important}.mpe-rendered-document table{width:100%;max-width:100%;}.mpe-rendered-document:focus{outline:none}@media(max-width:${widthPx + 48}px){body{padding:12px}.mpe-rendered-document{box-shadow:none}}@media print{html,body{padding:0;background:#fff}.mpe-rendered-document{max-width:none!important;box-shadow:none}}</style></head><body><main>${clone.outerHTML}</main></body></html>`;
   return new Blob([html], { type: "text/html;charset=utf-8" });
+}
+
+function removeObsidianOnlyHtmlUrls(root: HTMLElement): void {
+  const elements = [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))];
+  for (const element of elements) {
+    for (const property of Array.from(element.style)) {
+      if (/(?:app|obsidian):\/\//iu.test(element.style.getPropertyValue(property))) {
+        element.style.removeProperty(property);
+      }
+    }
+    for (const attribute of ["src", "srcset", "poster", "data", "aria-label"]) {
+      const value = element.getAttribute(attribute);
+      if (value && /^(?:app|obsidian):\/\//iu.test(value.trim())) element.removeAttribute(attribute);
+    }
+  }
+  root.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {
+    const href = anchor.getAttribute("href");
+    if (href && /^(?:app|obsidian):\/\//iu.test(href.trim())) anchor.removeAttribute("href");
+  });
 }
 
 function copyRenderedHtmlStyle(source: HTMLElement, target: HTMLElement): void {
@@ -4723,7 +4956,7 @@ async function settleLiveSurfaceAtScrollPosition(
   }
   if (Math.abs(scrollEl.scrollTop - expectedTop) <= 1.5) return;
 
-  await waitForPromiseOrTimeout(new Promise<void>((resolve) => window.setTimeout(resolve, 40)), 80);
+  await waitForPromiseOrTimeout(new Promise<void>((resolve) => activeWindow.setTimeout(resolve, 40)), 80);
   throwIfExportCancelled(signal);
   expectedTop = clampNumber(requestedTop, 0, Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight), 0);
   scrollEl.scrollTop = expectedTop;
@@ -4820,7 +5053,7 @@ function refreshLiveDrawingSurface(rootEl: HTMLElement): void {
 
 function getVisibleElementScore(element: HTMLElement): number {
   const rect = element.getBoundingClientRect();
-  const ownerWindow = element.ownerDocument.defaultView ?? window;
+  const ownerWindow = element.ownerDocument.defaultView ?? activeWindow;
   const visibleWidth = Math.max(0, Math.min(rect.right, ownerWindow.innerWidth) - Math.max(rect.left, 0));
   const visibleHeight = Math.max(0, Math.min(rect.bottom, ownerWindow.innerHeight) - Math.max(rect.top, 0));
   return visibleWidth * visibleHeight + Math.min(element.scrollHeight, 1_000_000);
@@ -4911,6 +5144,7 @@ function captureImageFragments(pageEl: HTMLElement): ImageFragment[] {
       const rect = image.getBoundingClientRect();
       return {
         element: image,
+        sourcePath: getImageFragmentSourcePath(image),
         left: rect.left - pageRect.left,
         top: rect.top - pageRect.top,
         right: rect.right - pageRect.left,
@@ -4918,6 +5152,11 @@ function captureImageFragments(pageEl: HTMLElement): ImageFragment[] {
       };
     })
     .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
+}
+
+function getImageFragmentSourcePath(image: HTMLImageElement): string | null {
+  const wrapper = image.closest(".internal-embed.image-embed, .image-embed, .media-embed");
+  return wrapper?.getAttribute("src")?.trim() || null;
 }
 
 interface CanvasPixelBounds {
@@ -5605,7 +5844,10 @@ async function buildSemanticHtml(file: TFile, model: PreviewPdfModel): Promise<B
         : "none";
       return `<div class="page-box" style="left:${toCssPx(left)}px;top:${toCssPx(top)}px;width:${toCssPx(right - left)}px;height:${toCssPx(bottom - top)}px;background:${escapeHtml(box.background ?? "transparent")};border-top:${border(box.borderTop)};border-right:${border(box.borderRight)};border-bottom:${border(box.borderBottom)};border-left:${border(box.borderLeft)};border-radius:${toCssPx(box.borderRadiusPx)}px"></div>`;
     }).join("");
-    const media = (await getOfficeMediaFragments(model, pageIndex)).map((fragment) => (
+    const media = (await getOfficeMediaFragments(model, pageIndex, {
+      colorMode: "color",
+      rasterScale: 1
+    })).map((fragment) => (
       `<img class="page-media" alt="" draggable="false" src="${bytesToDataUrl(fragment.data)}" style="left:${toCssPx(fragment.leftPx)}px;top:${toCssPx(fragment.topPx)}px;width:${toCssPx(fragment.widthPx)}px;height:${toCssPx(fragment.heightPx)}px">`
     )).join("");
     const text = getPageTextFragments(model, pageIndex).map((fragment) => {
@@ -6562,6 +6804,7 @@ async function renderPreviewPageToPngBytes(
     rasterScale: number;
     includeText?: boolean;
     includeDecorations?: boolean;
+    includeNoteDraw?: boolean;
   }
 ): Promise<Uint8Array> {
   const pageTopPx = model.pageBreaks[pageIndex];
@@ -6624,6 +6867,12 @@ async function renderPreviewPageToPngBytes(
     sourceWidthPx: model.sourceWidthPx,
     pageHeightPx: model.bodyHeightPx
   });
+  if (options.includeNoteDraw === true) {
+    drawCanvasNoteDrawInkLayer(context, model.noteDrawInkStrokes ?? [], {
+      pageTopPx,
+      pageBottomPx
+    });
+  }
 
   context.restore();
   drawCanvasHeaderFooter(context, model, pageIndex);
@@ -6634,6 +6883,48 @@ async function renderPreviewPageToPngBytes(
   }
 
   return dataUrlToUint8Array(canvas.toDataURL("image/png"));
+}
+
+function drawCanvasNoteDrawInkLayer(
+  context: CanvasRenderingContext2D,
+  strokes: PdfInkStroke[],
+  options: {
+    pageTopPx: number;
+    pageBottomPx: number;
+  }
+): void {
+  for (const stroke of strokes) {
+    const strokeWidth = Math.max(0.5, stroke.widthPx);
+    const offsets = stroke.brush === "watercolor"
+      ? getNoteDoodlePenOffsets(Math.max(2, stroke.count + 1), strokeWidth * 0.85)
+      : getNoteDoodlePenOffsets(stroke.count, strokeWidth);
+    const paths = offsets.flatMap((offset) => splitInkPathForPage(
+      stroke.points.map((point) => ({ x: point.x + offset.x, y: point.y + offset.y })),
+      options.pageTopPx,
+      options.pageBottomPx
+    ));
+    if (!paths.length) continue;
+
+    context.save();
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.strokeStyle = stroke.color;
+    for (const [pathIndex, path] of paths.entries()) {
+      context.globalAlpha = stroke.brush === "watercolor"
+        ? clampNumber(stroke.opacity, 0.08, 1, 0.34) * (pathIndex === 0 ? 0.46 : 0.22)
+        : clampNumber(stroke.opacity, 0.08, 1, 0.54);
+      context.lineWidth = stroke.brush === "watercolor"
+        ? strokeWidth * (pathIndex === 0 ? 2.15 : 1.55)
+        : strokeWidth;
+      context.beginPath();
+      context.moveTo(path[0].x, path[0].y - options.pageTopPx);
+      for (const point of path.slice(1)) {
+        context.lineTo(point.x, point.y - options.pageTopPx);
+      }
+      context.stroke();
+    }
+    context.restore();
+  }
 }
 
 function drawCanvasHeaderFooter(
@@ -7507,7 +7798,7 @@ async function svgElementToPngBytes(
     const context = canvas.getContext("2d");
     if (!context) return null;
 
-    const requestedScale = preferredScale ?? Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const requestedScale = preferredScale ?? Math.min(2, Math.max(1, activeWindow.devicePixelRatio || 1));
     const scale = getSvgSafeRasterScale(svg, requestedScale);
     canvas.width = Math.max(1, Math.ceil(width * scale));
     canvas.height = Math.max(1, Math.ceil(height * scale));
@@ -7585,7 +7876,8 @@ async function imageFragmentSliceToPngBytes(
   offsetTopPx: number,
   sliceHeightPx: number,
   fragmentHeightPx: number,
-  colorMode: PdfColorMode = "color"
+  colorMode: PdfColorMode = "color",
+  fallback?: ImageExportFallback
 ): Promise<Uint8Array> {
   const sliceSource = (source: HTMLImageElement) => {
     const sourceHeight = Math.max(1, source.naturalHeight || source.height);
@@ -7597,9 +7889,53 @@ async function imageFragmentSliceToPngBytes(
   try {
     return await sliceSource(image);
   } catch (directError) {
+    const vaultImage = await loadVaultImageForCanvas(fallback);
+    if (vaultImage) return sliceSource(vaultImage);
     const remoteImage = await loadRemoteImageForCanvas(image);
     if (!remoteImage) throw directError;
     return sliceSource(remoteImage);
+  }
+}
+
+interface ImageExportFallback {
+  app: App;
+  sourcePath: string;
+  linkPath?: string | null;
+}
+
+async function loadVaultImageForCanvas(fallback?: ImageExportFallback): Promise<HTMLImageElement | null> {
+  const linkPath = fallback?.linkPath?.trim();
+  if (!fallback || !linkPath || /^(?:app|https?|data|blob):/iu.test(linkPath)) return null;
+  try {
+    const file = fallback.app.metadataCache.getFirstLinkpathDest(linkPath, fallback.sourcePath) ??
+      fallback.app.vault.getAbstractFileByPath(normalizePath(linkPath));
+    if (!(file instanceof TFile)) return null;
+    const bytes = await fallback.app.vault.readBinary(file);
+    const url = URL.createObjectURL(new Blob([bytes], { type: getImageMimeType(file.extension) }));
+    try {
+      return await loadImage(url, IMAGE_WAIT_TIMEOUT_MS);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  } catch (error) {
+    console.warn("Mobile PDF Exporter vault image fallback failed", error);
+    return null;
+  }
+}
+
+function getImageMimeType(extension: string): string {
+  switch (extension.toLowerCase()) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "svg":
+      return "image/svg+xml";
+    default:
+      return "image/png";
   }
 }
 
@@ -7888,16 +8224,16 @@ async function loadImage(
   timeoutMs = SVG_IMAGE_LOAD_TIMEOUT_MS,
   crossOrigin: "anonymous" | "use-credentials" | null = null
 ): Promise<HTMLImageElement> {
-  const image = new Image();
+  const image = activeDocument.createElement("img");
   if (crossOrigin) image.crossOrigin = crossOrigin;
   let timeout = 0;
   await new Promise<void>((resolve, reject) => {
-    timeout = window.setTimeout(() => reject(new Error("Image load timed out.")), timeoutMs);
+    timeout = activeWindow.setTimeout(() => reject(new Error("Image load timed out.")), timeoutMs);
     image.onload = () => resolve();
     image.onerror = () => reject(new Error("Image load failed."));
     image.src = url;
   }).finally(() => {
-    window.clearTimeout(timeout);
+    activeWindow.clearTimeout(timeout);
   });
   return image;
 }
@@ -8023,11 +8359,11 @@ async function waitForPromiseOrTimeout<T>(promise: Promise<T>, timeoutMs: number
     (error: unknown) => ({ kind: "rejected" as const, error })
   );
   const timeoutPromise = new Promise<PromiseRaceResult>((resolve) => {
-    timeout = window.setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
+    timeout = activeWindow.setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
   });
 
   const result = await Promise.race([guardedPromise, timeoutPromise]).finally(() => {
-    window.clearTimeout(timeout);
+    activeWindow.clearTimeout(timeout);
   });
 
   if (result.kind === "timeout") {
@@ -8170,16 +8506,16 @@ async function nextAnimationFrame(timeoutMs = FRAME_WAIT_TIMEOUT_MS): Promise<vo
   let timeout = 0;
   await new Promise<void>((resolve) => {
     const finish = (): void => {
-      if (frame) window.cancelAnimationFrame(frame);
-      window.clearTimeout(timeout);
+      if (frame) activeWindow.cancelAnimationFrame(frame);
+      activeWindow.clearTimeout(timeout);
       resolve();
     };
-    frame = window.requestAnimationFrame(finish);
-    timeout = window.setTimeout(finish, timeoutMs);
+    frame = activeWindow.requestAnimationFrame(finish);
+    timeout = activeWindow.setTimeout(finish, timeoutMs);
   });
 }
 
 async function delay(ms: number): Promise<void> {
   if (activeDocument.hidden) return;
-  await new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+  await new Promise<void>((resolve) => activeWindow.setTimeout(resolve, ms));
 }

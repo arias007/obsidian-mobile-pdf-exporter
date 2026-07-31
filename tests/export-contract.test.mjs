@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 const sourceUrl = new URL("../src/main.ts", import.meta.url);
 const stylesUrl = new URL("../styles.css", import.meta.url);
 const buildConfigUrl = new URL("../esbuild.config.mjs", import.meta.url);
+const builtPluginUrl = new URL("../main.js", import.meta.url);
 
 test("the visible export prompt can cancel every expensive phase", async () => {
   const [source, styles] = await Promise.all([
@@ -281,5 +282,21 @@ test("PptxGenJS is bundled in browser mode for the Electron renderer", async () 
   assert.match(config, /name: "pptxgen-browser-runtime"/);
   assert.match(config, /const isNode = false;/);
   assert.match(config, /if \(replacements !== 2\)/);
-  assert.match(config, /plugins: \[pptxGenBrowserRuntime\]/);
+  assert.match(config, /plugins: \[pptxGenBrowserRuntime, safeZipSchedulers\]/);
+});
+
+test("the release bundle contains no dynamic code or script injection", async () => {
+  const [config, bundle] = await Promise.all([
+    readFile(buildConfigUrl, "utf8"),
+    readFile(builtPluginUrl, "utf8")
+  ]);
+
+  assert.match(config, /name: "safe-zip-schedulers"/);
+  assert.match(config, /sanitizeLegacyZipSchedulers/);
+  assert.match(config, /replaceExactly/);
+  assert.match(config, /dynamicFunctionCount !== 1 \|\| dynamicScriptCount !== 4/);
+  assert.match(config, /still contains dynamic code execution after sanitization/);
+  assert.doesNotMatch(bundle, /\beval\s*\(/);
+  assert.doesNotMatch(bundle, /new\s+Function\s*\(/);
+  assert.doesNotMatch(bundle, /createElement\s*\(\s*["']script["']/);
 });

@@ -72,6 +72,11 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.4.10
+
+- Removes obsolete dynamic script and string-callback schedulers from bundled ZIP dependencies during release builds.
+- Adds release-bundle regression checks that reject dynamic code execution and script injection patterns.
+
 ### 0.4.9
 
 - Uses `Murat` consistently as the public plugin author and copyright holder.

@@ -72,6 +72,10 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.4.9
+
+- Uses `Murat` consistently as the public plugin author and copyright holder.
+
 ### 0.4.8
 
 - Passes the official `eslint-plugin-obsidianmd` review checks and runs them in every tagged release.

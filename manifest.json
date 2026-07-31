@@ -1,9 +1,9 @@
 {
   "id": "mobile-pdf-exporter",
   "name": "Mobile PDF Exporter",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "minAppVersion": "1.5.0",
   "description": "Export notes and supported views to PDF, DOCX, PPTX, PNG, and self-contained HTML.",
-  "author": "Murat / Codex",
+  "author": "Murat",
   "isDesktopOnly": false
 }

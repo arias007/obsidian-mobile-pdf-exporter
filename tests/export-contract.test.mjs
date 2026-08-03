@@ -109,7 +109,10 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /function areOverlappingDuplicateTextFragments/);
   assert.match(source, /function getCanvasVisiblePixelBounds/);
   assert.match(source, /Array\.isArray\(strokes\) && strokes\.length === 0/);
-  assert.match(source, /if \(pixelCount > 8_000_000\) return fullBounds/);
+  assert.match(source, /const inspectionScale = pixelCount > 2_000_000/);
+  assert.match(source, /previewContext\.drawImage\(canvas, 0, 0, inspectionCanvas\.width, inspectionCanvas\.height\)/);
+  assert.doesNotMatch(source, /if \(pixelCount > 8_000_000\) return fullBounds/);
+  assert.match(source, /function removeEmptyTrailingPageBreaks\(model: PreviewPdfModel\)/);
   assert.match(source, /nextBreak = moveBreakOutsideTextLines\(pageTop, nextBreak, pageHeightPx, sortedBlocks\)/);
   assert.match(source, /function moveBreakOutsideTextLines/);
   assert.match(source, /return enforceMaximumPageSpan\(breaks, contentHeightPx, pageHeightPx, sortedBlocks\)/);
@@ -264,6 +267,27 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /function isNoteDrawCanvasFragment\(fragment: CanvasFragment\)/);
   assert.match(source, /canvas\.closest\(\s*"\.notedraw-shell, \.note-doodle-shell, \.notedraw-export-image-canvas-layer"/);
   assert.match(source, /canvasFragments: model\.canvasFragments\.filter\(\(fragment\) => !isNoteDrawCanvasFragment\(fragment\)\)/);
+  assert.match(source, /prepareNoteDrawElementData\(this\.app, host\.ownerDocument, rawData\)/);
+  assert.match(source, /function projectNoteDrawElements\(/);
+  assert.match(source, /function drawCanvasNoteDrawElementLayer\(/);
+  assert.match(source, /candidate\?\.kind === "text" \|\| candidate\?\.kind === "embed" \|\| candidate\?\.connector/);
+  assert.match(source, /AP: \{ N: appearanceRef \}/);
+  assert.match(source, /P: page\.ref/);
+  assert.match(source, /Subtype: "Form"/);
+});
+
+test("multilingual text and videos keep visual and selectable export fallbacks", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /embeddedArabicFontGzipBase64/);
+  assert.match(source, /function detectRequiredPdfScriptFonts\(/);
+  assert.match(source, /private async loadExportFontSet\(/);
+  assert.match(source, /requiresRasterTextFallback\(fragment\.text\)/);
+  assert.match(source, /direction: "ltr" \| "rtl"/);
+  assert.match(source, /function captureVideoFragments\(/);
+  assert.match(source, /function drawCanvasVideoLayer\(/);
+  assert.match(source, /drawCanvasVideoPlayGlyph\(/);
+  assert.match(source, /HTML_VIDEO_INLINE_MAX_BYTES/);
 });
 
 test("plugin UI follows Obsidian window and settings conventions", async () => {

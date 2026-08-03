@@ -9,7 +9,10 @@ High-fidelity PDF, DOCX, PPTX, PNG, and self-contained HTML export for Obsidian 
 - Supports Auto / Chinese / English UI text for export buttons, menus, commands, options, settings, and export prompts.
 - Exports the current Markdown preview to a phone-width PDF.
 - Exports editable DOCX and PPTX files with native text, embedded images, links, and a visual layout layer for tables, callouts, separators, and NoteDraw ink.
-- Exports PNG with persisted NoteDraw strokes and self-contained HTML with editable rendered content and embedded images.
+- Exports PNG with persisted NoteDraw strokes and self-contained HTML with editable rendered content, embedded images, and supported videos.
+- Exports persisted NoteDraw text, styled nodes, connectors, images, videos, attachments, and strokes instead of limiting NoteDraw output to ink alone.
+- Writes NoteDraw strokes as standard PDF Ink annotations with appearance streams so compatible PDF tools can recognize and edit them.
+- Embeds script-specific Noto Sans fonts only when required, with visual fallbacks for complex scripts and a selectable PDF text layer.
 - Keeps text selectable/copyable by writing a real PDF text layer.
 - Adds PDF options for page size, orientation, color/grayscale, per-page margins, content scale, headers, footers, selectable-text PDF, and image PDF.
 - Saves beside the current note by default, with a combined export-location control for switching to a custom vault folder.
@@ -71,6 +74,14 @@ Markor creates PDF through Android WebView printing, so its preview PDF text is 
 The exporter walks the active reading or editing surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. Editing view stays on the real CodeMirror DOM: the exporter scrolls through virtualized windows, waits for each window to settle, assigns each document band to one window, and deduplicates remounted fragments. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
 
 ## Changelog
+
+### 0.4.11
+
+- Fixes extra visual spacing before links while preserving selectable text and clickable PDF link annotations.
+- Adds on-demand Latin, Arabic, Hebrew, Devanagari, and Thai fonts, plus visual fallbacks for complex scripts.
+- Exports ordinary videos and persisted NoteDraw text, styled nodes, connectors, images, videos, attachments, and strokes.
+- Writes NoteDraw strokes as standard PDF Ink annotations with appearance streams for broad PDF-tool compatibility.
+- Uses sampled canvas bounds and content-aware page cleanup to remove false canvas extents and trailing blank pages.
 
 ### 0.4.10
 
@@ -425,4 +436,4 @@ The exporter walks the active reading or editing surface, including its live can
 ## License
 Plugin code and packaged JavaScript are released under the MIT License.
 
-Bundled Noto Sans SC font is licensed under the SIL Open Font License 1.1. See `fonts/LICENSE-OFL.txt`.
+Bundled Noto Sans fonts are licensed under the SIL Open Font License 1.1. See `fonts/LICENSE-OFL.txt`.

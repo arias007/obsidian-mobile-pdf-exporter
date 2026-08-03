@@ -14,6 +14,11 @@ import {
 } from "obsidian";
 import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
 import embeddedCjkFontGzipBase64 from "../fonts/NotoSansSC-Regular.gb2312-subset.ttf.gz";
+import embeddedLatinFontGzipBase64 from "../fonts/NotoSans-Regular.ttf.gz";
+import embeddedArabicFontGzipBase64 from "../fonts/NotoSansArabic-Regular.ttf.gz";
+import embeddedHebrewFontGzipBase64 from "../fonts/NotoSansHebrew-Regular.ttf.gz";
+import embeddedDevanagariFontGzipBase64 from "../fonts/NotoSansDevanagari-Regular.ttf.gz";
+import embeddedThaiFontGzipBase64 from "../fonts/NotoSansThai-Regular.ttf.gz";
 import supportCode1Base64 from "./generated/support-code-1.jpg";
 import supportCode2Base64 from "./generated/support-code-2.png";
 
@@ -35,6 +40,11 @@ type PdfOrientation = typeof PDF_ORIENTATIONS[number];
 
 const PDF_COLOR_MODES = ["color", "grayscale"] as const;
 type PdfColorMode = typeof PDF_COLOR_MODES[number];
+
+type ObsidianExportWindow = Window & {
+  createEl<K extends keyof HTMLElementTagNameMap>(tagName: K): HTMLElementTagNameMap[K];
+  DecompressionStream?: new (format: string) => TransformStream<Uint8Array, Uint8Array>;
+};
 
 const OUTPUT_LOCATIONS = ["current", "folder"] as const;
 type OutputLocation = typeof OUTPUT_LOCATIONS[number];
@@ -108,6 +118,7 @@ interface CapturedSurfaceFragments {
   boxFragments: BoxFragment[];
   textFragments: TextFragment[];
   imageFragments: ImageFragment[];
+  videoFragments: VideoFragment[];
   canvasFragments: CanvasFragment[];
   linkFragments: LinkFragment[];
   svgFragments: SvgFragment[];
@@ -139,6 +150,7 @@ interface TextFragment {
   fontFamily: string;
   fontWeight: string;
   fontStyle: string;
+  direction: "ltr" | "rtl";
   color: Color;
   underline: boolean;
   lineThrough: boolean;
@@ -158,6 +170,7 @@ interface TextLineDraft {
   fontFamily: string;
   fontWeight: string;
   fontStyle: string;
+  direction: "ltr" | "rtl";
   color: Color;
   underline: boolean;
   lineThrough: boolean;
@@ -168,6 +181,15 @@ interface TextLineDraft {
 
 interface ImageFragment {
   element: HTMLImageElement;
+  sourcePath: string | null;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+interface VideoFragment {
+  element: HTMLVideoElement;
   sourcePath: string | null;
   left: number;
   top: number;
@@ -269,6 +291,7 @@ interface PreviewPdfModel {
   boxFragments: BoxFragment[];
   textFragments: TextFragment[];
   imageFragments: ImageFragment[];
+  videoFragments: VideoFragment[];
   canvasFragments: CanvasFragment[];
   linkFragments: LinkFragment[];
   svgFragments: SvgFragment[];
@@ -281,6 +304,7 @@ interface PreviewPdfModel {
   footerText: string;
   exportDate: string;
   noteDrawInkStrokes?: PdfInkStroke[];
+  noteDrawElements?: PdfNoteDrawElement[];
 }
 
 interface ExcalidrawAutomateRuntime {
@@ -348,8 +372,44 @@ interface PdfInkStroke {
 interface PreparedNoteDrawExportOverlay {
   cleanup: () => void;
   data: NoteDoodleData | null;
+  elements: NoteDrawElementData[];
   widthPx: number;
   heightPx: number;
+}
+
+type NoteDrawElementKind = "text" | "image" | "video" | "file" | "connector";
+
+interface NoteDrawElementData {
+  kind: NoteDrawElementKind;
+  text: string;
+  color: string;
+  opacity: number;
+  width: number;
+  fontSize: number;
+  bold: boolean;
+  code: boolean;
+  boxed: boolean;
+  buttonStyle: string;
+  render: string;
+  assetPath: string;
+  assetName: string;
+  assetMime: string;
+  assetSize: number;
+  previewWidth: number;
+  previewHeight: number;
+  textWidth: number | null;
+  points: Array<{ x: number; y: number }>;
+  layoutBox: { x: number; y: number; width: number; height: number } | null;
+  layoutFrame: { width: number; height: number } | null;
+  media: HTMLImageElement | HTMLCanvasElement | null;
+}
+
+interface PdfNoteDrawElement extends Omit<NoteDrawElementData, "points" | "layoutBox" | "layoutFrame"> {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  points: Array<{ x: number; y: number }>;
 }
 
 interface NoteDoodleOverlaySource {
@@ -576,6 +636,7 @@ const EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS = 45000;
 const EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS = 15000;
 const EXCALIDRAW_MIN_EXPORT_SCALE = 0.5;
 const EXCALIDRAW_PREFERRED_MAX_PNG_BYTES = 24 * 1024 * 1024;
+const HTML_VIDEO_INLINE_MAX_BYTES = 64 * 1024 * 1024;
 const EXCALIDRAW_MAX_SLICE_WIDTH_PX = 4096;
 const EXCALIDRAW_MAX_SLICE_HEIGHT_PX = 8192;
 const EXCALIDRAW_MAX_SLICE_PIXELS = 16_000_000;
@@ -592,6 +653,13 @@ const NOTE_DOODLE_MAX_PEN_COUNT = 5;
 const NOTE_DOODLE_DEFAULT_OPACITY = 1;
 const NOTE_DOODLE_WATERCOLOR = "watercolor";
 const CJK_FONT_ASSET_FILE = "NotoSansSC-Regular.gb2312-subset.ttf";
+const EMBEDDED_SCRIPT_FONT_BASE64: Record<Exclude<PdfScriptFont, "default">, string> = {
+  latin: embeddedLatinFontGzipBase64,
+  arabic: embeddedArabicFontGzipBase64,
+  hebrew: embeddedHebrewFontGzipBase64,
+  devanagari: embeddedDevanagariFontGzipBase64,
+  thai: embeddedThaiFontGzipBase64
+};
 const CJK_FONT_RAW_ASSET_URL_BASE = "https://raw.githubusercontent.com/arias007/obsidian-mobile-pdf-exporter";
 const CJK_FONT_JSDELIVR_URL_BASE = "https://cdn.jsdelivr.net/gh/arias007/obsidian-mobile-pdf-exporter";
 const LOCAL_CJK_FONT_CANDIDATES = [
@@ -679,10 +747,19 @@ interface ExportFont {
   supportsUnicode: boolean;
 }
 
+type PdfScriptFont = "default" | "latin" | "arabic" | "hebrew" | "devanagari" | "thai";
+
+interface ExportFontSet {
+  default: PDFFont;
+  fallbacks: Partial<Record<Exclude<PdfScriptFont, "default">, PDFFont>>;
+}
+
 let pdfRuntimePromise: Promise<PdfRuntime> | null = null;
 let pdfStringRuntime: PdfLibRuntime["PDFString"] | null = null;
 let exportableElementCache: WeakMap<Element, boolean> | null = null;
 const pdfCharEncodingCache = new WeakMap<PDFFont, Map<string, boolean>>();
+const embeddedScriptFontBytes = new Map<PdfScriptFont, Promise<ArrayBuffer>>();
+let pdfInkAnnotationSerial = 0;
 let rgb: PdfLibRuntime["rgb"] = ((red: number, green: number, blue: number) => ({
   type: "RGB",
   red,
@@ -876,14 +953,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
             model = this.capturePreviewPdfModel(file, rendered.pageEl);
             const pageRect = rendered.pageEl.getBoundingClientRect();
             const hostRect = noteDrawHost.getBoundingClientRect();
-            model.noteDrawInkStrokes = projectNoteDrawInkStrokes(
-              preparedNoteDraw.data,
-              preparedNoteDraw.widthPx,
-              preparedNoteDraw.heightPx,
-              hostRect.left - pageRect.left,
-              hostRect.top - pageRect.top,
-              1
-            );
+            attachPreparedNoteDrawToModel(model, preparedNoteDraw, {
+              offsetX: hostRect.left - pageRect.left,
+              offsetY: hostRect.top - pageRect.top,
+              scale: 1,
+              linkContext: createPdfLinkContext(this.app, file)
+            });
           } finally {
             preparedNoteDraw.cleanup();
           }
@@ -1369,7 +1444,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const pageBreaks = computePageBreaks(transformedContentHeight, bodyHeightPx, transformed.keepBlocks);
     const rootStyle = getComputedStyle(rootEl);
 
-    return {
+    const model: PreviewPdfModel = {
       ownerDocument: rootEl.ownerDocument,
       pageWidthPt,
       pageHeightPt,
@@ -1388,16 +1463,15 @@ export default class MobilePdfExporterPlugin extends Plugin {
       title: file.basename,
       headerText: this.settings.headerText,
       footerText: this.settings.footerText,
-      exportDate: formatExportDate(new Date()),
-      noteDrawInkStrokes: projectNoteDrawInkStrokes(
-        preparedNoteDraw.data,
-        preparedNoteDraw.widthPx,
-        preparedNoteDraw.heightPx,
-        horizontalInsetPx,
-        0,
-        surfaceScale
-      )
+      exportDate: formatExportDate(new Date())
     };
+    attachPreparedNoteDrawToModel(model, preparedNoteDraw, {
+      offsetX: horizontalInsetPx,
+      offsetY: 0,
+      scale: surfaceScale,
+      linkContext
+    });
+    return model;
   }
 
   private async renderMarkdownPreview(
@@ -1604,6 +1678,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const empty = (): PreparedNoteDrawExportOverlay => ({
       cleanup: () => undefined,
       data: null,
+      elements: [],
       widthPx: width,
       heightPx: height
     });
@@ -1636,7 +1711,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     });
 
     const existingImageLayers = new Set(host.querySelectorAll(".notedraw-export-image-canvas-layer"));
-    if (!hasLiveCanvas && api.injectExportSnapshot) {
+    if (api.injectExportSnapshot) {
       try {
         await api.injectExportSnapshot(file, host);
       } catch (error) {
@@ -1646,6 +1721,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const injectedImageLayers = Array.from(host.querySelectorAll<HTMLElement>(
       ".notedraw-export-image-canvas-layer"
     )).filter((element) => !existingImageLayers.has(element));
+    const elements = hasLiveCanvas
+      ? []
+      : await prepareNoteDrawElementData(this.app, host.ownerDocument, rawData);
 
     let canvas: HTMLCanvasElement | null = null;
     let changedPosition = false;
@@ -1693,6 +1771,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         }
       },
       data,
+      elements,
       widthPx: width,
       heightPx: height
     };
@@ -1709,8 +1788,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (
       model.textFragments.length === 0 &&
       model.imageFragments.length === 0 &&
+      model.videoFragments.length === 0 &&
       model.canvasFragments.length === 0 &&
-      model.svgFragments.length === 0
+      model.svgFragments.length === 0 &&
+      !hasExplicitNoteDrawContent(model)
     ) {
       throw new Error(this.t("previewNoContentError"));
     }
@@ -1718,11 +1799,21 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const pdfDoc = await PDFDocumentRuntime.create();
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(PDF_SUBJECT);
-    const exportFont = await this.loadExportFont(pdfDoc, fontkitModule, StandardFonts.Helvetica);
-    const { font } = exportFont;
-    const visualModel = model.noteDrawInkStrokes?.length
-      ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
-      : model;
+    const fonts = await this.loadExportFontSet(
+      pdfDoc,
+      fontkitModule,
+      StandardFonts.Helvetica,
+      model.textFragments.map((fragment) => fragment.text).join("\n")
+    );
+    const rasterTextFragments = collectVisualRasterTextFragments(model.textFragments);
+    const hiddenVisualTextFragments = new Set(rasterTextFragments);
+    const visualModel = {
+      ...model,
+      textFragments: rasterTextFragments,
+      canvasFragments: hasExplicitNoteDrawContent(model)
+        ? model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment))
+        : model.canvasFragments
+    };
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
@@ -1732,7 +1823,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const pngBytes = await renderPreviewPageToPngBytes(visualModel, index, {
         colorMode: this.settings.colorMode,
         rasterScale: Math.max(this.settings.imageRasterScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE),
-        includeText: false
+        includeText: rasterTextFragments.length > 0
       });
       throwIfExportCancelled(signal);
       const pageImage = await pdfDoc.embedPng(pngBytes);
@@ -1744,7 +1835,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       });
 
       drawTextLayer(pdfPage, model.textFragments, {
-        font,
+        fonts,
         pageTopPx,
         pageBottomPx,
         pageWidthPt: model.pageWidthPt,
@@ -1753,7 +1844,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         contentTopInsetPx: model.bodyTopInsetPx,
         colorMode: this.settings.colorMode,
         opacity: SELECTABLE_TEXT_LAYER_OPACITY,
-        drawUnderlines: true
+        drawUnderlines: true,
+        hiddenVisualTextFragments
       });
 
       drawLinkAnnotationLayer(pdfPage, model.linkFragments, {
@@ -1792,8 +1884,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (
       model.textFragments.length === 0 &&
       model.imageFragments.length === 0 &&
+      model.videoFragments.length === 0 &&
       model.canvasFragments.length === 0 &&
-      model.svgFragments.length === 0
+      model.svgFragments.length === 0 &&
+      !hasExplicitNoteDrawContent(model)
     ) {
       throw new Error(this.t("previewNoContentError"));
     }
@@ -1801,7 +1895,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const pdfDoc = await PDFDocumentRuntime.create();
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
-    const visualModel = model.noteDrawInkStrokes?.length
+    const visualModel = hasExplicitNoteDrawContent(model)
       ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
       : model;
 
@@ -1858,7 +1952,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         : this.renderPreviewToSelectablePdf(file, model, signal);
     }
     const needsExplicitNoteDraw = format === "docx" || format === "pptx" || format === "png";
-    const pageModel = needsExplicitNoteDraw && model.noteDrawInkStrokes?.length
+    const pageModel = needsExplicitNoteDraw && hasExplicitNoteDrawContent(model)
       ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
       : model;
     if (format === "pptx") {
@@ -1919,14 +2013,19 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const boxFragments = captureBoxFragments(pageEl);
       const textFragments = captureTextFragments(pageEl, linkContext);
       const imageFragments = captureImageFragments(pageEl);
+      const videoFragments = captureVideoFragments(pageEl);
       const canvasFragments = captureCanvasFragments(pageEl);
-      const linkFragments = captureLinkFragments(pageEl, linkContext);
+      const linkFragments = [
+        ...captureLinkFragments(pageEl, linkContext),
+        ...captureVideoLinkFragments(videoFragments, linkContext)
+      ];
       const svgFragments = captureSvgFragments(pageEl);
       const decorationFragments = captureDecorationFragments(pageEl);
       const keepBlocks = captureKeepBlockFragments(
         pageEl,
         textFragments,
         imageFragments,
+        videoFragments,
         canvasFragments,
         boxFragments,
         svgFragments,
@@ -1936,6 +2035,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pageEl,
         textFragments,
         imageFragments,
+        videoFragments,
         canvasFragments,
         boxFragments,
         svgFragments,
@@ -1944,7 +2044,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       );
       const pageBreaks = computePageBreaks(contentHeightPx, bodyHeightPx, keepBlocks);
 
-      return {
+      const model: PreviewPdfModel = {
         ownerDocument: pageEl.ownerDocument,
         pageWidthPt,
         pageHeightPt,
@@ -1960,6 +2060,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         boxFragments,
         textFragments,
         imageFragments,
+        videoFragments,
         canvasFragments,
         linkFragments,
         svgFragments,
@@ -1972,6 +2073,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         footerText: this.settings.footerText,
         exportDate: formatExportDate(new Date())
       };
+      model.pageBreaks = removeEmptyTrailingPageBreaks(model);
+      return model;
     });
   }
 
@@ -2008,17 +2111,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   private async loadEmbeddedCompressedFontBytes(): Promise<ArrayBuffer> {
-    const DecompressionStreamCtor = (
-      globalThis as typeof globalThis & {
-        DecompressionStream?: new (format: string) => TransformStream<Uint8Array, Uint8Array>;
-      }
-    ).DecompressionStream;
-    if (!DecompressionStreamCtor) {
-      throw new Error("This WebView does not support DecompressionStream.");
-    }
-    const compressedBytes = decodeBase64ToArrayBuffer(embeddedCjkFontGzipBase64);
-    const stream = new Blob([compressedBytes]).stream().pipeThrough(new DecompressionStreamCtor("gzip"));
-    return new Response(stream).arrayBuffer();
+    return decompressEmbeddedFont(embeddedCjkFontGzipBase64, "default");
   }
 
   private async loadLocalFontBytes(): Promise<ArrayBuffer> {
@@ -2096,6 +2189,34 @@ export default class MobilePdfExporterPlugin extends Plugin {
         supportsUnicode: false
       };
     }
+  }
+
+  private async loadExportFontSet(
+    pdfDoc: PDFDocument,
+    fontkitModule: PdfFontkitRuntime,
+    standardFont: string,
+    text: string
+  ): Promise<ExportFontSet> {
+    const primary = await this.loadExportFont(pdfDoc, fontkitModule, standardFont);
+    const fallbacks: ExportFontSet["fallbacks"] = {};
+    const required = detectRequiredPdfScriptFonts(text);
+    if (required.length === 0) return { default: primary.font, fallbacks };
+
+    try {
+      pdfDoc.registerFontkit(resolvePdfFontkit(fontkitModule));
+      await Promise.all(required.map(async (script) => {
+        try {
+          const bytes = await decompressEmbeddedFont(EMBEDDED_SCRIPT_FONT_BASE64[script], script);
+          fallbacks[script] = await pdfDoc.embedFont(bytes, { subset: false });
+        } catch (error) {
+          console.warn(`Mobile PDF Exporter ${script} PDF font unavailable`, error);
+        }
+      }));
+    } catch (error) {
+      console.warn("Mobile PDF Exporter multilingual PDF fonts unavailable", error);
+    }
+
+    return { default: primary.font, fallbacks };
   }
 
   private getPluginAssetPath(relativePath: string): string {
@@ -2977,6 +3098,87 @@ function decodeBase64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+function decompressEmbeddedFont(base64: string, script: PdfScriptFont): Promise<ArrayBuffer> {
+  const cached = embeddedScriptFontBytes.get(script);
+  if (cached) return cached;
+
+  const promise = (async () => {
+    const DecompressionStreamCtor = (activeWindow as ObsidianExportWindow).DecompressionStream;
+    if (!DecompressionStreamCtor) {
+      throw new Error("This WebView does not support DecompressionStream.");
+    }
+    const compressedBytes = decodeBase64ToArrayBuffer(base64);
+    const stream = new Blob([compressedBytes]).stream().pipeThrough(new DecompressionStreamCtor("gzip"));
+    return new Response(stream).arrayBuffer();
+  })().catch((error) => {
+    embeddedScriptFontBytes.delete(script);
+    throw error;
+  });
+  embeddedScriptFontBytes.set(script, promise);
+  return promise;
+}
+
+function detectRequiredPdfScriptFonts(text: string): Array<Exclude<PdfScriptFont, "default">> {
+  const required: Array<Exclude<PdfScriptFont, "default">> = [];
+  if (containsCodePointInRanges(text, [[0x00c0, 0x024f], [0x0370, 0x052f], [0x1e00, 0x1eff]])) required.push("latin");
+  if (containsCodePointInRanges(text, [[0x0600, 0x06ff], [0x0750, 0x077f], [0x08a0, 0x08ff], [0xfb50, 0xfdff], [0xfe70, 0xfeff]])) required.push("arabic");
+  if (containsCodePointInRanges(text, [[0x0590, 0x05ff], [0xfb1d, 0xfb4f]])) required.push("hebrew");
+  if (containsCodePointInRanges(text, [[0x0900, 0x097f], [0xa8e0, 0xa8ff]])) required.push("devanagari");
+  if (containsCodePointInRanges(text, [[0x0e00, 0x0e7f]])) required.push("thai");
+  return required;
+}
+
+function getPdfScriptFont(text: string): PdfScriptFont {
+  if (containsCodePointInRanges(text, [[0x0600, 0x06ff], [0x0750, 0x077f], [0x08a0, 0x08ff], [0xfb50, 0xfdff], [0xfe70, 0xfeff]])) return "arabic";
+  if (containsCodePointInRanges(text, [[0x0590, 0x05ff], [0xfb1d, 0xfb4f]])) return "hebrew";
+  if (containsCodePointInRanges(text, [[0x0900, 0x097f], [0xa8e0, 0xa8ff]])) return "devanagari";
+  if (containsCodePointInRanges(text, [[0x0e00, 0x0e7f]])) return "thai";
+  if (containsCodePointInRanges(text, [[0x00c0, 0x024f], [0x0370, 0x052f], [0x1e00, 0x1eff]])) return "latin";
+  return "default";
+}
+
+function selectPdfFont(fonts: ExportFontSet, text: string): PDFFont {
+  const script = getPdfScriptFont(text);
+  return script === "default" ? fonts.default : (fonts.fallbacks[script] ?? fonts.default);
+}
+
+function requiresRasterTextFallback(text: string): boolean {
+  return containsCodePointInRanges(text, [
+    [0x0590, 0x0e7f],
+    [0x1100, 0x11ff],
+    [0x1780, 0x18af],
+    [0x3040, 0x30ff],
+    [0xac00, 0xd7af],
+    [0x1f000, 0x1faff]
+  ]);
+}
+
+function collectVisualRasterTextFragments(fragments: TextFragment[]): TextFragment[] {
+  const linkedFragments = fragments.filter((fragment) => Boolean(fragment.href));
+  return fragments.filter((fragment) => (
+    requiresRasterTextFallback(fragment.text) ||
+    linkedFragments.some((linked) => areTextFragmentsOnSameVisualLine(fragment, linked))
+  ));
+}
+
+function areTextFragmentsOnSameVisualLine(left: TextFragment, right: TextFragment): boolean {
+  if (left.mergeScope !== right.mergeScope) return false;
+  const leftCenter = (left.top + left.bottom) / 2;
+  const rightCenter = (right.top + right.bottom) / 2;
+  const tolerance = Math.max(3, Math.min(left.fontSizePx, right.fontSizePx) * 0.45);
+  return Math.abs(leftCenter - rightCenter) <= tolerance;
+}
+
+function containsCodePointInRanges(text: string, ranges: ReadonlyArray<readonly [number, number]>): boolean {
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== undefined && ranges.some(([start, end]) => codePoint >= start && codePoint <= end)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function appendElement<K extends keyof HTMLElementTagNameMap>(
   parent: HTMLElement,
   tagName: K,
@@ -3152,6 +3354,8 @@ function projectNoteDrawInkStrokes(
 
 function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
   const candidate = stroke && typeof stroke === "object" ? stroke as {
+    kind?: unknown;
+    connector?: unknown;
     brush?: unknown;
     color?: unknown;
     width?: unknown;
@@ -3159,6 +3363,7 @@ function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
     count?: unknown;
     points?: unknown;
   } : null;
+  if (candidate?.kind === "text" || candidate?.kind === "embed" || candidate?.connector) return null;
   const points = Array.isArray(candidate?.points) ? candidate.points : [];
   const normalizedPoints = points
     .map(normalizeNoteDoodlePoint)
@@ -3344,6 +3549,7 @@ function decorationToOfficeTextFragment(
       : '"Noto Sans SC"',
     fontWeight: "400",
     fontStyle: "normal",
+    direction: "ltr",
     color: decoration.color,
     underline: false,
     lineThrough: false,
@@ -3811,6 +4017,7 @@ async function renderOfficePageVisualBackground(
     ...model,
     textFragments: [],
     imageFragments: model.imageFragments,
+    videoFragments: model.videoFragments,
     canvasFragments: model.canvasFragments,
     linkFragments: [],
     svgFragments: model.svgFragments,
@@ -4254,7 +4461,7 @@ async function inlineRenderedHtmlMedia(
     throwIfExportCancelled(signal);
     const source = sourceElements[index];
     const target = clonedElements[index];
-    if (source instanceof HTMLImageElement && target instanceof HTMLImageElement) {
+    if (source.instanceOf(HTMLImageElement) && target.instanceOf(HTMLImageElement)) {
       try {
         const height = Math.max(1, source.getBoundingClientRect().height || source.height || source.naturalHeight);
         const bytes = await imageFragmentSliceToPngBytes(source, 0, height, height, "color");
@@ -4266,9 +4473,43 @@ async function inlineRenderedHtmlMedia(
       }
       continue;
     }
-    if (source instanceof HTMLCanvasElement && target instanceof HTMLCanvasElement) {
+    if (source.instanceOf(HTMLVideoElement) && target.instanceOf(HTMLVideoElement)) {
+      const sourceUrl = source.currentSrc || source.src;
       try {
-        const image = target.ownerDocument.createElement("img");
+        const response = sourceUrl ? await source.ownerDocument.win.fetch(sourceUrl, { signal }) : null;
+        const bytes = response?.ok ? new Uint8Array(await response.arrayBuffer()) : null;
+        if (bytes?.byteLength && bytes.byteLength <= HTML_VIDEO_INLINE_MAX_BYTES) {
+          target.src = bytesToDataUrl(bytes, response?.headers.get("content-type")?.split(";", 1)[0] || "video/mp4");
+          target.querySelectorAll("source").forEach((element) => element.remove());
+          target.controls = true;
+          target.setAttribute("playsinline", "true");
+          continue;
+        }
+      } catch (error) {
+        console.warn("Mobile PDF Exporter HTML video inline failed", error);
+      }
+
+      const frame = await getVideoExportFrame(source);
+      if (frame) {
+        const width = frame.instanceOf(HTMLVideoElement) ? frame.videoWidth : frame.naturalWidth;
+        const height = frame.instanceOf(HTMLVideoElement) ? frame.videoHeight : frame.naturalHeight;
+        const canvas = createCanvas(target);
+        canvas.width = Math.max(1, width);
+        canvas.height = Math.max(1, height);
+        const context = canvas.getContext("2d");
+        context?.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        const image = (target.ownerDocument.win as ObsidianExportWindow).createEl("img");
+        image.className = `${target.className} mpe-export-video-poster`;
+        image.style.cssText = target.style.cssText;
+        image.src = canvas.toDataURL("image/png");
+        image.alt = source.getAttribute("aria-label") || "Video";
+        target.replaceWith(image);
+      }
+      continue;
+    }
+    if (source.instanceOf(HTMLCanvasElement) && target.instanceOf(HTMLCanvasElement)) {
+      try {
+        const image = (target.ownerDocument.win as ObsidianExportWindow).createEl("img");
         image.className = `${target.className} mpe-export-canvas`;
         image.style.cssText = target.style.cssText;
         image.src = source.toDataURL("image/png");
@@ -4278,11 +4519,11 @@ async function inlineRenderedHtmlMedia(
       }
       continue;
     }
-    if (source instanceof SVGSVGElement && target instanceof SVGSVGElement) {
+    if (source.instanceOf(SVGSVGElement) && target.instanceOf(SVGSVGElement)) {
       try {
         const bytes = await svgElementToPngBytes(source, 2, SVG_IMAGE_LOAD_TIMEOUT_MS, "color");
         if (!bytes) continue;
-        const image = target.ownerDocument.createElement("img");
+        const image = (target.ownerDocument.win as ObsidianExportWindow).createEl("img");
         image.className = `${target.getAttribute("class") ?? ""} mpe-export-svg`;
         image.style.cssText = target.style.cssText;
         image.src = bytesToDataUrl(bytes);
@@ -4292,12 +4533,12 @@ async function inlineRenderedHtmlMedia(
       }
       continue;
     }
-    if (source instanceof HTMLInputElement && target instanceof HTMLInputElement) {
+    if (source.instanceOf(HTMLInputElement) && target.instanceOf(HTMLInputElement)) {
       target.checked = source.checked;
       target.value = source.value;
       if (source.checked) target.setAttribute("checked", "");
     }
-    if (source instanceof HTMLDetailsElement && target instanceof HTMLDetailsElement) target.open = source.open;
+    if (source.instanceOf(HTMLDetailsElement) && target.instanceOf(HTMLDetailsElement)) target.open = source.open;
   }
 }
 
@@ -4401,6 +4642,7 @@ interface SurfaceCaptureSeenState {
   boxes: Set<string>;
   text: Set<string>;
   images: Set<string>;
+  videos: Set<string>;
   canvases: Set<string>;
   links: Set<string>;
   svgs: Set<string>;
@@ -4592,15 +4834,18 @@ function captureLivePreviewRootOverlays(
 
   const isOutsideSizer = (element: Element): boolean => !sizerEl?.contains(element);
   const imageFragments = captureImageFragments(rootEl).filter((fragment) => isOutsideSizer(fragment.element));
+  const videoFragments = captureVideoFragments(rootEl).filter((fragment) => isOutsideSizer(fragment.element));
   const canvasFragments = captureCanvasFragments(rootEl, liveCache)
     .filter((fragment) => isOutsideSizer(fragment.element));
   const svgFragments = captureSvgFragments(rootEl).filter((fragment) => isOutsideSizer(fragment.element));
   const directMediaCapture = createEmptySurfaceCapture();
   directMediaCapture.imageFragments = imageFragments;
+  directMediaCapture.videoFragments = videoFragments;
   directMediaCapture.canvasFragments = canvasFragments;
   directMediaCapture.svgFragments = svgFragments;
   directMediaCapture.keepBlocks = [
     ...imageFragments.map((fragment) => ({ ...fragment, priority: 6 })),
+    ...videoFragments.map((fragment) => ({ ...fragment, priority: 6 })),
     ...canvasFragments
       .filter((fragment) => !fragment.element.classList.contains("mobile-pdf-exporter-note-doodle-canvas"))
       .map((fragment) => ({ ...fragment, priority: 4 })),
@@ -4618,6 +4863,7 @@ function createEmptySurfaceCapture(): CapturedSurfaceFragments {
     boxFragments: [],
     textFragments: [],
     imageFragments: [],
+    videoFragments: [],
     canvasFragments: [],
     linkFragments: [],
     svgFragments: [],
@@ -4631,6 +4877,7 @@ function createSurfaceCaptureSeenState(): SurfaceCaptureSeenState {
     boxes: new Set(),
     text: new Set(),
     images: new Set(),
+    videos: new Set(),
     canvases: new Set(),
     links: new Set(),
     svgs: new Set(),
@@ -4673,14 +4920,19 @@ function captureSurfaceFragments(
     const boxFragments = captureBoxFragments(rootEl);
     const textFragments = captureTextFragments(rootEl, linkContext, liveWindow);
     const imageFragments = captureImageFragments(rootEl);
+    const videoFragments = captureVideoFragments(rootEl);
     const canvasFragments = captureCanvasFragments(rootEl, liveWindow?.cache);
-    const linkFragments = captureLinkFragments(rootEl, linkContext);
+    const linkFragments = [
+      ...captureLinkFragments(rootEl, linkContext),
+      ...captureVideoLinkFragments(videoFragments, linkContext)
+    ];
     const svgFragments = captureSvgFragments(rootEl);
     const decorationFragments = captureDecorationFragments(rootEl);
     const keepBlocks = captureKeepBlockFragments(
       rootEl,
       textFragments,
       imageFragments,
+      videoFragments,
       canvasFragments,
       boxFragments,
       svgFragments,
@@ -4690,6 +4942,7 @@ function captureSurfaceFragments(
       boxFragments,
       textFragments,
       imageFragments,
+      videoFragments,
       canvasFragments,
       linkFragments,
       svgFragments,
@@ -4720,6 +4973,7 @@ function filterSurfaceCaptureToBand(
     boxFragments: capture.boxFragments.filter(ownsRect),
     textFragments: capture.textFragments.filter(ownsRect),
     imageFragments: capture.imageFragments.filter(ownsRect),
+    videoFragments: capture.videoFragments.filter(ownsRect),
     canvasFragments: capture.canvasFragments.filter(ownsRect),
     linkFragments: capture.linkFragments.filter(ownsRect),
     svgFragments: capture.svgFragments.filter(ownsRect),
@@ -4781,6 +5035,14 @@ function appendSurfaceCapture(
     fragment.element.currentSrc || fragment.element.src,
     fragment.element.naturalWidth,
     fragment.element.naturalHeight
+  ].join("|"));
+
+  const videos = snapshot.videoFragments.map(offsetRect);
+  appendUnique(target.videoFragments, videos, seen.videos, (fragment) => [
+    geometryKey(fragment),
+    fragment.element.currentSrc || fragment.element.src,
+    fragment.element.videoWidth,
+    fragment.element.videoHeight
   ].join("|"));
 
   const canvases = snapshot.canvasFragments.map(offsetRect);
@@ -4890,6 +5152,7 @@ function transformSurfaceCapture(
     fontSizePx: fragment.fontSizePx * scale
   })));
   const imageFragments = capture.imageFragments.map(transformRect);
+  const videoFragments = capture.videoFragments.map(transformRect);
   const canvasFragments = capture.canvasFragments.map(transformRect);
   const linkFragments = capture.linkFragments.map(transformRect);
   const svgFragments = capture.svgFragments.map(transformRect);
@@ -4905,6 +5168,7 @@ function transformSurfaceCapture(
     boxFragments,
     textFragments,
     imageFragments,
+    videoFragments,
     canvasFragments,
     linkFragments,
     svgFragments,
@@ -4919,6 +5183,7 @@ function measureCapturedSurfaceBottom(capture: CapturedSurfaceFragments): number
     ...capture.boxFragments.map((fragment) => fragment.bottom),
     ...capture.textFragments.map((fragment) => fragment.bottom),
     ...capture.imageFragments.map((fragment) => fragment.bottom),
+    ...capture.videoFragments.map((fragment) => fragment.bottom),
     ...capture.canvasFragments.map((fragment) => fragment.bottom),
     ...capture.svgFragments.map((fragment) => fragment.bottom),
     ...capture.decorationFragments.map((fragment) => fragment.bottom),
@@ -4931,6 +5196,7 @@ function measureVisibleCapturedSurfaceBottom(capture: CapturedSurfaceFragments):
     0,
     ...capture.textFragments.map((fragment) => fragment.bottom),
     ...capture.imageFragments.map((fragment) => fragment.bottom),
+    ...capture.videoFragments.map((fragment) => fragment.bottom),
     ...capture.canvasFragments.map((fragment) => fragment.bottom),
     ...capture.svgFragments.map((fragment) => fragment.bottom),
     ...capture.decorationFragments.map((fragment) => fragment.bottom)
@@ -5269,6 +5535,292 @@ function getImageFragmentSourcePath(image: HTMLImageElement): string | null {
   return wrapper?.getAttribute("src")?.trim() || null;
 }
 
+async function prepareNoteDrawElementData(
+  app: App,
+  ownerDocument: Document,
+  data: unknown
+): Promise<NoteDrawElementData[]> {
+  const candidate = data && typeof data === "object" ? data as { strokes?: unknown } : null;
+  const rawStrokes = Array.isArray(candidate?.strokes) ? candidate.strokes : [];
+  const elements = rawStrokes
+    .map(normalizeNoteDrawElement)
+    .filter((element): element is NoteDrawElementData => Boolean(element));
+
+  for (const element of elements) {
+    if (element.kind === "image") {
+      element.media = await loadNoteDrawImageMedia(app, element);
+    } else if (element.kind === "video") {
+      element.media = await loadNoteDrawVideoFrame(app, ownerDocument, element);
+    }
+  }
+  return elements;
+}
+
+function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
+  const stroke = value && typeof value === "object" ? value as Record<string, unknown> : null;
+  if (!stroke) return null;
+  const embedType = typeof stroke.embedType === "string" ? stroke.embedType.toLowerCase() : "";
+  const kind = stroke.kind === "text"
+    ? "text"
+    : stroke.kind === "embed"
+      ? embedType === "image"
+        ? "image"
+        : embedType === "video"
+          ? "video"
+          : "file"
+      : stroke.connector && typeof stroke.connector === "object"
+        ? "connector"
+        : null;
+  if (!kind) return null;
+
+  const points = Array.isArray(stroke.points)
+    ? stroke.points.flatMap((point) => {
+      if (!point || typeof point !== "object") return [];
+      const rawPoint = point as Record<string, unknown>;
+      const x = Number(rawPoint.x);
+      const y = Number(rawPoint.y);
+      return Number.isFinite(x) && Number.isFinite(y)
+        ? [{ x: clampNumber(x, 0, 1, 0), y: clampNumber(y, 0, 1, 0) }]
+        : [];
+    })
+    : [];
+  if (points.length === 0) return null;
+
+  const layout = stroke.layout && typeof stroke.layout === "object"
+    ? stroke.layout as Record<string, unknown>
+    : null;
+  const rawBox = layout?.box && typeof layout.box === "object"
+    ? layout.box as Record<string, unknown>
+    : null;
+  const rawFrame = layout?.sourceFrame && typeof layout.sourceFrame === "object"
+    ? layout.sourceFrame as Record<string, unknown>
+    : null;
+  const layoutBox = rawBox && [rawBox.x, rawBox.y, rawBox.width, rawBox.height].every((item) => Number.isFinite(Number(item)))
+    ? {
+      x: Number(rawBox.x),
+      y: Number(rawBox.y),
+      width: Math.max(1, Number(rawBox.width)),
+      height: Math.max(1, Number(rawBox.height))
+    }
+    : null;
+  const frameWidth = Number(rawFrame?.surfaceWidth);
+  const frameHeight = Number(rawFrame?.documentHeight);
+  const layoutFrame = frameWidth >= 24 && frameHeight >= 24 && (
+    !layoutBox || (layoutBox.width <= frameWidth * 4 && layoutBox.height <= frameHeight * 4)
+  )
+    ? { width: frameWidth, height: frameHeight }
+    : null;
+
+  return {
+    kind,
+    text: typeof stroke.text === "string" ? stroke.text : "",
+    color: typeof stroke.color === "string" ? stroke.color : "#e53935",
+    opacity: clampNumber(Number(stroke.opacity ?? 1), 0, 1, 1),
+    width: clampNumber(Number(stroke.width ?? 2), 0.5, 48, 2),
+    fontSize: clampNumber(Number(stroke.fontSize ?? 18), 8, 96, 18),
+    bold: Boolean(stroke.bold),
+    code: Boolean(stroke.code),
+    boxed: Boolean(stroke.boxed),
+    buttonStyle: typeof stroke.buttonStyle === "string" ? stroke.buttonStyle : "",
+    render: typeof stroke.render === "string" ? stroke.render : "plain",
+    assetPath: typeof stroke.assetPath === "string" ? stroke.assetPath : "",
+    assetName: typeof stroke.assetName === "string" ? stroke.assetName : "",
+    assetMime: typeof stroke.assetMime === "string" ? stroke.assetMime : "",
+    assetSize: Math.max(0, Number(stroke.assetSize) || 0),
+    previewWidth: clampNumber(Number(stroke.previewWidth ?? 260), 24, 2000, 260),
+    previewHeight: clampNumber(Number(stroke.previewHeight ?? 160), 20, 2000, 160),
+    textWidth: Number(stroke.textWidth) > 0 ? Number(stroke.textWidth) : null,
+    points,
+    layoutBox,
+    layoutFrame,
+    media: null
+  };
+}
+
+async function loadNoteDrawImageMedia(
+  app: App,
+  element: NoteDrawElementData
+): Promise<HTMLImageElement | null> {
+  const source = await getNoteDrawAssetResourcePath(app, element.assetPath);
+  if (!source) return null;
+  try {
+    return await loadImage(source, 2400);
+  } catch (error) {
+    console.warn("Mobile PDF Exporter could not load a NoteDraw image element", error);
+    return null;
+  }
+}
+
+async function loadNoteDrawVideoFrame(
+  app: App,
+  ownerDocument: Document,
+  element: NoteDrawElementData
+): Promise<HTMLCanvasElement | null> {
+  const source = await getNoteDrawAssetResourcePath(app, element.assetPath);
+  if (!source) return null;
+  const video = (ownerDocument.win as ObsidianExportWindow).createEl("video");
+  video.muted = true;
+  video.preload = "auto";
+  video.playsInline = true;
+  video.src = source;
+  try {
+    await waitForVideoFrame(video, 2600);
+    if (video.videoWidth <= 0 || video.videoHeight <= 0) return null;
+    const scale = Math.min(1, 1280 / video.videoWidth, 720 / video.videoHeight);
+    const canvas = createCanvas(ownerDocument);
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  } catch (error) {
+    console.warn("Mobile PDF Exporter could not capture a NoteDraw video frame", error);
+    return null;
+  } finally {
+    video.removeAttribute("src");
+    video.load();
+  }
+}
+
+async function getNoteDrawAssetResourcePath(app: App, assetPath: string): Promise<string | null> {
+  const path = normalizePath(assetPath.trim());
+  if (!path || !(await app.vault.adapter.exists(path))) return null;
+  return app.vault.adapter.getResourcePath(path);
+}
+
+function projectNoteDrawElements(
+  elements: NoteDrawElementData[],
+  widthPx: number,
+  heightPx: number,
+  offsetX: number,
+  offsetY: number,
+  scale: number
+): PdfNoteDrawElement[] {
+  return elements.flatMap((element) => {
+    const frameScaleX = element.layoutFrame ? widthPx / element.layoutFrame.width : 1;
+    const frameScaleY = element.layoutFrame ? heightPx / element.layoutFrame.height : 1;
+    const first = element.points[0];
+    const rawLeft = element.layoutBox ? element.layoutBox.x * frameScaleX : first.x * widthPx;
+    const rawTop = element.layoutBox ? element.layoutBox.y * frameScaleY : first.y * heightPx;
+    const fallbackWidth = element.kind === "text"
+      ? element.textWidth ?? Math.max(28, element.text.length * element.fontSize * 0.62)
+      : element.previewWidth;
+    const fallbackHeight = element.kind === "text"
+      ? Math.max(element.fontSize * 1.35, element.previewHeight && element.render !== "plain" ? element.previewHeight : 0)
+      : element.previewHeight;
+    const rawWidth = element.layoutBox ? element.layoutBox.width * frameScaleX : fallbackWidth * frameScaleX;
+    const rawHeight = element.layoutBox ? element.layoutBox.height * frameScaleY : fallbackHeight * frameScaleY;
+    const projectedPoints = element.points.map((point) => ({
+      x: offsetX + point.x * widthPx * scale,
+      y: offsetY + point.y * heightPx * scale
+    }));
+    const pointBounds = element.kind === "connector"
+      ? {
+        left: Math.min(...projectedPoints.map((point) => point.x)),
+        top: Math.min(...projectedPoints.map((point) => point.y)),
+        right: Math.max(...projectedPoints.map((point) => point.x)),
+        bottom: Math.max(...projectedPoints.map((point) => point.y))
+      }
+      : null;
+    const left = pointBounds?.left ?? offsetX + rawLeft * scale;
+    const top = pointBounds?.top ?? offsetY + rawTop * scale;
+    const right = pointBounds?.right ?? left + Math.max(1, rawWidth * scale);
+    const bottom = pointBounds?.bottom ?? top + Math.max(1, rawHeight * scale);
+    if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) return [];
+    return [{
+      ...element,
+      width: element.width * scale,
+      fontSize: element.fontSize * scale,
+      previewWidth: element.previewWidth * scale,
+      previewHeight: element.previewHeight * scale,
+      textWidth: element.textWidth === null ? null : element.textWidth * scale,
+      points: projectedPoints,
+      left,
+      top,
+      right,
+      bottom
+    }];
+  });
+}
+
+function attachPreparedNoteDrawToModel(
+  model: PreviewPdfModel,
+  prepared: PreparedNoteDrawExportOverlay,
+  options: {
+    offsetX: number;
+    offsetY: number;
+    scale: number;
+    linkContext: PdfLinkContext;
+  }
+): void {
+  const ink = projectNoteDrawInkStrokes(
+    prepared.data,
+    prepared.widthPx,
+    prepared.heightPx,
+    options.offsetX,
+    options.offsetY,
+    options.scale
+  );
+  const elements = projectNoteDrawElements(
+    prepared.elements,
+    prepared.widthPx,
+    prepared.heightPx,
+    options.offsetX,
+    options.offsetY,
+    options.scale
+  );
+  model.noteDrawInkStrokes = ink;
+  model.noteDrawElements = elements;
+
+  for (const element of elements) {
+    if (!element.assetPath || element.kind === "text" || element.kind === "connector") continue;
+    const href = resolveInternalPdfHref(element.assetPath, options.linkContext);
+    if (href) {
+      model.linkFragments.push({
+        href,
+        left: element.left,
+        top: element.top,
+        right: element.right,
+        bottom: element.bottom
+      });
+    }
+    model.keepBlocks.push({ ...element, priority: 6 });
+  }
+
+  const inkBottom = Math.max(0, ...ink.flatMap((stroke) => stroke.points.map((point) => point.y + stroke.widthPx)));
+  const elementBottom = Math.max(0, ...elements.map((element) => element.bottom));
+  const contentHeight = Math.ceil(Math.max(model.contentHeightPx, inkBottom, elementBottom));
+  if (contentHeight !== model.contentHeightPx) {
+    model.contentHeightPx = contentHeight;
+    model.pageBreaks = computePageBreaks(contentHeight, model.bodyHeightPx, model.keepBlocks);
+  }
+  model.pageBreaks = removeEmptyTrailingPageBreaks(model);
+}
+
+function hasExplicitNoteDrawContent(model: PreviewPdfModel): boolean {
+  return Boolean(model.noteDrawInkStrokes?.length || model.noteDrawElements?.length);
+}
+
+function captureVideoFragments(pageEl: HTMLElement): VideoFragment[] {
+  const pageRect = pageEl.getBoundingClientRect();
+  return Array.from(pageEl.querySelectorAll("video"))
+    .filter((video) => isExportableElement(video))
+    .map((video) => {
+      const rect = video.getBoundingClientRect();
+      const wrapper = video.closest(".internal-embed, .media-embed");
+      return {
+        element: video,
+        sourcePath: wrapper?.getAttribute("src")?.trim() || video.getAttribute("src")?.trim() || null,
+        left: rect.left - pageRect.left,
+        top: rect.top - pageRect.top,
+        right: rect.right - pageRect.left,
+        bottom: rect.bottom - pageRect.top
+      };
+    })
+    .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
+}
+
 interface CanvasPixelBounds {
   left: number;
   top: number;
@@ -5323,20 +5875,32 @@ function getCanvasVisiblePixelBounds(canvas: HTMLCanvasElement): CanvasPixelBoun
   }
 
   const pixelCount = canvas.width * canvas.height;
-  if (pixelCount > 8_000_000) return fullBounds;
 
   try {
-    const context = canvas.getContext("2d", { willReadFrequently: true });
+    const inspectionScale = pixelCount > 2_000_000
+      ? Math.min(1, Math.sqrt(1_000_000 / pixelCount))
+      : 1;
+    const inspectionCanvas = inspectionScale < 1
+      ? createCanvas(canvas.ownerDocument)
+      : canvas;
+    if (inspectionScale < 1) {
+      inspectionCanvas.width = Math.max(1, Math.ceil(canvas.width * inspectionScale));
+      inspectionCanvas.height = Math.max(1, Math.ceil(canvas.height * inspectionScale));
+      const previewContext = inspectionCanvas.getContext("2d", { willReadFrequently: true });
+      if (!previewContext) return fullBounds;
+      previewContext.drawImage(canvas, 0, 0, inspectionCanvas.width, inspectionCanvas.height);
+    }
+    const context = inspectionCanvas.getContext("2d", { willReadFrequently: true });
     if (!context) return fullBounds;
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    let minX = canvas.width;
-    let minY = canvas.height;
+    const pixels = context.getImageData(0, 0, inspectionCanvas.width, inspectionCanvas.height).data;
+    let minX = inspectionCanvas.width;
+    let minY = inspectionCanvas.height;
     let maxX = -1;
     let maxY = -1;
 
-    for (let y = 0; y < canvas.height; y += 1) {
-      for (let x = 0; x < canvas.width; x += 1) {
-        if (pixels[(y * canvas.width + x) * 4 + 3] <= 1) continue;
+    for (let y = 0; y < inspectionCanvas.height; y += 1) {
+      for (let x = 0; x < inspectionCanvas.width; x += 1) {
+        if (pixels[(y * inspectionCanvas.width + x) * 4 + 3] <= 1) continue;
         minX = Math.min(minX, x);
         minY = Math.min(minY, y);
         maxX = Math.max(maxX, x);
@@ -5345,12 +5909,13 @@ function getCanvasVisiblePixelBounds(canvas: HTMLCanvasElement): CanvasPixelBoun
     }
 
     if (maxX < minX || maxY < minY) return null;
-    const padding = 2;
+    const inverseScale = 1 / inspectionScale;
+    const padding = Math.max(2, Math.ceil(inverseScale * 2));
     return {
-      left: Math.max(0, minX - padding),
-      top: Math.max(0, minY - padding),
-      right: Math.min(canvas.width, maxX + padding + 1),
-      bottom: Math.min(canvas.height, maxY + padding + 1)
+      left: Math.max(0, Math.floor(minX * inverseScale) - padding),
+      top: Math.max(0, Math.floor(minY * inverseScale) - padding),
+      right: Math.min(canvas.width, Math.ceil((maxX + 1) * inverseScale) + padding),
+      bottom: Math.min(canvas.height, Math.ceil((maxY + 1) * inverseScale) + padding)
     };
   } catch {
     return fullBounds;
@@ -5636,6 +6201,7 @@ function captureKeepBlockFragments(
   pageEl: HTMLElement,
   textFragments: TextFragment[],
   imageFragments: ImageFragment[],
+  videoFragments: VideoFragment[],
   canvasFragments: CanvasFragment[],
   boxFragments: BoxFragment[],
   svgFragments: SvgFragment[],
@@ -5644,6 +6210,7 @@ function captureKeepBlockFragments(
   const pageRect = pageEl.getBoundingClientRect();
   const selectors = [
     "img",
+    "video",
     "picture",
     "figure",
     ".image-embed",
@@ -5679,6 +6246,7 @@ function captureKeepBlockFragments(
     .filter((block) => block.right > block.left && block.bottom > block.top);
 
   for (const image of imageFragments) blocks.push({ ...image, priority: 6 });
+  for (const video of videoFragments) blocks.push({ ...video, priority: 6 });
   for (const canvas of canvasFragments) {
     if (!canvas.element.classList.contains("mobile-pdf-exporter-note-doodle-canvas")) {
       blocks.push({ ...canvas, priority: 4 });
@@ -6040,6 +6608,7 @@ function measureTextNode(
     style.textDecoration.includes("line-through")
   );
   const text = textNode.nodeValue ?? "";
+  const direction = getTextDirection(style.direction, text);
   const range = textNode.ownerDocument.createRange();
   const fragments: TextFragment[] = [];
   let current: TextLineDraft | null = null;
@@ -6059,6 +6628,7 @@ function measureTextNode(
         fontFamily: current.fontFamily,
         fontWeight: current.fontWeight,
         fontStyle: current.fontStyle,
+        direction: current.direction,
         color: current.color,
         underline: current.underline,
         lineThrough: current.lineThrough,
@@ -6100,8 +6670,7 @@ function measureTextNode(
     const bottom = rect.bottom - pageRect.top;
     const sameLine =
       current &&
-      Math.abs(top - current.top) <= Math.max(2.5, fontSizePx * 0.35) &&
-      left >= current.right - fontSizePx * 0.75;
+      Math.abs(top - current.top) <= Math.max(2.5, fontSizePx * 0.35);
 
     if (!sameLine) pushCurrent();
 
@@ -6116,6 +6685,7 @@ function measureTextNode(
         fontFamily: style.fontFamily || "",
         fontWeight: style.fontWeight || "400",
         fontStyle: style.fontStyle || "normal",
+        direction,
         color,
         underline,
         lineThrough,
@@ -6305,6 +6875,7 @@ function measureExportContentHeight(
   pageEl: HTMLElement,
   textFragments: TextFragment[],
   imageFragments: ImageFragment[],
+  videoFragments: VideoFragment[],
   canvasFragments: CanvasFragment[],
   boxFragments: BoxFragment[],
   svgFragments: SvgFragment[],
@@ -6313,12 +6884,14 @@ function measureExportContentHeight(
 ): number {
   const maxTextBottom = Math.max(0, ...textFragments.map((fragment) => fragment.bottom));
   const maxImageBottom = Math.max(0, ...imageFragments.map((fragment) => fragment.bottom));
+  const maxVideoBottom = Math.max(0, ...videoFragments.map((fragment) => fragment.bottom));
   const maxCanvasBottom = Math.max(0, ...canvasFragments.map((fragment) => fragment.bottom));
   const maxSvgBottom = Math.max(0, ...svgFragments.map((fragment) => fragment.bottom));
   const maxDecorationBottom = Math.max(0, ...decorationFragments.map((fragment) => fragment.bottom));
   const visibleBottom = Math.max(
     maxTextBottom,
     maxImageBottom,
+    maxVideoBottom,
     maxCanvasBottom,
     maxSvgBottom,
     maxDecorationBottom
@@ -6387,6 +6960,32 @@ function computePageBreaks(
 
   if (breaks[breaks.length - 1] < contentHeightPx) breaks.push(contentHeightPx);
   return enforceMaximumPageSpan(breaks, contentHeightPx, pageHeightPx, sortedBlocks);
+}
+
+function removeEmptyTrailingPageBreaks(model: PreviewPdfModel): number[] {
+  const breaks = [...model.pageBreaks];
+  const overlaps = (fragment: { top: number; bottom: number }, top: number, bottom: number): boolean =>
+    fragment.bottom > top + 0.5 && fragment.top < bottom - 0.5;
+  const hasContent = (top: number, bottom: number): boolean => (
+    model.textFragments.some((fragment) => overlaps(fragment, top, bottom)) ||
+    model.imageFragments.some((fragment) => overlaps(fragment, top, bottom)) ||
+    model.videoFragments.some((fragment) => overlaps(fragment, top, bottom)) ||
+    model.canvasFragments.some((fragment) => overlaps(fragment, top, bottom)) ||
+    model.svgFragments.some((fragment) => overlaps(fragment, top, bottom)) ||
+    model.decorationFragments.some((fragment) => overlaps(fragment, top, bottom)) ||
+    (model.noteDrawElements ?? []).some((fragment) => overlaps(fragment, top, bottom)) ||
+    (model.noteDrawInkStrokes ?? []).some((stroke) => stroke.points.some((point) => (
+      point.y + stroke.widthPx > top + 0.5 && point.y - stroke.widthPx < bottom - 0.5
+    )))
+  );
+
+  while (breaks.length > 2) {
+    const top = breaks[breaks.length - 2];
+    const bottom = breaks[breaks.length - 1];
+    if (hasContent(top, bottom)) break;
+    breaks.splice(breaks.length - 2, 1);
+  }
+  return breaks;
 }
 
 function enforceMaximumPageSpan(
@@ -6486,7 +7085,7 @@ function drawTextLayer(
   page: PDFPage,
   fragments: TextFragment[],
   options: {
-    font: PDFFont;
+    fonts: ExportFontSet;
     pageTopPx: number;
     pageBottomPx: number;
     pageWidthPt: number;
@@ -6496,9 +7095,10 @@ function drawTextLayer(
     colorMode: PdfColorMode;
     opacity?: number;
     drawUnderlines?: boolean;
+    hiddenVisualTextFragments?: ReadonlySet<TextFragment>;
   }
 ): void {
-  const { font, pageTopPx, pageBottomPx, pageWidthPt, pageHeightPt, pxToPt } = options;
+  const { fonts, pageTopPx, pageBottomPx, pageWidthPt, pageHeightPt, pxToPt } = options;
   const contentTopInsetPx = options.contentTopInsetPx ?? 0;
   const opacity = options.opacity ?? 1;
   const drawUnderlines = options.drawUnderlines ?? true;
@@ -6512,6 +7112,8 @@ function drawTextLayer(
     const baselineY = pageHeightPt - (contentTopInsetPx + localTop + fragment.fontSizePx * 0.86) * pxToPt;
     const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt);
     const maxWidth = Math.max(8, Math.min(pageWidthPt - x - 2, measuredWidth + 2));
+    const font = selectPdfFont(fonts, fragment.text);
+    const hiddenInVisualLayer = options.hiddenVisualTextFragments?.has(fragment) ?? false;
 
     const drawn = drawSafeText(page, fragment.text, {
       x,
@@ -6520,11 +7122,11 @@ function drawTextLayer(
       font,
       color: outputColor(fragment.color, options.colorMode),
       maxWidth,
-      opacity
+      opacity: hiddenInVisualLayer ? 0 : opacity
     });
 
     const inkWidth = Math.min(maxWidth, Math.max(1, drawn.width));
-    if (drawUnderlines && fragment.underline && inkWidth > 1) {
+    if (drawUnderlines && !hiddenInVisualLayer && fragment.underline && inkWidth > 1) {
       const underlineY = baselineY - Math.max(0.55, drawn.size * 0.12);
       page.drawLine({
         start: { x, y: underlineY },
@@ -6826,6 +7428,19 @@ function drawNoteDrawInkAnnotationLayer(
 
     try {
       const context = page.doc.context;
+      const appearanceRef = createInkAnnotationAppearance(page, pdfPaths, {
+        left,
+        bottom,
+        right,
+        top,
+        widthPt,
+        opacity,
+        red: clampNumber(components.red, 0, 1, 0.9),
+        green: clampNumber(components.green, 0, 1, 0.12),
+        blue: clampNumber(components.blue, 0, 1, 0.12)
+      });
+      const now = new Date();
+      pdfInkAnnotationSerial += 1;
       const annotation = context.obj({
         Type: "Annot",
         Subtype: "Ink",
@@ -6840,7 +7455,12 @@ function drawNoteDrawInkAnnotationLayer(
         Border: [0, 0, widthPt],
         BS: { W: widthPt, S: "S" },
         F: 4,
-        IT: "Ink"
+        IT: "Ink",
+        P: page.ref,
+        NM: getPdfStringRuntime().of(`notedraw-ink-${now.getTime()}-${pdfInkAnnotationSerial}`),
+        M: getPdfStringRuntime().of(formatPdfAnnotationDate(now)),
+        Contents: getPdfStringRuntime().of("NoteDraw ink"),
+        AP: { N: appearanceRef }
       });
       page.node.addAnnot(context.register(annotation));
     } catch (error) {
@@ -6947,6 +7567,12 @@ async function renderPreviewPageToPngBytes(
     sourceWidthPx: model.sourceWidthPx,
     pageHeightPx: model.bodyHeightPx
   });
+  await drawCanvasVideoLayer(context, model.videoFragments, {
+    pageTopPx,
+    pageBottomPx,
+    sourceWidthPx: model.sourceWidthPx,
+    pageHeightPx: model.bodyHeightPx
+  });
   await drawCanvasSvgLayer(context, model.svgFragments, {
     pageTopPx,
     pageBottomPx,
@@ -6976,6 +7602,11 @@ async function renderPreviewPageToPngBytes(
     pageBottomPx,
     sourceWidthPx: model.sourceWidthPx,
     pageHeightPx: model.bodyHeightPx
+  });
+  drawCanvasNoteDrawElementLayer(context, model.noteDrawElements ?? [], {
+    pageTopPx,
+    pageBottomPx,
+    sourceWidthPx: model.sourceWidthPx
   });
   if (options.includeNoteDraw === true) {
     drawCanvasNoteDrawInkLayer(context, model.noteDrawInkStrokes ?? [], {
@@ -7219,6 +7850,430 @@ async function drawCanvasImageLayer(
       console.warn("Mobile PDF Exporter canvas image draw failed", error);
     }
   }
+}
+
+function createInkAnnotationAppearance(
+  page: PDFPage,
+  paths: Array<Array<{ x: number; y: number }>>,
+  options: {
+    left: number;
+    bottom: number;
+    right: number;
+    top: number;
+    widthPt: number;
+    opacity: number;
+    red: number;
+    green: number;
+    blue: number;
+  }
+) {
+  const commands = [
+    "q",
+    "/GS0 gs",
+    `${formatPdfNumber(options.red)} ${formatPdfNumber(options.green)} ${formatPdfNumber(options.blue)} RG`,
+    `${formatPdfNumber(options.widthPt)} w`,
+    "1 J",
+    "1 j"
+  ];
+  for (const path of paths) {
+    if (path.length < 2) continue;
+    commands.push(
+      `${formatPdfNumber(path[0].x - options.left)} ${formatPdfNumber(path[0].y - options.bottom)} m`
+    );
+    for (const point of path.slice(1)) {
+      commands.push(`${formatPdfNumber(point.x - options.left)} ${formatPdfNumber(point.y - options.bottom)} l`);
+    }
+    commands.push("S");
+  }
+  commands.push("Q");
+  const context = page.doc.context;
+  const stream = context.flateStream(commands.join("\n"), {
+    Type: "XObject",
+    Subtype: "Form",
+    BBox: [0, 0, options.right - options.left, options.top - options.bottom],
+    Resources: {
+      ExtGState: {
+        GS0: {
+          Type: "ExtGState",
+          CA: options.opacity,
+          ca: options.opacity
+        }
+      }
+    }
+  });
+  return context.register(stream);
+}
+
+function formatPdfNumber(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(4).replace(/\.?0+$/u, "") || "0" : "0";
+}
+
+function formatPdfAnnotationDate(value: Date): string {
+  const pad = (part: number): string => String(part).padStart(2, "0");
+  return `D:${value.getFullYear()}${pad(value.getMonth() + 1)}${pad(value.getDate())}${pad(value.getHours())}${pad(value.getMinutes())}${pad(value.getSeconds())}`;
+}
+
+function drawCanvasNoteDrawElementLayer(
+  context: CanvasRenderingContext2D,
+  elements: PdfNoteDrawElement[],
+  options: { pageTopPx: number; pageBottomPx: number; sourceWidthPx: number }
+): void {
+  for (const element of elements) {
+    if (element.bottom < options.pageTopPx || element.top > options.pageBottomPx) continue;
+    if (element.kind === "connector") {
+      drawCanvasNoteDrawConnector(context, element, options.pageTopPx);
+      continue;
+    }
+    const left = clampNumber(element.left, 0, options.sourceWidthPx - 1, 0);
+    const top = element.top - options.pageTopPx;
+    const width = Math.max(1, Math.min(element.right - element.left, options.sourceWidthPx - left));
+    const height = Math.max(1, element.bottom - element.top);
+    context.save();
+    context.globalAlpha = element.opacity;
+
+    if ((element.kind === "image" || element.kind === "video") && element.media) {
+      const mediaWidth = element.media.instanceOf(HTMLImageElement)
+        ? element.media.naturalWidth
+        : element.media.width;
+      const mediaHeight = element.media.instanceOf(HTMLImageElement)
+        ? element.media.naturalHeight
+        : element.media.height;
+      const fit = containMediaRect(mediaWidth, mediaHeight, left, top, width, height);
+      context.drawImage(element.media, fit.x, fit.y, fit.width, fit.height);
+      if (element.kind === "video") drawCanvasVideoPlayGlyph(context, left, top, width, height);
+      context.restore();
+      continue;
+    }
+
+    if (element.kind === "image" || element.kind === "video" || element.kind === "file") {
+      drawCanvasNoteDrawFileCard(context, element, left, top, width, height);
+      if (element.kind === "video") drawCanvasVideoPlayGlyph(context, left, top, width, height);
+      context.restore();
+      continue;
+    }
+
+    drawCanvasNoteDrawTextElement(context, element, left, top, width, height);
+    context.restore();
+  }
+}
+
+function containMediaRect(
+  mediaWidth: number,
+  mediaHeight: number,
+  left: number,
+  top: number,
+  width: number,
+  height: number
+): { x: number; y: number; width: number; height: number } {
+  const ratio = Math.min(width / Math.max(1, mediaWidth), height / Math.max(1, mediaHeight));
+  const drawWidth = Math.max(1, mediaWidth * ratio);
+  const drawHeight = Math.max(1, mediaHeight * ratio);
+  return {
+    x: left + (width - drawWidth) / 2,
+    y: top + (height - drawHeight) / 2,
+    width: drawWidth,
+    height: drawHeight
+  };
+}
+
+function drawCanvasNoteDrawConnector(
+  context: CanvasRenderingContext2D,
+  element: PdfNoteDrawElement,
+  pageTopPx: number
+): void {
+  if (element.points.length < 2) return;
+  const points = element.points.map((point) => ({ x: point.x, y: point.y - pageTopPx }));
+  context.save();
+  context.globalAlpha = element.opacity;
+  context.strokeStyle = element.color;
+  context.fillStyle = element.color;
+  context.lineWidth = Math.max(1, element.width);
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  if (points.length === 3) {
+    context.quadraticCurveTo(points[1].x, points[1].y, points[2].x, points[2].y);
+  } else {
+    for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+  }
+  context.stroke();
+  const last = points[points.length - 1];
+  const previous = points[Math.max(0, points.length - 2)];
+  const angle = Math.atan2(last.y - previous.y, last.x - previous.x);
+  const size = Math.max(6, element.width * 3.4);
+  context.beginPath();
+  context.moveTo(last.x, last.y);
+  context.lineTo(last.x - Math.cos(angle - Math.PI / 6) * size, last.y - Math.sin(angle - Math.PI / 6) * size);
+  context.lineTo(last.x - Math.cos(angle + Math.PI / 6) * size, last.y - Math.sin(angle + Math.PI / 6) * size);
+  context.closePath();
+  context.fill();
+  context.restore();
+}
+
+function drawCanvasNoteDrawTextElement(
+  context: CanvasRenderingContext2D,
+  element: PdfNoteDrawElement,
+  left: number,
+  top: number,
+  width: number,
+  height: number
+): void {
+  const style = element.buttonStyle;
+  const shouldDrawBox = element.boxed || Boolean(style) || element.render !== "plain";
+  if (shouldDrawBox) {
+    context.lineWidth = 1.25;
+    context.strokeStyle = element.color;
+    context.fillStyle = style === "solid" ? element.color : "rgba(255,255,255,0.88)";
+    if (style === "circle") {
+      context.beginPath();
+      context.arc(left + width / 2, top + height / 2, Math.min(width, height) / 2, 0, Math.PI * 2);
+    } else {
+      roundedRectPath(context, left, top, width, height, style === "pill" ? height / 2 : 6);
+    }
+    context.fill();
+    context.stroke();
+  }
+
+  const text = getNoteDrawElementVisibleText(element);
+  if (!text) return;
+  const fontSize = Math.max(8, Math.min(element.fontSize, height * 0.78));
+  context.font = `${element.bold ? "700" : "400"} ${fontSize}px ${element.code ? "monospace" : "sans-serif"}`;
+  context.fillStyle = style === "solid" ? "#ffffff" : element.color;
+  context.textBaseline = "top";
+  const padding = shouldDrawBox ? Math.max(5, fontSize * 0.35) : 0;
+  const lines = wrapCanvasText(context, text, Math.max(8, width - padding * 2));
+  const lineHeight = fontSize * 1.25;
+  for (let index = 0; index < lines.length; index += 1) {
+    const y = top + padding + index * lineHeight;
+    if (y + fontSize > top + height + 0.5) break;
+    context.fillText(lines[index], left + padding, y, Math.max(8, width - padding * 2));
+  }
+}
+
+function getNoteDrawElementVisibleText(element: PdfNoteDrawElement): string {
+  const source = element.text || element.assetName;
+  if (element.render === "html") {
+    try {
+      return new DOMParser().parseFromString(source, "text/html").body.textContent?.trim() ?? "";
+    } catch {
+      return source;
+    }
+  }
+  if (element.render === "markdown" || element.render === "note") {
+    return source
+      .replace(/!?\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/gu, "$1")
+      .replace(/[*_~`>#-]+/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+  }
+  return source.trim();
+}
+
+function wrapCanvasText(context: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  for (const paragraph of text.split(/\r?\n/u)) {
+    let current = "";
+    for (const character of Array.from(paragraph)) {
+      const next = current + character;
+      if (current && context.measureText(next).width > maxWidth) {
+        lines.push(current);
+        current = character;
+      } else {
+        current = next;
+      }
+    }
+    lines.push(current);
+  }
+  return lines.filter((line, index) => line || index === 0);
+}
+
+function drawCanvasNoteDrawFileCard(
+  context: CanvasRenderingContext2D,
+  element: PdfNoteDrawElement,
+  left: number,
+  top: number,
+  width: number,
+  height: number
+): void {
+  context.fillStyle = "rgba(255,255,255,0.92)";
+  context.strokeStyle = element.color || "#64748b";
+  context.lineWidth = 1.25;
+  roundedRectPath(context, left, top, width, height, 6);
+  context.fill();
+  context.stroke();
+  const label = element.assetName || element.text || (element.kind === "video" ? "Video" : "Attachment");
+  const fontSize = Math.max(9, Math.min(16, height * 0.22));
+  context.fillStyle = "#1f2937";
+  context.font = `600 ${fontSize}px sans-serif`;
+  context.textBaseline = "middle";
+  context.fillText(label, left + 12, top + height / 2, Math.max(8, width - 24));
+}
+
+function getTextDirection(cssDirection: string, text: string): "ltr" | "rtl" {
+  if (cssDirection === "rtl") return "rtl";
+  if (cssDirection === "ltr") return "ltr";
+  return containsCodePointInRanges(text, [
+    [0x0590, 0x08ff],
+    [0xfb1d, 0xfdff],
+    [0xfe70, 0xfeff]
+  ]) ? "rtl" : "ltr";
+}
+
+function captureVideoLinkFragments(
+  videos: VideoFragment[],
+  linkContext?: PdfLinkContext
+): LinkFragment[] {
+  return videos.flatMap((video) => {
+    const directHref = normalizePdfHref(video.sourcePath ?? video.element.currentSrc ?? video.element.src);
+    const href = directHref ?? (
+      linkContext && video.sourcePath
+        ? resolveInternalPdfHref(video.sourcePath, linkContext)
+        : null
+    );
+    return href ? [{
+      href,
+      left: video.left,
+      top: video.top,
+      right: video.right,
+      bottom: video.bottom
+    }] : [];
+  });
+}
+
+async function drawCanvasVideoLayer(
+  context: CanvasRenderingContext2D,
+  videos: VideoFragment[],
+  options: {
+    pageTopPx: number;
+    pageBottomPx: number;
+    sourceWidthPx: number;
+    pageHeightPx: number;
+  }
+): Promise<void> {
+  for (const videoFragment of videos) {
+    if (!shouldDrawMediaOnPage(videoFragment, options.pageTopPx, options.pageBottomPx)) continue;
+    const slice = getMediaPageSlice(videoFragment, options);
+    if (!slice) continue;
+
+    try {
+      const source = await getVideoExportFrame(videoFragment.element);
+      if (!source) {
+        drawCanvasVideoPlaceholder(context, videoFragment, slice);
+        continue;
+      }
+      const sourceWidth = source.instanceOf(HTMLVideoElement)
+        ? source.videoWidth
+        : source.naturalWidth;
+      const sourceHeight = source.instanceOf(HTMLVideoElement)
+        ? source.videoHeight
+        : source.naturalHeight;
+      if (sourceWidth <= 0 || sourceHeight <= 0) {
+        drawCanvasVideoPlaceholder(context, videoFragment, slice);
+        continue;
+      }
+      const sourceY = (slice.offsetTopPx / slice.fragmentHeightPx) * sourceHeight;
+      const sourceSliceHeight = Math.max(1, (slice.height / slice.fragmentHeightPx) * sourceHeight);
+      context.drawImage(
+        source,
+        0,
+        sourceY,
+        sourceWidth,
+        Math.min(sourceSliceHeight, sourceHeight - sourceY),
+        slice.x,
+        slice.y,
+        slice.width,
+        slice.height
+      );
+      drawCanvasVideoPlayGlyph(context, slice.x, slice.y, slice.width, slice.height);
+    } catch (error) {
+      console.warn("Mobile PDF Exporter canvas video draw failed", error);
+      drawCanvasVideoPlaceholder(context, videoFragment, slice);
+    }
+  }
+}
+
+async function getVideoExportFrame(video: HTMLVideoElement): Promise<HTMLVideoElement | HTMLImageElement | null> {
+  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0) {
+    return video;
+  }
+  if (video.poster) {
+    try {
+      return await loadImage(video.poster, 1800);
+    } catch {
+      // Continue to the video frame fallback.
+    }
+  }
+  if (!video.currentSrc && !video.src) return null;
+  await waitForVideoFrame(video, 1800);
+  return video.videoWidth > 0 && video.videoHeight > 0 ? video : null;
+}
+
+function waitForVideoFrame(video: HTMLVideoElement, timeoutMs: number): Promise<void> {
+  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      video.removeEventListener("loadeddata", finish);
+      video.removeEventListener("error", finish);
+      resolve();
+    };
+    const timer = window.setTimeout(finish, timeoutMs);
+    video.addEventListener("loadeddata", finish, { once: true });
+    video.addEventListener("error", finish, { once: true });
+    try {
+      video.load();
+    } catch {
+      finish();
+    }
+  });
+}
+
+function drawCanvasVideoPlaceholder(
+  context: CanvasRenderingContext2D,
+  fragment: VideoFragment,
+  slice: MediaPageSlice
+): void {
+  context.save();
+  context.fillStyle = "#17191d";
+  context.fillRect(slice.x, slice.y, slice.width, slice.height);
+  const label = fragment.sourcePath?.split(/[\\/]/u).pop() || "Video";
+  const fontSize = Math.max(9, Math.min(16, slice.height * 0.12));
+  context.fillStyle = "rgba(255,255,255,0.9)";
+  context.font = `500 ${fontSize}px sans-serif`;
+  context.textAlign = "center";
+  context.textBaseline = "bottom";
+  context.fillText(label, slice.x + slice.width / 2, slice.y + slice.height - Math.max(8, fontSize * 0.6), slice.width * 0.88);
+  context.restore();
+  drawCanvasVideoPlayGlyph(context, slice.x, slice.y, slice.width, slice.height);
+}
+
+function drawCanvasVideoPlayGlyph(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): void {
+  const radius = Math.max(12, Math.min(30, Math.min(width, height) * 0.16));
+  const centerX = x + width / 2;
+  const centerY = y + height / 2;
+  context.save();
+  context.fillStyle = "rgba(0,0,0,0.58)";
+  context.beginPath();
+  context.arc(centerX, centerY, radius, 0, Math.PI * 2);
+  context.fill();
+  context.fillStyle = "#ffffff";
+  context.beginPath();
+  context.moveTo(centerX - radius * 0.28, centerY - radius * 0.46);
+  context.lineTo(centerX + radius * 0.5, centerY);
+  context.lineTo(centerX - radius * 0.28, centerY + radius * 0.46);
+  context.closePath();
+  context.fill();
+  context.restore();
 }
 
 async function drawCanvasSvgLayer(
@@ -7486,7 +8541,9 @@ function drawCanvasTextLayer(
     if (fragment.bottom <= options.pageTopPx + 0.5 || fragment.top >= options.pageBottomPx - 0.5) continue;
 
     const fontSize = Math.max(5, fragment.fontSizePx);
-    const x = clampNumber(fragment.left, 0, options.sourceWidthPx - 4, 0);
+    const left = clampNumber(fragment.left, 0, options.sourceWidthPx - 4, 0);
+    const right = clampNumber(fragment.right, left + 1, options.sourceWidthPx - 1, left + 1);
+    const x = fragment.direction === "rtl" ? right : left;
     const y = fragment.top - options.pageTopPx + fragment.fontSizePx * 0.86;
     const measuredWidth = Math.max(1, fragment.right - fragment.left);
     const maxWidth = Math.max(8, Math.min(options.sourceWidthPx - x - 2, measuredWidth + fragment.fontSizePx * 0.75));
@@ -7497,6 +8554,7 @@ function drawCanvasTextLayer(
       fontFamily: fragment.fontFamily,
       fontWeight: fragment.fontWeight,
       fontStyle: fragment.fontStyle,
+      direction: fragment.direction,
       color: fragment.color,
       maxWidth,
       colorMode: options.colorMode
@@ -7508,8 +8566,8 @@ function drawCanvasTextLayer(
       context.strokeStyle = colorToCss(fragment.color, options.colorMode);
       context.lineWidth = Math.max(0.65, drawn.size * 0.055);
       context.beginPath();
-      context.moveTo(x, underlineY);
-      context.lineTo(x + decorationWidth, underlineY);
+      context.moveTo(fragment.direction === "rtl" ? x - decorationWidth : x, underlineY);
+      context.lineTo(fragment.direction === "rtl" ? x : x + decorationWidth, underlineY);
       context.stroke();
     }
 
@@ -7518,8 +8576,8 @@ function drawCanvasTextLayer(
       context.strokeStyle = colorToCss(fragment.color, options.colorMode);
       context.lineWidth = Math.max(0.75, drawn.size * 0.06);
       context.beginPath();
-      context.moveTo(x, strikeY);
-      context.lineTo(x + decorationWidth, strikeY);
+      context.moveTo(fragment.direction === "rtl" ? x - decorationWidth : x, strikeY);
+      context.lineTo(fragment.direction === "rtl" ? x : x + decorationWidth, strikeY);
       context.stroke();
     }
   }
@@ -7535,6 +8593,7 @@ function drawCanvasText(
     fontFamily?: string;
     fontWeight?: string;
     fontStyle?: string;
+    direction?: "ltr" | "rtl";
     color: Color;
     maxWidth: number;
     colorMode: PdfColorMode;
@@ -7554,7 +8613,16 @@ function drawCanvasText(
 
   context.fillStyle = colorToCss(options.color, options.colorMode);
   context.textBaseline = "alphabetic";
-  drawCanvasTextRuns(context, runs, options.x, options.y, size, options);
+  if (options.direction === "rtl") {
+    context.save();
+    context.direction = "rtl";
+    context.textAlign = "right";
+    context.font = getCanvasTextFont(size, false, options);
+    context.fillText(clean, options.x, options.y, options.maxWidth);
+    context.restore();
+  } else {
+    drawCanvasTextRuns(context, runs, options.x, options.y, size, options);
+  }
   return { text: clean, size, width };
 }
 

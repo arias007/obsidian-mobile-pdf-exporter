@@ -22,9 +22,46 @@ import embeddedThaiFontGzipBase64 from "../fonts/NotoSansThai-Regular.ttf.gz";
 import supportCode1Base64 from "./generated/support-code-1.jpg";
 import supportCode2Base64 from "./generated/support-code-2.png";
 
-const UI_LANGUAGES = ["auto", "zh", "en"] as const;
+const UI_LANGUAGES = [
+  "auto",
+  "zh",
+  "en",
+  "ja",
+  "ko",
+  "es",
+  "fr",
+  "de",
+  "ru",
+  "pt",
+  "it",
+  "ar",
+  "hi",
+  "id",
+  "tr",
+  "vi",
+  "th"
+] as const;
 type UiLanguage = typeof UI_LANGUAGES[number];
 type ResolvedUiLanguage = Exclude<UiLanguage, "auto">;
+
+const UI_LANGUAGE_LABELS: Record<ResolvedUiLanguage, string> = {
+  zh: "中文",
+  en: "English",
+  ja: "日本語",
+  ko: "한국어",
+  es: "Español",
+  fr: "Français",
+  de: "Deutsch",
+  ru: "Русский",
+  pt: "Português",
+  it: "Italiano",
+  ar: "العربية",
+  hi: "हिन्दी",
+  id: "Bahasa Indonesia",
+  tr: "Türkçe",
+  vi: "Tiếng Việt",
+  th: "ไทย"
+};
 
 const NOTE_PDF_EXPORT_MODES = ["selectable", "image"] as const;
 type NotePdfExportMode = typeof NOTE_PDF_EXPORT_MODES[number];
@@ -305,6 +342,7 @@ interface PreviewPdfModel {
   exportDate: string;
   noteDrawInkStrokes?: PdfInkStroke[];
   noteDrawElements?: PdfNoteDrawElement[];
+  noteDrawSourceElements?: PdfNoteDrawElement[];
 }
 
 interface ExcalidrawAutomateRuntime {
@@ -378,6 +416,7 @@ interface PreparedNoteDrawExportOverlay {
   cleanup: () => void;
   data: NoteDoodleData | null;
   elements: NoteDrawElementData[];
+  sourceElements: NoteDrawElementData[];
   widthPx: number;
   heightPx: number;
   contentFrame: NoteDrawContentFrame;
@@ -462,6 +501,8 @@ const UI_TEXT = {
     exportModeSelectable: "可复制文字版",
     exportModeImage: "图片版",
     pageSizeName: "页面大小",
+    pageSizeCurrent: "当前页面大小（默认）",
+    pageSizeMobile: "手机长页 104 x 225 mm",
     orientationName: "方向",
     orientationPortrait: "竖向",
     orientationLandscape: "横向",
@@ -502,6 +543,8 @@ const UI_TEXT = {
     busyCompleteTitle: "导出完成",
     busyCompleteStatus: "完成",
     busyFailedTitle: "PDF 导出失败",
+    busyElapsedShort: "已用 {seconds} 秒",
+    busyElapsedLong: "已用 {seconds} 秒，仍在处理，请不要关闭 Obsidian。",
     settingsIntro: "菜单和按钮会先打开 PDF 导出选项；普通 Markdown 笔记可选择可复制文字版或图片版。",
     settingsGeneralHeading: "通用",
     settingsNoteOptionsHeading: "普通笔记 PDF 选项",
@@ -514,6 +557,7 @@ const UI_TEXT = {
     languageAuto: "Auto / 跟随 Obsidian",
     languageChinese: "中文",
     languageEnglish: "English",
+    formatPngLabel: "PNG 图片",
     codesTitle: "给我买咖啡",
     codesSubtitle: "如果这个插件帮到你，可以扫码打赏支持继续维护。",
     shareFailedNotice: "PDF 已保存，但系统分享面板没有打开。",
@@ -521,9 +565,16 @@ const UI_TEXT = {
     uniqueFileNameError: "无法生成唯一 PDF 文件名。",
     excalidrawApiMissingError: "没有找到 Excalidraw 导出接口，请确认 Excalidraw 插件已启用。",
     excalidrawExportFailedError: "Excalidraw 图片过大或导出失败，已尝试降低分辨率和分页切片。",
+    excalidrawPngNoImageError: "PNG {scale}x 没有返回图片。",
+    lastErrorLabel: "最后错误：{error}",
+    noUsableImageError: "未能取得可用图片。",
     excalidrawPreviewUnavailable: "Excalidraw 预览暂不可用，已跳过源码数据。",
     previewNoExportSizeError: "预览层没有可导出的尺寸。",
-    previewNoContentError: "预览没有可导出的内容。"
+    previewNoContentError: "预览没有可导出的内容。",
+    pdfRuntimeMissingError: "PDF 引擎尚未加载。",
+    fontkitMissingError: "PDF 字体组件初始化失败：fontkit.create 不存在。",
+    imagePdfCanvasError: "图片版 PDF 渲染失败：canvas 不可用。",
+    imageSliceError: "图片切片失败：canvas 不可用。"
   },
   en: {
     ribbonTitle: "Export preview PDF",
@@ -535,6 +586,8 @@ const UI_TEXT = {
     exportModeSelectable: "Selectable text",
     exportModeImage: "Image PDF",
     pageSizeName: "Page size",
+    pageSizeCurrent: "Current page size (default)",
+    pageSizeMobile: "Mobile long page 104 x 225 mm",
     orientationName: "Orientation",
     orientationPortrait: "Portrait",
     orientationLandscape: "Landscape",
@@ -575,6 +628,8 @@ const UI_TEXT = {
     busyCompleteTitle: "Export complete",
     busyCompleteStatus: "Done",
     busyFailedTitle: "PDF export failed",
+    busyElapsedShort: "{seconds}s elapsed",
+    busyElapsedLong: "{seconds}s elapsed. Still working; do not close Obsidian.",
     settingsIntro: "Menus and buttons open the PDF export options first. Ordinary Markdown notes can export as selectable-text PDFs or image PDFs.",
     settingsGeneralHeading: "General",
     settingsNoteOptionsHeading: "Ordinary note PDF options",
@@ -587,6 +642,7 @@ const UI_TEXT = {
     languageAuto: "Auto / follow Obsidian",
     languageChinese: "Chinese",
     languageEnglish: "English",
+    formatPngLabel: "PNG image",
     codesTitle: "Buy me a coffee",
     codesSubtitle: "If this tool helps, tips are appreciated and support ongoing maintenance.",
     shareFailedNotice: "The PDF was saved, but the system share sheet did not open.",
@@ -594,9 +650,1206 @@ const UI_TEXT = {
     uniqueFileNameError: "Could not generate a unique PDF filename.",
     excalidrawApiMissingError: "Excalidraw export API was not found. Make sure the Excalidraw plugin is enabled.",
     excalidrawExportFailedError: "The Excalidraw image was too large or export failed. Lower resolutions and page slicing were already tried.",
+    excalidrawPngNoImageError: "PNG {scale}x returned no image.",
+    lastErrorLabel: "Last error: {error}",
+    noUsableImageError: "No usable image was produced.",
     excalidrawPreviewUnavailable: "Excalidraw preview is unavailable, so source data was skipped.",
     previewNoExportSizeError: "The preview layer has no exportable size.",
-    previewNoContentError: "The preview has no exportable content."
+    previewNoContentError: "The preview has no exportable content.",
+    pdfRuntimeMissingError: "The PDF engine has not loaded.",
+    fontkitMissingError: "PDF font initialization failed because fontkit.create is unavailable.",
+    imagePdfCanvasError: "Image PDF rendering failed because canvas is unavailable.",
+    imageSliceError: "Image slicing failed because canvas is unavailable."
+  },
+  ja: {
+    ribbonTitle: "PDFプレビューを書き出す",
+    commandName: "Mobile PDF Exporter: 現在のファイルをPDFプレビューとして書き出す",
+    noMarkdownNotice: "書き出せるファイルを先に開いてください。",
+    optionsTitle: "PDF書き出しオプション",
+    exportModeName: "書き出しモード",
+    exportModeDesc: "選択可能なテキストは閲覧・検索・コピー向け、画像PDFは見た目を固定します。",
+    exportModeSelectable: "選択可能なテキスト",
+    exportModeImage: "画像PDF",
+    pageSizeName: "ページサイズ",
+    pageSizeCurrent: "現在のページサイズ（既定）",
+    pageSizeMobile: "モバイル長ページ 104 x 225 mm",
+    orientationName: "向き",
+    orientationPortrait: "縦",
+    orientationLandscape: "横",
+    colorName: "カラー",
+    colorOption: "カラー",
+    grayscaleOption: "グレースケール",
+    marginName: "余白",
+    contentScaleName: "コンテンツ倍率",
+    imageQualityName: "画像PDFの品質",
+    imageQualityDesc: "通常ノートの画像PDFにのみ影響します。高品質ほどファイルが大きくなります。",
+    imageQualityStandard: "標準 / 小さいファイル",
+    imageQualityClear: "鮮明 / 推奨",
+    imageQualityHigh: "高品質",
+    imageQualityUltra: "最高品質 / 大きいファイル",
+    includeTitleName: "ノートタイトルを含める",
+    headerTextName: "ヘッダー",
+    headerTextDesc: "空欄で無効。{title}、{page}、{pages}、{date} を使用できます。",
+    footerTextName: "フッター",
+    footerTextDesc: "空欄で無効。{title}、{page}、{pages}、{date} を使用できます。",
+    openAfterExportName: "書き出し後に開く",
+    openAfterExportDesc: "書き出し完了後に生成ファイルを開きます。",
+    shareAfterExportName: "書き出し後に共有",
+    rememberLastExportOptionsName: "前回の書き出し設定を使用",
+    rememberLastExportOptionsDesc: "既定で有効。今回の設定を次回用に保存します。",
+    outputLocationName: "保存先",
+    outputLocationCurrent: "現在のノートのフォルダー（既定）",
+    outputLocationFolder: "指定フォルダー",
+    outputLocationCurrentDesc: "PDFを現在のノートと同じフォルダーに保存します。",
+    outputLocationFolderDesc: "PDFを指定したVault内フォルダーに保存し、必要なら作成します。",
+    outputFolderPlaceholder: "PDF Exports",
+    pdfNameLabel: "PDF名",
+    exportPdfButton: "PDFを書き出す",
+    cancelButton: "他の形式",
+    busyExporting: "PDFを書き出しています",
+    busyCancelButton: "書き出しをキャンセル",
+    busyCancelledTitle: "書き出しをキャンセルしました",
+    busyCancelledStatus: "PDFは保存されませんでした。",
+    busyCompleteTitle: "書き出し完了",
+    busyCompleteStatus: "完了",
+    busyFailedTitle: "PDFの書き出しに失敗しました",
+    busyElapsedShort: "{seconds}秒経過",
+    busyElapsedLong: "{seconds}秒経過。処理中のためObsidianを閉じないでください。",
+    settingsIntro: "メニューとボタンは最初にPDF書き出しオプションを開きます。通常のMarkdownノートはテキストPDFまたは画像PDFにできます。",
+    settingsGeneralHeading: "一般",
+    settingsNoteOptionsHeading: "通常ノートのPDFオプション",
+    pageSizeDesc: "モバイル長ページはスマートフォン向け、A4/A5/Letterは印刷と保管向けです。",
+    orientationDesc: "横向きではページの幅と高さを入れ替えます。",
+    colorDesc: "グレースケールは印刷向け、カラーはテーマ・リンク・画像の色を保持します。",
+    settingsSaveAndShareHeading: "保存と共有",
+    languageName: "表示言語",
+    languageDesc: "自動ではObsidianの言語に従います。ボタン、メニュー、コマンド、オプション、通知に選択言語を使います。",
+    languageAuto: "自動 / Obsidianに従う",
+    languageChinese: "中国語",
+    languageEnglish: "英語",
+    formatPngLabel: "PNG画像",
+    codesTitle: "コーヒーをおごる",
+    codesSubtitle: "このツールが役立った場合、継続的なメンテナンスへの支援を歓迎します。",
+    shareFailedNotice: "PDFは保存されましたが、システムの共有画面を開けませんでした。",
+    fontMissingError: "PDFフォントがなく、GitHubからも取得できませんでした。オンラインで再試行するか、NotoSansSC-Regular.gb2312-subset.ttf をプラグインのfontsフォルダーに置いてください。",
+    uniqueFileNameError: "一意のPDFファイル名を生成できませんでした。",
+    excalidrawApiMissingError: "Excalidrawの書き出しAPIが見つかりません。Excalidrawプラグインが有効か確認してください。",
+    excalidrawExportFailedError: "Excalidraw画像が大きすぎるか書き出しに失敗しました。低解像度とページ分割も試行済みです。",
+    excalidrawPngNoImageError: "PNG {scale}x から画像が返されませんでした。",
+    lastErrorLabel: "最後のエラー: {error}",
+    noUsableImageError: "使用できる画像を生成できませんでした。",
+    excalidrawPreviewUnavailable: "Excalidrawプレビューを利用できないため、ソースデータを省略しました。",
+    previewNoExportSizeError: "プレビュー層に書き出せるサイズがありません。",
+    previewNoContentError: "プレビューに書き出せる内容がありません。",
+    pdfRuntimeMissingError: "PDFエンジンが読み込まれていません。",
+    fontkitMissingError: "fontkit.createを利用できないため、PDFフォントの初期化に失敗しました。",
+    imagePdfCanvasError: "canvasを利用できないため、画像PDFの描画に失敗しました。",
+    imageSliceError: "canvasを利用できないため、画像の分割に失敗しました。"
+  },
+  ko: {
+    ribbonTitle: "미리보기 PDF 내보내기",
+    commandName: "Mobile PDF Exporter: 현재 파일을 미리보기 PDF로 내보내기",
+    noMarkdownNotice: "먼저 내보낼 수 있는 파일을 여세요.",
+    optionsTitle: "PDF 내보내기 옵션",
+    exportModeName: "내보내기 모드",
+    exportModeDesc: "선택 가능한 텍스트는 읽기, 검색, 복사에 적합하고 이미지 PDF는 화면 배치를 고정합니다.",
+    exportModeSelectable: "선택 가능한 텍스트",
+    exportModeImage: "이미지 PDF",
+    pageSizeName: "페이지 크기",
+    pageSizeCurrent: "현재 페이지 크기(기본값)",
+    pageSizeMobile: "모바일 긴 페이지 104 x 225 mm",
+    orientationName: "방향",
+    orientationPortrait: "세로",
+    orientationLandscape: "가로",
+    colorName: "색상",
+    colorOption: "컬러",
+    grayscaleOption: "회색조",
+    marginName: "여백",
+    contentScaleName: "콘텐츠 배율",
+    imageQualityName: "이미지 PDF 품질",
+    imageQualityDesc: "일반 노트의 이미지 PDF에만 적용됩니다. 품질이 높을수록 파일이 커집니다.",
+    imageQualityStandard: "표준 / 작은 파일",
+    imageQualityClear: "선명 / 권장",
+    imageQualityHigh: "고품질",
+    imageQualityUltra: "최고 품질 / 큰 파일",
+    includeTitleName: "노트 제목 포함",
+    headerTextName: "머리글",
+    headerTextDesc: "비워 두면 꺼집니다. {title}, {page}, {pages}, {date}를 지원합니다.",
+    footerTextName: "바닥글",
+    footerTextDesc: "비워 두면 꺼집니다. {title}, {page}, {pages}, {date}를 지원합니다.",
+    openAfterExportName: "내보낸 뒤 열기",
+    openAfterExportDesc: "내보내기가 끝나면 생성된 파일을 엽니다.",
+    shareAfterExportName: "내보낸 뒤 공유",
+    rememberLastExportOptionsName: "마지막 내보내기 옵션 사용",
+    rememberLastExportOptionsDesc: "기본적으로 켜집니다. 이번 옵션을 다음 내보내기에 사용하도록 저장합니다.",
+    outputLocationName: "저장 위치",
+    outputLocationCurrent: "현재 노트 폴더(기본값)",
+    outputLocationFolder: "사용자 지정 폴더",
+    outputLocationCurrentDesc: "PDF를 현재 노트와 같은 폴더에 저장합니다.",
+    outputLocationFolderDesc: "PDF를 지정한 Vault 폴더에 저장하고 필요하면 폴더를 만듭니다.",
+    outputFolderPlaceholder: "PDF Exports",
+    pdfNameLabel: "PDF 이름",
+    exportPdfButton: "PDF 내보내기",
+    cancelButton: "다른 형식",
+    busyExporting: "PDF 내보내는 중",
+    busyCancelButton: "내보내기 취소",
+    busyCancelledTitle: "내보내기 취소됨",
+    busyCancelledStatus: "PDF가 저장되지 않았습니다.",
+    busyCompleteTitle: "내보내기 완료",
+    busyCompleteStatus: "완료",
+    busyFailedTitle: "PDF 내보내기 실패",
+    busyElapsedShort: "{seconds}초 경과",
+    busyElapsedLong: "{seconds}초 경과. 처리 중이므로 Obsidian을 닫지 마세요.",
+    settingsIntro: "메뉴와 버튼은 먼저 PDF 내보내기 옵션을 엽니다. 일반 Markdown 노트는 텍스트 PDF 또는 이미지 PDF로 내보낼 수 있습니다.",
+    settingsGeneralHeading: "일반",
+    settingsNoteOptionsHeading: "일반 노트 PDF 옵션",
+    pageSizeDesc: "모바일 긴 페이지는 휴대폰 읽기에, A4/A5/Letter는 인쇄와 보관에 적합합니다.",
+    orientationDesc: "가로 방향은 페이지 너비와 높이를 바꿉니다.",
+    colorDesc: "회색조는 인쇄에 적합하고 컬러는 테마, 링크, 이미지 색상을 유지합니다.",
+    settingsSaveAndShareHeading: "저장 및 공유",
+    languageName: "인터페이스 언어",
+    languageDesc: "자동은 Obsidian 언어를 따릅니다. 버튼, 메뉴, 명령, 옵션, 알림에 선택한 언어를 사용합니다.",
+    languageAuto: "자동 / Obsidian 언어 따르기",
+    languageChinese: "중국어",
+    languageEnglish: "영어",
+    formatPngLabel: "PNG 이미지",
+    codesTitle: "커피 한 잔 후원",
+    codesSubtitle: "이 도구가 유용했다면 지속적인 유지 관리를 위한 후원을 환영합니다.",
+    shareFailedNotice: "PDF는 저장되었지만 시스템 공유 창을 열지 못했습니다.",
+    fontMissingError: "PDF 글꼴이 없고 GitHub에서도 내려받지 못했습니다. 온라인에서 다시 시도하거나 NotoSansSC-Regular.gb2312-subset.ttf를 플러그인의 fonts 폴더에 넣으세요.",
+    uniqueFileNameError: "고유한 PDF 파일 이름을 만들 수 없습니다.",
+    excalidrawApiMissingError: "Excalidraw 내보내기 API를 찾지 못했습니다. Excalidraw 플러그인이 켜져 있는지 확인하세요.",
+    excalidrawExportFailedError: "Excalidraw 이미지가 너무 크거나 내보내기에 실패했습니다. 낮은 해상도와 페이지 분할도 시도했습니다.",
+    excalidrawPngNoImageError: "PNG {scale}x에서 이미지가 반환되지 않았습니다.",
+    lastErrorLabel: "마지막 오류: {error}",
+    noUsableImageError: "사용 가능한 이미지를 만들지 못했습니다.",
+    excalidrawPreviewUnavailable: "Excalidraw 미리보기를 사용할 수 없어 원본 데이터를 건너뛰었습니다.",
+    previewNoExportSizeError: "미리보기 레이어에 내보낼 수 있는 크기가 없습니다.",
+    previewNoContentError: "미리보기에 내보낼 수 있는 내용이 없습니다.",
+    pdfRuntimeMissingError: "PDF 엔진이 로드되지 않았습니다.",
+    fontkitMissingError: "fontkit.create를 사용할 수 없어 PDF 글꼴 초기화에 실패했습니다.",
+    imagePdfCanvasError: "canvas를 사용할 수 없어 이미지 PDF 렌더링에 실패했습니다.",
+    imageSliceError: "canvas를 사용할 수 없어 이미지 분할에 실패했습니다."
+  },
+  es: {
+    ribbonTitle: "Exportar PDF de vista previa",
+    commandName: "Mobile PDF Exporter: Exportar el archivo actual como PDF de vista previa",
+    noMarkdownNotice: "Abre primero un archivo que se pueda exportar.",
+    optionsTitle: "Opciones de exportación a PDF",
+    exportModeName: "Modo de exportación",
+    exportModeDesc: "El texto seleccionable facilita la lectura, búsqueda y copia; el PDF de imagen conserva un diseño visual fijo.",
+    exportModeSelectable: "Texto seleccionable",
+    exportModeImage: "PDF de imagen",
+    pageSizeName: "Tamaño de página",
+    pageSizeCurrent: "Tamaño de página actual (predeterminado)",
+    pageSizeMobile: "Página móvil larga 104 x 225 mm",
+    orientationName: "Orientación",
+    orientationPortrait: "Vertical",
+    orientationLandscape: "Horizontal",
+    colorName: "Color",
+    colorOption: "Color",
+    grayscaleOption: "Escala de grises",
+    marginName: "Margen",
+    contentScaleName: "Escala del contenido",
+    imageQualityName: "Calidad del PDF de imagen",
+    imageQualityDesc: "Solo afecta a los PDF de imagen de notas normales. Una calidad mayor crea archivos más grandes.",
+    imageQualityStandard: "Estándar / archivo pequeño",
+    imageQualityClear: "Nítida / recomendada",
+    imageQualityHigh: "Alta",
+    imageQualityUltra: "Ultra / archivo grande",
+    includeTitleName: "Incluir el título de la nota",
+    headerTextName: "Encabezado",
+    headerTextDesc: "Déjalo vacío para desactivarlo. Admite {title}, {page}, {pages} y {date}.",
+    footerTextName: "Pie de página",
+    footerTextDesc: "Déjalo vacío para desactivarlo. Admite {title}, {page}, {pages} y {date}.",
+    openAfterExportName: "Abrir después de exportar",
+    openAfterExportDesc: "Abre el archivo generado cuando termina la exportación.",
+    shareAfterExportName: "Compartir después de exportar",
+    rememberLastExportOptionsName: "Usar las últimas opciones",
+    rememberLastExportOptionsDesc: "Activado de forma predeterminada. Guarda estas opciones para la próxima exportación.",
+    outputLocationName: "Ubicación de exportación",
+    outputLocationCurrent: "Carpeta de la nota actual (predeterminada)",
+    outputLocationFolder: "Carpeta personalizada",
+    outputLocationCurrentDesc: "Guarda el PDF junto a la nota actual.",
+    outputLocationFolderDesc: "Guarda el PDF en una carpeta del Vault y la crea cuando sea necesario.",
+    outputFolderPlaceholder: "PDF Exports",
+    pdfNameLabel: "Nombre del PDF",
+    exportPdfButton: "Exportar PDF",
+    cancelButton: "Otros formatos",
+    busyExporting: "Exportando PDF",
+    busyCancelButton: "Cancelar exportación",
+    busyCancelledTitle: "Exportación cancelada",
+    busyCancelledStatus: "No se guardó ningún PDF.",
+    busyCompleteTitle: "Exportación completada",
+    busyCompleteStatus: "Completado",
+    busyFailedTitle: "Error al exportar el PDF",
+    busyElapsedShort: "Han transcurrido {seconds} s",
+    busyElapsedLong: "Han transcurrido {seconds} s. El proceso continúa; no cierres Obsidian.",
+    settingsIntro: "Los menús y botones abren primero las opciones de PDF. Las notas Markdown normales pueden exportarse con texto seleccionable o como imagen.",
+    settingsGeneralHeading: "General",
+    settingsNoteOptionsHeading: "Opciones PDF para notas normales",
+    pageSizeDesc: "La página móvil larga es adecuada para teléfonos; A4/A5/Letter sirven para imprimir y archivar.",
+    orientationDesc: "La orientación horizontal intercambia el ancho y el alto.",
+    colorDesc: "La escala de grises es útil para imprimir; el color conserva los colores del tema, enlaces e imágenes.",
+    settingsSaveAndShareHeading: "Guardar y compartir",
+    languageName: "Idioma de la interfaz",
+    languageDesc: "Automático sigue el idioma de Obsidian. Los botones, menús, comandos, opciones y avisos usan el idioma elegido.",
+    languageAuto: "Automático / seguir Obsidian",
+    languageChinese: "Chino",
+    languageEnglish: "Inglés",
+    formatPngLabel: "Imagen PNG",
+    codesTitle: "Invítame a un café",
+    codesSubtitle: "Si esta herramienta te ayuda, puedes apoyar su mantenimiento continuo.",
+    shareFailedNotice: "El PDF se guardó, pero no se abrió el panel de compartir del sistema.",
+    fontMissingError: "Falta la fuente PDF y no pudo descargarse de GitHub. Reinténtalo con conexión o coloca NotoSansSC-Regular.gb2312-subset.ttf en la carpeta fonts del complemento.",
+    uniqueFileNameError: "No se pudo generar un nombre de PDF único.",
+    excalidrawApiMissingError: "No se encontró la API de exportación de Excalidraw. Comprueba que el complemento Excalidraw esté activado.",
+    excalidrawExportFailedError: "La imagen de Excalidraw era demasiado grande o la exportación falló. Ya se probaron resoluciones menores y división por páginas.",
+    excalidrawPngNoImageError: "PNG {scale}x no devolvió ninguna imagen.",
+    lastErrorLabel: "Último error: {error}",
+    noUsableImageError: "No se produjo ninguna imagen utilizable.",
+    excalidrawPreviewUnavailable: "La vista previa de Excalidraw no está disponible; se omitieron los datos fuente.",
+    previewNoExportSizeError: "La capa de vista previa no tiene un tamaño exportable.",
+    previewNoContentError: "La vista previa no tiene contenido exportable.",
+    pdfRuntimeMissingError: "El motor PDF aún no se ha cargado.",
+    fontkitMissingError: "No se pudo iniciar la fuente PDF porque fontkit.create no está disponible.",
+    imagePdfCanvasError: "No se pudo renderizar el PDF de imagen porque canvas no está disponible.",
+    imageSliceError: "No se pudo dividir la imagen porque canvas no está disponible."
+  },
+  fr: {
+    ribbonTitle: "Exporter le PDF d’aperçu",
+    commandName: "Mobile PDF Exporter : Exporter le fichier actuel en PDF d’aperçu",
+    noMarkdownNotice: "Ouvrez d’abord un fichier exportable.",
+    optionsTitle: "Options d’export PDF",
+    exportModeName: "Mode d’export",
+    exportModeDesc: "Le texte sélectionnable convient à la lecture, la recherche et la copie ; le PDF image conserve une mise en page fixe.",
+    exportModeSelectable: "Texte sélectionnable",
+    exportModeImage: "PDF image",
+    pageSizeName: "Taille de page",
+    pageSizeCurrent: "Taille de page actuelle (par défaut)",
+    pageSizeMobile: "Page mobile longue 104 x 225 mm",
+    orientationName: "Orientation",
+    orientationPortrait: "Portrait",
+    orientationLandscape: "Paysage",
+    colorName: "Couleur",
+    colorOption: "Couleur",
+    grayscaleOption: "Niveaux de gris",
+    marginName: "Marge",
+    contentScaleName: "Échelle du contenu",
+    imageQualityName: "Qualité du PDF image",
+    imageQualityDesc: "Concerne uniquement les PDF image des notes ordinaires. Une qualité supérieure produit un fichier plus volumineux.",
+    imageQualityStandard: "Standard / petit fichier",
+    imageQualityClear: "Nette / recommandée",
+    imageQualityHigh: "Élevée",
+    imageQualityUltra: "Ultra / gros fichier",
+    includeTitleName: "Inclure le titre de la note",
+    headerTextName: "En-tête",
+    headerTextDesc: "Laissez vide pour désactiver. Accepte {title}, {page}, {pages} et {date}.",
+    footerTextName: "Pied de page",
+    footerTextDesc: "Laissez vide pour désactiver. Accepte {title}, {page}, {pages} et {date}.",
+    openAfterExportName: "Ouvrir après l’export",
+    openAfterExportDesc: "Ouvre le fichier généré à la fin de l’export.",
+    shareAfterExportName: "Partager après l’export",
+    rememberLastExportOptionsName: "Utiliser les dernières options",
+    rememberLastExportOptionsDesc: "Activé par défaut. Enregistre ces options pour le prochain export.",
+    outputLocationName: "Emplacement d’export",
+    outputLocationCurrent: "Dossier de la note actuelle (par défaut)",
+    outputLocationFolder: "Dossier personnalisé",
+    outputLocationCurrentDesc: "Enregistre le PDF à côté de la note actuelle.",
+    outputLocationFolderDesc: "Enregistre le PDF dans un dossier du Vault et le crée si nécessaire.",
+    outputFolderPlaceholder: "PDF Exports",
+    pdfNameLabel: "Nom du PDF",
+    exportPdfButton: "Exporter le PDF",
+    cancelButton: "Autres formats",
+    busyExporting: "Export du PDF",
+    busyCancelButton: "Annuler l’export",
+    busyCancelledTitle: "Export annulé",
+    busyCancelledStatus: "Aucun PDF n’a été enregistré.",
+    busyCompleteTitle: "Export terminé",
+    busyCompleteStatus: "Terminé",
+    busyFailedTitle: "Échec de l’export PDF",
+    busyElapsedShort: "{seconds} s écoulées",
+    busyElapsedLong: "{seconds} s écoulées. Traitement en cours ; ne fermez pas Obsidian.",
+    settingsIntro: "Les menus et boutons ouvrent d’abord les options PDF. Les notes Markdown ordinaires peuvent être exportées avec du texte sélectionnable ou comme image.",
+    settingsGeneralHeading: "Général",
+    settingsNoteOptionsHeading: "Options PDF des notes ordinaires",
+    pageSizeDesc: "La page mobile longue convient au téléphone ; A4/A5/Letter conviennent à l’impression et à l’archivage.",
+    orientationDesc: "Le mode paysage inverse la largeur et la hauteur.",
+    colorDesc: "Les niveaux de gris conviennent à l’impression ; la couleur conserve les couleurs du thème, des liens et des images.",
+    settingsSaveAndShareHeading: "Enregistrer et partager",
+    languageName: "Langue de l’interface",
+    languageDesc: "Automatique suit la langue d’Obsidian. Les boutons, menus, commandes, options et messages utilisent la langue choisie.",
+    languageAuto: "Automatique / suivre Obsidian",
+    languageChinese: "Chinois",
+    languageEnglish: "Anglais",
+    formatPngLabel: "Image PNG",
+    codesTitle: "Offrez-moi un café",
+    codesSubtitle: "Si cet outil vous aide, vous pouvez soutenir sa maintenance continue.",
+    shareFailedNotice: "Le PDF a été enregistré, mais le panneau de partage du système ne s’est pas ouvert.",
+    fontMissingError: "La police PDF manque et n’a pas pu être téléchargée depuis GitHub. Réessayez en ligne ou placez NotoSansSC-Regular.gb2312-subset.ttf dans le dossier fonts du module.",
+    uniqueFileNameError: "Impossible de générer un nom de fichier PDF unique.",
+    excalidrawApiMissingError: "L’API d’export Excalidraw est introuvable. Vérifiez que le module Excalidraw est activé.",
+    excalidrawExportFailedError: "L’image Excalidraw était trop grande ou l’export a échoué. Des résolutions inférieures et le découpage en pages ont déjà été essayés.",
+    excalidrawPngNoImageError: "PNG {scale}x n’a renvoyé aucune image.",
+    lastErrorLabel: "Dernière erreur : {error}",
+    noUsableImageError: "Aucune image exploitable n’a été produite.",
+    excalidrawPreviewUnavailable: "L’aperçu Excalidraw est indisponible ; les données source ont été ignorées.",
+    previewNoExportSizeError: "La couche d’aperçu n’a pas de taille exportable.",
+    previewNoContentError: "L’aperçu ne contient aucun contenu exportable.",
+    pdfRuntimeMissingError: "Le moteur PDF n’est pas encore chargé.",
+    fontkitMissingError: "L’initialisation de la police PDF a échoué car fontkit.create est indisponible.",
+    imagePdfCanvasError: "Le rendu du PDF image a échoué car canvas est indisponible.",
+    imageSliceError: "Le découpage de l’image a échoué car canvas est indisponible."
+  },
+  de: {
+    ribbonTitle: "Vorschau-PDF exportieren",
+    commandName: "Mobile PDF Exporter: Aktuelle Datei als Vorschau-PDF exportieren",
+    noMarkdownNotice: "Öffnen Sie zuerst eine exportierbare Datei.",
+    optionsTitle: "PDF-Exportoptionen",
+    exportModeName: "Exportmodus",
+    exportModeDesc: "Auswählbarer Text eignet sich zum Lesen, Suchen und Kopieren; ein Bild-PDF bewahrt das feste Layout.",
+    exportModeSelectable: "Auswählbarer Text",
+    exportModeImage: "Bild-PDF",
+    pageSizeName: "Seitengröße",
+    pageSizeCurrent: "Aktuelle Seitengröße (Standard)",
+    pageSizeMobile: "Lange Mobilseite 104 x 225 mm",
+    orientationName: "Ausrichtung",
+    orientationPortrait: "Hochformat",
+    orientationLandscape: "Querformat",
+    colorName: "Farbe",
+    colorOption: "Farbe",
+    grayscaleOption: "Graustufen",
+    marginName: "Rand",
+    contentScaleName: "Inhaltsskalierung",
+    imageQualityName: "Qualität des Bild-PDFs",
+    imageQualityDesc: "Betrifft nur Bild-PDFs normaler Notizen. Höhere Qualität erzeugt größere Dateien.",
+    imageQualityStandard: "Standard / kleine Datei",
+    imageQualityClear: "Klar / empfohlen",
+    imageQualityHigh: "Hoch",
+    imageQualityUltra: "Ultra / große Datei",
+    includeTitleName: "Notiztitel einschließen",
+    headerTextName: "Kopfzeile",
+    headerTextDesc: "Leer lassen zum Deaktivieren. Unterstützt {title}, {page}, {pages} und {date}.",
+    footerTextName: "Fußzeile",
+    footerTextDesc: "Leer lassen zum Deaktivieren. Unterstützt {title}, {page}, {pages} und {date}.",
+    openAfterExportName: "Nach dem Export öffnen",
+    openAfterExportDesc: "Öffnet die erzeugte Datei nach Abschluss des Exports.",
+    shareAfterExportName: "Nach dem Export teilen",
+    rememberLastExportOptionsName: "Letzte Exportoptionen verwenden",
+    rememberLastExportOptionsDesc: "Standardmäßig aktiviert. Speichert diese Optionen für den nächsten Export.",
+    outputLocationName: "Exportziel",
+    outputLocationCurrent: "Ordner der aktuellen Notiz (Standard)",
+    outputLocationFolder: "Benutzerdefinierter Ordner",
+    outputLocationCurrentDesc: "Speichert das PDF neben der aktuellen Notiz.",
+    outputLocationFolderDesc: "Speichert das PDF in einem Vault-Ordner und erstellt ihn bei Bedarf.",
+    outputFolderPlaceholder: "PDF Exports",
+    pdfNameLabel: "PDF-Name",
+    exportPdfButton: "PDF exportieren",
+    cancelButton: "Andere Formate",
+    busyExporting: "PDF wird exportiert",
+    busyCancelButton: "Export abbrechen",
+    busyCancelledTitle: "Export abgebrochen",
+    busyCancelledStatus: "Es wurde kein PDF gespeichert.",
+    busyCompleteTitle: "Export abgeschlossen",
+    busyCompleteStatus: "Fertig",
+    busyFailedTitle: "PDF-Export fehlgeschlagen",
+    busyElapsedShort: "{seconds} s vergangen",
+    busyElapsedLong: "{seconds} s vergangen. Verarbeitung läuft; Obsidian nicht schließen.",
+    settingsIntro: "Menüs und Schaltflächen öffnen zuerst die PDF-Optionen. Normale Markdown-Notizen können mit auswählbarem Text oder als Bild exportiert werden.",
+    settingsGeneralHeading: "Allgemein",
+    settingsNoteOptionsHeading: "PDF-Optionen für normale Notizen",
+    pageSizeDesc: "Die lange Mobilseite eignet sich fürs Smartphone; A4/A5/Letter für Druck und Archivierung.",
+    orientationDesc: "Querformat vertauscht Seitenbreite und -höhe.",
+    colorDesc: "Graustufen eignen sich zum Drucken; Farbe erhält Theme-, Link- und Bildfarben.",
+    settingsSaveAndShareHeading: "Speichern und teilen",
+    languageName: "Oberflächensprache",
+    languageDesc: "Automatisch folgt der Obsidian-Sprache. Schaltflächen, Menüs, Befehle, Optionen und Hinweise verwenden die gewählte Sprache.",
+    languageAuto: "Automatisch / Obsidian folgen",
+    languageChinese: "Chinesisch",
+    languageEnglish: "Englisch",
+    formatPngLabel: "PNG-Bild",
+    codesTitle: "Spendieren Sie mir einen Kaffee",
+    codesSubtitle: "Wenn dieses Werkzeug hilft, können Sie die weitere Pflege unterstützen.",
+    shareFailedNotice: "Das PDF wurde gespeichert, aber die Systemfreigabe konnte nicht geöffnet werden.",
+    fontMissingError: "Die PDF-Schrift fehlt und konnte nicht von GitHub geladen werden. Versuchen Sie es online erneut oder legen Sie NotoSansSC-Regular.gb2312-subset.ttf im fonts-Ordner des Plugins ab.",
+    uniqueFileNameError: "Es konnte kein eindeutiger PDF-Dateiname erzeugt werden.",
+    excalidrawApiMissingError: "Die Excalidraw-Export-API wurde nicht gefunden. Prüfen Sie, ob das Excalidraw-Plugin aktiviert ist.",
+    excalidrawExportFailedError: "Das Excalidraw-Bild war zu groß oder der Export ist fehlgeschlagen. Niedrigere Auflösungen und Seitenteilung wurden bereits versucht.",
+    excalidrawPngNoImageError: "PNG {scale}x lieferte kein Bild.",
+    lastErrorLabel: "Letzter Fehler: {error}",
+    noUsableImageError: "Es wurde kein verwendbares Bild erzeugt.",
+    excalidrawPreviewUnavailable: "Die Excalidraw-Vorschau ist nicht verfügbar; Quelldaten wurden übersprungen.",
+    previewNoExportSizeError: "Die Vorschauebene hat keine exportierbare Größe.",
+    previewNoContentError: "Die Vorschau enthält keinen exportierbaren Inhalt.",
+    pdfRuntimeMissingError: "Die PDF-Engine wurde noch nicht geladen.",
+    fontkitMissingError: "Die PDF-Schriftinitialisierung ist fehlgeschlagen, weil fontkit.create nicht verfügbar ist.",
+    imagePdfCanvasError: "Das Bild-PDF konnte nicht gerendert werden, weil canvas nicht verfügbar ist.",
+    imageSliceError: "Das Bild konnte nicht geteilt werden, weil canvas nicht verfügbar ist."
+  },
+  ru: {
+    ribbonTitle: "Экспорт PDF-предпросмотра",
+    commandName: "Mobile PDF Exporter: Экспортировать текущий файл как PDF-предпросмотр",
+    noMarkdownNotice: "Сначала откройте файл, который можно экспортировать.",
+    optionsTitle: "Параметры экспорта PDF",
+    exportModeName: "Режим экспорта",
+    exportModeDesc: "Выделяемый текст удобен для чтения, поиска и копирования; PDF-изображение сохраняет фиксированный вид.",
+    exportModeSelectable: "Выделяемый текст",
+    exportModeImage: "PDF-изображение",
+    pageSizeName: "Размер страницы",
+    pageSizeCurrent: "Текущий размер страницы (по умолчанию)",
+    pageSizeMobile: "Длинная мобильная страница 104 x 225 мм",
+    orientationName: "Ориентация",
+    orientationPortrait: "Книжная",
+    orientationLandscape: "Альбомная",
+    colorName: "Цвет",
+    colorOption: "Цветной",
+    grayscaleOption: "Оттенки серого",
+    marginName: "Поля",
+    contentScaleName: "Масштаб содержимого",
+    imageQualityName: "Качество PDF-изображения",
+    imageQualityDesc: "Влияет только на PDF-изображения обычных заметок. Более высокое качество увеличивает файл.",
+    imageQualityStandard: "Стандарт / малый файл",
+    imageQualityClear: "Чётко / рекомендуется",
+    imageQualityHigh: "Высокое",
+    imageQualityUltra: "Ультра / большой файл",
+    includeTitleName: "Включать заголовок заметки",
+    headerTextName: "Верхний колонтитул",
+    headerTextDesc: "Оставьте пустым для отключения. Поддерживаются {title}, {page}, {pages} и {date}.",
+    footerTextName: "Нижний колонтитул",
+    footerTextDesc: "Оставьте пустым для отключения. Поддерживаются {title}, {page}, {pages} и {date}.",
+    openAfterExportName: "Открыть после экспорта",
+    openAfterExportDesc: "Открывает созданный файл после завершения экспорта.",
+    shareAfterExportName: "Поделиться после экспорта",
+    rememberLastExportOptionsName: "Использовать последние параметры",
+    rememberLastExportOptionsDesc: "Включено по умолчанию. Сохраняет эти параметры для следующего экспорта.",
+    outputLocationName: "Папка экспорта",
+    outputLocationCurrent: "Папка текущей заметки (по умолчанию)",
+    outputLocationFolder: "Другая папка",
+    outputLocationCurrentDesc: "Сохраняет PDF рядом с текущей заметкой.",
+    outputLocationFolderDesc: "Сохраняет PDF в указанной папке Vault и создаёт её при необходимости.",
+    outputFolderPlaceholder: "PDF Exports",
+    pdfNameLabel: "Имя PDF",
+    exportPdfButton: "Экспортировать PDF",
+    cancelButton: "Другие форматы",
+    busyExporting: "Экспорт PDF",
+    busyCancelButton: "Отменить экспорт",
+    busyCancelledTitle: "Экспорт отменён",
+    busyCancelledStatus: "PDF не был сохранён.",
+    busyCompleteTitle: "Экспорт завершён",
+    busyCompleteStatus: "Готово",
+    busyFailedTitle: "Ошибка экспорта PDF",
+    busyElapsedShort: "Прошло {seconds} с",
+    busyElapsedLong: "Прошло {seconds} с. Обработка продолжается; не закрывайте Obsidian.",
+    settingsIntro: "Меню и кнопки сначала открывают параметры PDF. Обычные Markdown-заметки можно экспортировать с выделяемым текстом или как изображение.",
+    settingsGeneralHeading: "Общие",
+    settingsNoteOptionsHeading: "Параметры PDF для обычных заметок",
+    pageSizeDesc: "Длинная мобильная страница удобна для телефона; A4/A5/Letter подходят для печати и архива.",
+    orientationDesc: "Альбомная ориентация меняет местами ширину и высоту.",
+    colorDesc: "Оттенки серого удобны для печати; цветной режим сохраняет цвета темы, ссылок и изображений.",
+    settingsSaveAndShareHeading: "Сохранение и публикация",
+    languageName: "Язык интерфейса",
+    languageDesc: "Автоматически следует языку Obsidian. Кнопки, меню, команды, параметры и сообщения используют выбранный язык.",
+    languageAuto: "Автоматически / как в Obsidian",
+    languageChinese: "Китайский",
+    languageEnglish: "Английский",
+    formatPngLabel: "Изображение PNG",
+    codesTitle: "Угостить кофе",
+    codesSubtitle: "Если инструмент полезен, вы можете поддержать его дальнейшее развитие.",
+    shareFailedNotice: "PDF сохранён, но системное окно публикации не открылось.",
+    fontMissingError: "Шрифт PDF отсутствует и не был загружен с GitHub. Повторите попытку с сетью или поместите NotoSansSC-Regular.gb2312-subset.ttf в папку fonts плагина.",
+    uniqueFileNameError: "Не удалось создать уникальное имя PDF-файла.",
+    excalidrawApiMissingError: "API экспорта Excalidraw не найден. Убедитесь, что плагин Excalidraw включён.",
+    excalidrawExportFailedError: "Изображение Excalidraw слишком велико или экспорт не удался. Уже проверены меньшие разрешения и разбиение на страницы.",
+    excalidrawPngNoImageError: "PNG {scale}x не вернул изображение.",
+    lastErrorLabel: "Последняя ошибка: {error}",
+    noUsableImageError: "Не удалось получить пригодное изображение.",
+    excalidrawPreviewUnavailable: "Предпросмотр Excalidraw недоступен; исходные данные пропущены.",
+    previewNoExportSizeError: "У слоя предпросмотра нет экспортируемого размера.",
+    previewNoContentError: "В предпросмотре нет экспортируемого содержимого.",
+    pdfRuntimeMissingError: "Модуль PDF ещё не загружен.",
+    fontkitMissingError: "Не удалось инициализировать шрифт PDF: fontkit.create недоступен.",
+    imagePdfCanvasError: "Не удалось отрисовать PDF-изображение: canvas недоступен.",
+    imageSliceError: "Не удалось разделить изображение: canvas недоступен."
+  },
+  pt: {
+    ribbonTitle: "Exportar PDF de pré-visualização",
+    commandName: "Mobile PDF Exporter: Exportar PDF de pré-visualização",
+    noMarkdownNotice: "Abra primeiro um ficheiro que possa ser exportado.",
+    optionsTitle: "Opções de exportação para PDF",
+    exportModeName: "Modo de exportação",
+    exportModeDesc: "O texto selecionável é ideal para leitura, pesquisa e cópia; o PDF de imagem mantém o aspeto fixo.",
+    exportModeSelectable: "Texto selecionável",
+    exportModeImage: "PDF de imagem",
+    pageSizeName: "Tamanho da página",
+    pageSizeCurrent: "Tamanho atual da página (predefinição)",
+    pageSizeMobile: "Página longa para telemóvel 104 x 225 mm",
+    orientationName: "Orientação",
+    orientationPortrait: "Vertical",
+    orientationLandscape: "Horizontal",
+    colorName: "Cor",
+    colorOption: "A cores",
+    grayscaleOption: "Escala de cinzentos",
+    marginName: "Margem",
+    contentScaleName: "Escala do conteúdo",
+    imageQualityName: "Qualidade do PDF de imagem",
+    imageQualityDesc: "Afeta apenas PDFs de imagem de notas comuns. Uma qualidade superior cria ficheiros maiores.",
+    imageQualityStandard: "Padrão / ficheiro menor",
+    imageQualityClear: "Nítida / recomendada",
+    imageQualityHigh: "Alta",
+    imageQualityUltra: "Ultra / ficheiro grande",
+    includeTitleName: "Incluir título da nota",
+    headerTextName: "Cabeçalho",
+    headerTextDesc: "Deixe em branco para desativar. Suporta {title}, {page}, {pages} e {date}.",
+    footerTextName: "Rodapé",
+    footerTextDesc: "Deixe em branco para desativar. Suporta {title}, {page}, {pages} e {date}.",
+    openAfterExportName: "Abrir após exportar",
+    openAfterExportDesc: "Abrir o ficheiro gerado quando a exportação terminar.",
+    shareAfterExportName: "Mostrar painel de partilha do telemóvel",
+    rememberLastExportOptionsName: "Usar as últimas opções de exportação",
+    rememberLastExportOptionsDesc: "Ativado por predefinição. Guarda estas opções para a próxima exportação.",
+    outputLocationName: "Local de exportação",
+    outputLocationCurrent: "Pasta da nota atual (predefinição)",
+    outputLocationFolder: "Pasta personalizada",
+    outputLocationCurrentDesc: "Guardar o PDF junto da nota atual.",
+    outputLocationFolderDesc: "Guardar o PDF numa pasta personalizada do cofre, criando-a quando necessário.",
+    outputFolderPlaceholder: "Exportações PDF",
+    pdfNameLabel: "Nome do PDF",
+    exportPdfButton: "Exportar PDF",
+    cancelButton: "Outros formatos",
+    busyExporting: "A exportar PDF",
+    busyCancelButton: "Cancelar exportação",
+    busyCancelledTitle: "Exportação cancelada",
+    busyCancelledStatus: "Nenhum PDF foi guardado.",
+    busyCompleteTitle: "Exportação concluída",
+    busyCompleteStatus: "Concluído",
+    busyFailedTitle: "Falha ao exportar PDF",
+    busyElapsedShort: "Decorreram {seconds} s",
+    busyElapsedLong: "Decorreram {seconds} s. O processamento continua; não feche o Obsidian.",
+    settingsIntro: "Os menus e botões abrem primeiro as opções de exportação para PDF. As notas Markdown comuns podem ser exportadas como PDF de texto selecionável ou PDF de imagem.",
+    settingsGeneralHeading: "Geral",
+    settingsNoteOptionsHeading: "Opções de PDF para notas comuns",
+    pageSizeDesc: "A página longa é adequada para leitura no telemóvel. A4/A5/Letter são úteis para impressão e arquivo.",
+    orientationDesc: "A orientação horizontal troca a largura e a altura da página.",
+    colorDesc: "A escala de cinzentos é útil para impressão; a opção a cores preserva as cores do tema, ligações e imagens.",
+    settingsSaveAndShareHeading: "Guardar e partilhar",
+    languageName: "Idioma da interface",
+    languageDesc: "Automático segue o idioma do Obsidian. Botões, menus, comandos, opções e avisos usam o idioma selecionado.",
+    languageAuto: "Automático / seguir Obsidian",
+    languageChinese: "Chinês",
+    languageEnglish: "Inglês",
+    formatPngLabel: "Imagem PNG",
+    codesTitle: "Pague-me um café",
+    codesSubtitle: "Se esta ferramenta for útil, os donativos ajudam a manter o desenvolvimento.",
+    shareFailedNotice: "O PDF foi guardado, mas o painel de partilha do sistema não abriu.",
+    fontMissingError: "A fonte do PDF está em falta e o plugin não conseguiu transferi-la do GitHub. Tente novamente com ligação à Internet ou coloque NotoSansSC-Regular.gb2312-subset.ttf na pasta fonts do plugin.",
+    uniqueFileNameError: "Não foi possível gerar um nome de ficheiro PDF exclusivo.",
+    excalidrawApiMissingError: "A API de exportação do Excalidraw não foi encontrada. Confirme que o plugin Excalidraw está ativado.",
+    excalidrawExportFailedError: "A imagem do Excalidraw era demasiado grande ou a exportação falhou. Já foram tentadas resoluções inferiores e divisão em páginas.",
+    excalidrawPngNoImageError: "O PNG {scale}x não devolveu uma imagem.",
+    lastErrorLabel: "Último erro: {error}",
+    noUsableImageError: "Não foi produzida nenhuma imagem utilizável.",
+    excalidrawPreviewUnavailable: "A pré-visualização do Excalidraw não está disponível, por isso os dados de origem foram ignorados.",
+    previewNoExportSizeError: "A camada de pré-visualização não tem um tamanho exportável.",
+    previewNoContentError: "A pré-visualização não tem conteúdo exportável.",
+    pdfRuntimeMissingError: "O motor de PDF ainda não foi carregado.",
+    fontkitMissingError: "A inicialização da fonte PDF falhou porque fontkit.create não está disponível.",
+    imagePdfCanvasError: "A renderização do PDF de imagem falhou porque o canvas não está disponível.",
+    imageSliceError: "A divisão da imagem falhou porque o canvas não está disponível."
+  },
+  it: {
+    ribbonTitle: "Esporta PDF di anteprima",
+    commandName: "Mobile PDF Exporter: Esporta PDF di anteprima",
+    noMarkdownNotice: "Apri prima un file esportabile.",
+    optionsTitle: "Opzioni di esportazione PDF",
+    exportModeName: "Modalità di esportazione",
+    exportModeDesc: "Il testo selezionabile è ideale per lettura, ricerca e copia; il PDF immagine mantiene fisso l'aspetto.",
+    exportModeSelectable: "Testo selezionabile",
+    exportModeImage: "PDF immagine",
+    pageSizeName: "Dimensione pagina",
+    pageSizeCurrent: "Dimensione pagina attuale (predefinita)",
+    pageSizeMobile: "Pagina lunga per dispositivi mobili 104 x 225 mm",
+    orientationName: "Orientamento",
+    orientationPortrait: "Verticale",
+    orientationLandscape: "Orizzontale",
+    colorName: "Colore",
+    colorOption: "Colore",
+    grayscaleOption: "Scala di grigi",
+    marginName: "Margine",
+    contentScaleName: "Scala contenuto",
+    imageQualityName: "Qualità PDF immagine",
+    imageQualityDesc: "Influisce solo sui PDF immagine delle note normali. Una qualità maggiore crea file più grandi.",
+    imageQualityStandard: "Standard / file più piccolo",
+    imageQualityClear: "Nitida / consigliata",
+    imageQualityHigh: "Alta",
+    imageQualityUltra: "Ultra / file grande",
+    includeTitleName: "Includi titolo della nota",
+    headerTextName: "Intestazione",
+    headerTextDesc: "Lascia vuoto per disattivare. Supporta {title}, {page}, {pages} e {date}.",
+    footerTextName: "Piè di pagina",
+    footerTextDesc: "Lascia vuoto per disattivare. Supporta {title}, {page}, {pages} e {date}.",
+    openAfterExportName: "Apri dopo l'esportazione",
+    openAfterExportDesc: "Apri il file generato al termine dell'esportazione.",
+    shareAfterExportName: "Mostra pannello di condivisione mobile",
+    rememberLastExportOptionsName: "Usa le ultime opzioni di esportazione",
+    rememberLastExportOptionsDesc: "Attivo per impostazione predefinita. Salva queste opzioni per la prossima esportazione.",
+    outputLocationName: "Posizione di esportazione",
+    outputLocationCurrent: "Cartella della nota attuale (predefinita)",
+    outputLocationFolder: "Cartella personalizzata",
+    outputLocationCurrentDesc: "Salva il PDF accanto alla nota attuale.",
+    outputLocationFolderDesc: "Salva il PDF in una cartella personalizzata del vault, creandola se necessario.",
+    outputFolderPlaceholder: "Esportazioni PDF",
+    pdfNameLabel: "Nome PDF",
+    exportPdfButton: "Esporta PDF",
+    cancelButton: "Altri formati",
+    busyExporting: "Esportazione PDF",
+    busyCancelButton: "Annulla esportazione",
+    busyCancelledTitle: "Esportazione annullata",
+    busyCancelledStatus: "Nessun PDF è stato salvato.",
+    busyCompleteTitle: "Esportazione completata",
+    busyCompleteStatus: "Completato",
+    busyFailedTitle: "Esportazione PDF non riuscita",
+    busyElapsedShort: "Trascorsi {seconds} s",
+    busyElapsedLong: "Trascorsi {seconds} s. Elaborazione in corso; non chiudere Obsidian.",
+    settingsIntro: "Menu e pulsanti aprono prima le opzioni di esportazione PDF. Le normali note Markdown possono essere esportate come PDF con testo selezionabile o PDF immagine.",
+    settingsGeneralHeading: "Generali",
+    settingsNoteOptionsHeading: "Opzioni PDF per note normali",
+    pageSizeDesc: "La pagina lunga è adatta alla lettura su telefono. A4/A5/Letter sono utili per stampa e archiviazione.",
+    orientationDesc: "L'orientamento orizzontale scambia larghezza e altezza della pagina.",
+    colorDesc: "La scala di grigi è utile per la stampa; il colore conserva i colori del tema, dei collegamenti e delle immagini.",
+    settingsSaveAndShareHeading: "Salvataggio e condivisione",
+    languageName: "Lingua dell'interfaccia",
+    languageDesc: "Automatico segue la lingua di Obsidian. Pulsanti, menu, comandi, opzioni e messaggi usano la lingua selezionata.",
+    languageAuto: "Automatico / segui Obsidian",
+    languageChinese: "Cinese",
+    languageEnglish: "Inglese",
+    formatPngLabel: "Immagine PNG",
+    codesTitle: "Offrimi un caffè",
+    codesSubtitle: "Se questo strumento ti è utile, le donazioni sostengono la manutenzione continua.",
+    shareFailedNotice: "Il PDF è stato salvato, ma il pannello di condivisione del sistema non si è aperto.",
+    fontMissingError: "Il carattere PDF manca e il plugin non è riuscito a scaricarlo da GitHub. Riprova online oppure inserisci NotoSansSC-Regular.gb2312-subset.ttf nella cartella fonts del plugin.",
+    uniqueFileNameError: "Impossibile generare un nome file PDF univoco.",
+    excalidrawApiMissingError: "L'API di esportazione di Excalidraw non è stata trovata. Verifica che il plugin Excalidraw sia attivo.",
+    excalidrawExportFailedError: "L'immagine Excalidraw era troppo grande o l'esportazione non è riuscita. Sono già state provate risoluzioni inferiori e la suddivisione in pagine.",
+    excalidrawPngNoImageError: "PNG {scale}x non ha restituito alcuna immagine.",
+    lastErrorLabel: "Ultimo errore: {error}",
+    noUsableImageError: "Non è stata prodotta alcuna immagine utilizzabile.",
+    excalidrawPreviewUnavailable: "L'anteprima di Excalidraw non è disponibile, quindi i dati sorgente sono stati ignorati.",
+    previewNoExportSizeError: "Il livello di anteprima non ha dimensioni esportabili.",
+    previewNoContentError: "L'anteprima non contiene contenuti esportabili.",
+    pdfRuntimeMissingError: "Il motore PDF non è ancora stato caricato.",
+    fontkitMissingError: "Inizializzazione del carattere PDF non riuscita perché fontkit.create non è disponibile.",
+    imagePdfCanvasError: "Rendering del PDF immagine non riuscito perché canvas non è disponibile.",
+    imageSliceError: "Suddivisione dell'immagine non riuscita perché canvas non è disponibile."
+  },
+  ar: {
+    ribbonTitle: "تصدير ملف PDF للمعاينة",
+    commandName: "Mobile PDF Exporter: تصدير ملف PDF للمعاينة",
+    noMarkdownNotice: "افتح أولاً ملفاً قابلاً للتصدير.",
+    optionsTitle: "خيارات تصدير PDF",
+    exportModeName: "وضع التصدير",
+    exportModeDesc: "النص القابل للتحديد مناسب للقراءة والبحث والنسخ، بينما يحافظ PDF الصوري على التخطيط المرئي.",
+    exportModeSelectable: "نص قابل للتحديد",
+    exportModeImage: "PDF صوري",
+    pageSizeName: "حجم الصفحة",
+    pageSizeCurrent: "حجم الصفحة الحالي (الافتراضي)",
+    pageSizeMobile: "صفحة طويلة للهاتف 104 × 225 مم",
+    orientationName: "الاتجاه",
+    orientationPortrait: "عمودي",
+    orientationLandscape: "أفقي",
+    colorName: "الألوان",
+    colorOption: "ملون",
+    grayscaleOption: "تدرج رمادي",
+    marginName: "الهامش",
+    contentScaleName: "مقياس المحتوى",
+    imageQualityName: "جودة PDF الصوري",
+    imageQualityDesc: "يؤثر فقط في ملفات PDF الصورية للملاحظات العادية. الجودة الأعلى تنشئ ملفات أكبر.",
+    imageQualityStandard: "قياسية / ملف أصغر",
+    imageQualityClear: "واضحة / موصى بها",
+    imageQualityHigh: "عالية",
+    imageQualityUltra: "فائقة / ملف كبير",
+    includeTitleName: "تضمين عنوان الملاحظة",
+    headerTextName: "رأس الصفحة",
+    headerTextDesc: "اتركه فارغاً للتعطيل. يدعم {title} و{page} و{pages} و{date}.",
+    footerTextName: "تذييل الصفحة",
+    footerTextDesc: "اتركه فارغاً للتعطيل. يدعم {title} و{page} و{pages} و{date}.",
+    openAfterExportName: "فتح بعد التصدير",
+    openAfterExportDesc: "افتح الملف الناتج عند اكتمال التصدير.",
+    shareAfterExportName: "إظهار لوحة المشاركة على الهاتف",
+    rememberLastExportOptionsName: "استخدام آخر خيارات التصدير",
+    rememberLastExportOptionsDesc: "مفعّل افتراضياً. يحفظ خيارات هذا التصدير للاستخدام في المرة القادمة.",
+    outputLocationName: "موقع التصدير",
+    outputLocationCurrent: "مجلد الملاحظة الحالية (الافتراضي)",
+    outputLocationFolder: "مجلد مخصص",
+    outputLocationCurrentDesc: "احفظ ملف PDF بجوار الملاحظة الحالية.",
+    outputLocationFolderDesc: "احفظ ملف PDF في مجلد مخصص داخل الخزنة، مع إنشائه عند الحاجة.",
+    outputFolderPlaceholder: "صادرات PDF",
+    pdfNameLabel: "اسم ملف PDF",
+    exportPdfButton: "تصدير PDF",
+    cancelButton: "تنسيقات أخرى",
+    busyExporting: "جارٍ تصدير PDF",
+    busyCancelButton: "إلغاء التصدير",
+    busyCancelledTitle: "تم إلغاء التصدير",
+    busyCancelledStatus: "لم يتم حفظ ملف PDF.",
+    busyCompleteTitle: "اكتمل التصدير",
+    busyCompleteStatus: "تم",
+    busyFailedTitle: "فشل تصدير PDF",
+    busyElapsedShort: "انقضت {seconds} ث",
+    busyElapsedLong: "انقضت {seconds} ث. ما زالت المعالجة جارية؛ لا تغلق Obsidian.",
+    settingsIntro: "تفتح القوائم والأزرار خيارات تصدير PDF أولاً. يمكن تصدير ملاحظات Markdown العادية كملفات PDF بنص قابل للتحديد أو كملفات PDF صورية.",
+    settingsGeneralHeading: "عام",
+    settingsNoteOptionsHeading: "خيارات PDF للملاحظات العادية",
+    pageSizeDesc: "الصفحة الطويلة مناسبة للقراءة على الهاتف. أحجام A4/A5/Letter مناسبة للطباعة والأرشفة.",
+    orientationDesc: "يبدّل الاتجاه الأفقي عرض الصفحة وارتفاعها.",
+    colorDesc: "التدرج الرمادي مناسب للطباعة، بينما يحافظ الوضع الملون على ألوان السمة والروابط والصور.",
+    settingsSaveAndShareHeading: "الحفظ والمشاركة",
+    languageName: "لغة الواجهة",
+    languageDesc: "يتبع الوضع التلقائي لغة Obsidian. تستخدم الأزرار والقوائم والأوامر والخيارات والتنبيهات اللغة المحددة.",
+    languageAuto: "تلقائي / اتباع Obsidian",
+    languageChinese: "الصينية",
+    languageEnglish: "الإنجليزية",
+    formatPngLabel: "صورة PNG",
+    codesTitle: "اشترِ لي قهوة",
+    codesSubtitle: "إذا كانت هذه الأداة مفيدة، فالتبرعات تدعم استمرار صيانتها.",
+    shareFailedNotice: "تم حفظ ملف PDF، لكن لوحة مشاركة النظام لم تفتح.",
+    fontMissingError: "خط PDF مفقود وتعذر على الإضافة تنزيله من GitHub. أعد المحاولة مع الاتصال بالإنترنت أو ضع NotoSansSC-Regular.gb2312-subset.ttf في مجلد fonts الخاص بالإضافة.",
+    uniqueFileNameError: "تعذر إنشاء اسم فريد لملف PDF.",
+    excalidrawApiMissingError: "لم يتم العثور على واجهة تصدير Excalidraw. تأكد من تفعيل إضافة Excalidraw.",
+    excalidrawExportFailedError: "كانت صورة Excalidraw كبيرة جداً أو فشل التصدير. تمت بالفعل تجربة دقات أقل وتقسيم الصفحات.",
+    excalidrawPngNoImageError: "لم يُرجع PNG بمقياس {scale}x صورة.",
+    lastErrorLabel: "آخر خطأ: {error}",
+    noUsableImageError: "لم يتم إنشاء صورة قابلة للاستخدام.",
+    excalidrawPreviewUnavailable: "معاينة Excalidraw غير متاحة، لذلك تم تخطي بيانات المصدر.",
+    previewNoExportSizeError: "طبقة المعاينة ليس لها حجم قابل للتصدير.",
+    previewNoContentError: "لا تحتوي المعاينة على محتوى قابل للتصدير.",
+    pdfRuntimeMissingError: "لم يتم تحميل محرك PDF بعد.",
+    fontkitMissingError: "فشلت تهيئة خط PDF لأن fontkit.create غير متاح.",
+    imagePdfCanvasError: "فشل عرض PDF الصوري لأن canvas غير متاح.",
+    imageSliceError: "فشل تقسيم الصورة لأن canvas غير متاح."
+  },
+  hi: {
+    ribbonTitle: "पूर्वावलोकन PDF निर्यात करें",
+    commandName: "Mobile PDF Exporter: पूर्वावलोकन PDF निर्यात करें",
+    noMarkdownNotice: "पहले कोई निर्यात योग्य फ़ाइल खोलें।",
+    optionsTitle: "PDF निर्यात विकल्प",
+    exportModeName: "निर्यात मोड",
+    exportModeDesc: "चयन योग्य पाठ पढ़ने, खोजने और कॉपी करने के लिए उपयुक्त है; चित्र PDF दृश्य लेआउट को स्थिर रखता है।",
+    exportModeSelectable: "चयन योग्य पाठ",
+    exportModeImage: "चित्र PDF",
+    pageSizeName: "पृष्ठ आकार",
+    pageSizeCurrent: "वर्तमान पृष्ठ आकार (डिफ़ॉल्ट)",
+    pageSizeMobile: "मोबाइल लंबा पृष्ठ 104 x 225 मिमी",
+    orientationName: "अभिमुखता",
+    orientationPortrait: "लंबवत",
+    orientationLandscape: "क्षैतिज",
+    colorName: "रंग",
+    colorOption: "रंगीन",
+    grayscaleOption: "ग्रेस्केल",
+    marginName: "हाशिया",
+    contentScaleName: "सामग्री पैमाना",
+    imageQualityName: "चित्र PDF गुणवत्ता",
+    imageQualityDesc: "केवल सामान्य नोट के चित्र PDF को प्रभावित करता है। अधिक गुणवत्ता से बड़ी फ़ाइल बनती है।",
+    imageQualityStandard: "मानक / छोटी फ़ाइल",
+    imageQualityClear: "स्पष्ट / अनुशंसित",
+    imageQualityHigh: "उच्च",
+    imageQualityUltra: "अल्ट्रा / बड़ी फ़ाइल",
+    includeTitleName: "नोट का शीर्षक शामिल करें",
+    headerTextName: "शीर्षलेख",
+    headerTextDesc: "अक्षम करने के लिए खाली छोड़ें। {title}, {page}, {pages} और {date} समर्थित हैं।",
+    footerTextName: "पादलेख",
+    footerTextDesc: "अक्षम करने के लिए खाली छोड़ें। {title}, {page}, {pages} और {date} समर्थित हैं।",
+    openAfterExportName: "निर्यात के बाद खोलें",
+    openAfterExportDesc: "निर्यात पूरा होने पर बनी फ़ाइल खोलें।",
+    shareAfterExportName: "मोबाइल शेयर पैनल दिखाएँ",
+    rememberLastExportOptionsName: "पिछले निर्यात विकल्प उपयोग करें",
+    rememberLastExportOptionsDesc: "डिफ़ॉल्ट रूप से चालू। अगली बार के लिए इस निर्यात के विकल्प सहेजता है।",
+    outputLocationName: "निर्यात स्थान",
+    outputLocationCurrent: "वर्तमान नोट फ़ोल्डर (डिफ़ॉल्ट)",
+    outputLocationFolder: "कस्टम फ़ोल्डर",
+    outputLocationCurrentDesc: "PDF को वर्तमान नोट के पास सहेजें।",
+    outputLocationFolderDesc: "PDF को वॉल्ट के कस्टम फ़ोल्डर में सहेजें और आवश्यकता होने पर उसे बनाएँ।",
+    outputFolderPlaceholder: "PDF निर्यात",
+    pdfNameLabel: "PDF नाम",
+    exportPdfButton: "PDF निर्यात करें",
+    cancelButton: "अन्य प्रारूप",
+    busyExporting: "PDF निर्यात हो रहा है",
+    busyCancelButton: "निर्यात रद्द करें",
+    busyCancelledTitle: "निर्यात रद्द किया गया",
+    busyCancelledStatus: "कोई PDF सहेजा नहीं गया।",
+    busyCompleteTitle: "निर्यात पूरा हुआ",
+    busyCompleteStatus: "पूरा हुआ",
+    busyFailedTitle: "PDF निर्यात विफल",
+    busyElapsedShort: "{seconds} सेकंड बीते",
+    busyElapsedLong: "{seconds} सेकंड बीते। प्रक्रिया जारी है; Obsidian बंद न करें।",
+    settingsIntro: "मेनू और बटन पहले PDF निर्यात विकल्प खोलते हैं। सामान्य Markdown नोट चयन योग्य पाठ PDF या चित्र PDF के रूप में निर्यात किए जा सकते हैं।",
+    settingsGeneralHeading: "सामान्य",
+    settingsNoteOptionsHeading: "सामान्य नोट PDF विकल्प",
+    pageSizeDesc: "लंबा मोबाइल पृष्ठ फ़ोन पर पढ़ने के लिए उपयुक्त है। A4/A5/Letter मुद्रण और संग्रह के लिए उपयोगी हैं।",
+    orientationDesc: "क्षैतिज अभिमुखता पृष्ठ की चौड़ाई और ऊँचाई बदल देती है।",
+    colorDesc: "ग्रेस्केल मुद्रण के लिए उपयोगी है; रंगीन मोड थीम, लिंक और चित्रों के रंग बनाए रखता है।",
+    settingsSaveAndShareHeading: "सहेजना और साझा करना",
+    languageName: "इंटरफ़ेस भाषा",
+    languageDesc: "स्वचालित विकल्प Obsidian की भाषा का अनुसरण करता है। बटन, मेनू, कमांड, विकल्प और संदेश चुनी हुई भाषा उपयोग करते हैं।",
+    languageAuto: "स्वचालित / Obsidian का अनुसरण करें",
+    languageChinese: "चीनी",
+    languageEnglish: "अंग्रेज़ी",
+    formatPngLabel: "PNG चित्र",
+    codesTitle: "मुझे एक कॉफ़ी दिलाएँ",
+    codesSubtitle: "यदि यह उपकरण उपयोगी है, तो सहयोग इसके निरंतर रखरखाव में मदद करता है।",
+    shareFailedNotice: "PDF सहेजा गया, लेकिन सिस्टम शेयर पैनल नहीं खुला।",
+    fontMissingError: "PDF फ़ॉन्ट उपलब्ध नहीं है और प्लगइन उसे GitHub से डाउनलोड नहीं कर सका। इंटरनेट के साथ फिर प्रयास करें या NotoSansSC-Regular.gb2312-subset.ttf को प्लगइन के fonts फ़ोल्डर में रखें।",
+    uniqueFileNameError: "एक अद्वितीय PDF फ़ाइल नाम नहीं बनाया जा सका।",
+    excalidrawApiMissingError: "Excalidraw निर्यात API नहीं मिला। सुनिश्चित करें कि Excalidraw प्लगइन चालू है।",
+    excalidrawExportFailedError: "Excalidraw चित्र बहुत बड़ा था या निर्यात विफल हुआ। कम रिज़ॉल्यूशन और पृष्ठ विभाजन पहले ही आज़माए जा चुके हैं।",
+    excalidrawPngNoImageError: "PNG {scale}x ने कोई चित्र नहीं लौटाया।",
+    lastErrorLabel: "अंतिम त्रुटि: {error}",
+    noUsableImageError: "कोई उपयोग योग्य चित्र नहीं बना।",
+    excalidrawPreviewUnavailable: "Excalidraw पूर्वावलोकन उपलब्ध नहीं है, इसलिए स्रोत डेटा छोड़ दिया गया।",
+    previewNoExportSizeError: "पूर्वावलोकन परत का कोई निर्यात योग्य आकार नहीं है।",
+    previewNoContentError: "पूर्वावलोकन में निर्यात योग्य सामग्री नहीं है।",
+    pdfRuntimeMissingError: "PDF इंजन अभी लोड नहीं हुआ है।",
+    fontkitMissingError: "PDF फ़ॉन्ट आरंभ नहीं हो सका क्योंकि fontkit.create उपलब्ध नहीं है।",
+    imagePdfCanvasError: "चित्र PDF रेंडर नहीं हो सका क्योंकि canvas उपलब्ध नहीं है।",
+    imageSliceError: "चित्र विभाजित नहीं हो सका क्योंकि canvas उपलब्ध नहीं है।"
+  },
+  id: {
+    ribbonTitle: "Ekspor PDF pratinjau",
+    commandName: "Mobile PDF Exporter: Ekspor PDF pratinjau",
+    noMarkdownNotice: "Buka dahulu file yang dapat diekspor.",
+    optionsTitle: "Opsi ekspor PDF",
+    exportModeName: "Mode ekspor",
+    exportModeDesc: "Teks yang dapat dipilih cocok untuk membaca, mencari, dan menyalin; PDF gambar mempertahankan tata letak visual.",
+    exportModeSelectable: "Teks dapat dipilih",
+    exportModeImage: "PDF gambar",
+    pageSizeName: "Ukuran halaman",
+    pageSizeCurrent: "Ukuran halaman saat ini (bawaan)",
+    pageSizeMobile: "Halaman panjang seluler 104 x 225 mm",
+    orientationName: "Orientasi",
+    orientationPortrait: "Potret",
+    orientationLandscape: "Lanskap",
+    colorName: "Warna",
+    colorOption: "Berwarna",
+    grayscaleOption: "Skala abu-abu",
+    marginName: "Margin",
+    contentScaleName: "Skala konten",
+    imageQualityName: "Kualitas PDF gambar",
+    imageQualityDesc: "Hanya memengaruhi PDF gambar untuk catatan biasa. Kualitas lebih tinggi menghasilkan file lebih besar.",
+    imageQualityStandard: "Standar / file lebih kecil",
+    imageQualityClear: "Jernih / disarankan",
+    imageQualityHigh: "Tinggi",
+    imageQualityUltra: "Ultra / file besar",
+    includeTitleName: "Sertakan judul catatan",
+    headerTextName: "Header",
+    headerTextDesc: "Kosongkan untuk menonaktifkan. Mendukung {title}, {page}, {pages}, dan {date}.",
+    footerTextName: "Footer",
+    footerTextDesc: "Kosongkan untuk menonaktifkan. Mendukung {title}, {page}, {pages}, dan {date}.",
+    openAfterExportName: "Buka setelah ekspor",
+    openAfterExportDesc: "Buka file yang dihasilkan setelah ekspor selesai.",
+    shareAfterExportName: "Tampilkan panel berbagi seluler",
+    rememberLastExportOptionsName: "Gunakan opsi ekspor terakhir",
+    rememberLastExportOptionsDesc: "Aktif secara bawaan. Menyimpan opsi ekspor ini untuk penggunaan berikutnya.",
+    outputLocationName: "Lokasi ekspor",
+    outputLocationCurrent: "Folder catatan saat ini (bawaan)",
+    outputLocationFolder: "Folder khusus",
+    outputLocationCurrentDesc: "Simpan PDF di samping catatan saat ini.",
+    outputLocationFolderDesc: "Simpan PDF ke folder khusus di vault dan buat folder jika diperlukan.",
+    outputFolderPlaceholder: "Ekspor PDF",
+    pdfNameLabel: "Nama PDF",
+    exportPdfButton: "Ekspor PDF",
+    cancelButton: "Format lain",
+    busyExporting: "Mengekspor PDF",
+    busyCancelButton: "Batalkan ekspor",
+    busyCancelledTitle: "Ekspor dibatalkan",
+    busyCancelledStatus: "Tidak ada PDF yang disimpan.",
+    busyCompleteTitle: "Ekspor selesai",
+    busyCompleteStatus: "Selesai",
+    busyFailedTitle: "Ekspor PDF gagal",
+    busyElapsedShort: "{seconds} dtk berlalu",
+    busyElapsedLong: "{seconds} dtk berlalu. Pemrosesan masih berjalan; jangan tutup Obsidian.",
+    settingsIntro: "Menu dan tombol akan membuka opsi ekspor PDF terlebih dahulu. Catatan Markdown biasa dapat diekspor sebagai PDF teks yang dapat dipilih atau PDF gambar.",
+    settingsGeneralHeading: "Umum",
+    settingsNoteOptionsHeading: "Opsi PDF catatan biasa",
+    pageSizeDesc: "Halaman panjang cocok untuk membaca di ponsel. A4/A5/Letter berguna untuk mencetak dan mengarsipkan.",
+    orientationDesc: "Orientasi lanskap menukar lebar dan tinggi halaman.",
+    colorDesc: "Skala abu-abu cocok untuk mencetak; warna mempertahankan warna tema, tautan, dan gambar.",
+    settingsSaveAndShareHeading: "Simpan dan bagikan",
+    languageName: "Bahasa antarmuka",
+    languageDesc: "Otomatis mengikuti bahasa Obsidian. Tombol, menu, perintah, opsi, dan pesan menggunakan bahasa yang dipilih.",
+    languageAuto: "Otomatis / ikuti Obsidian",
+    languageChinese: "Bahasa Tionghoa",
+    languageEnglish: "Bahasa Inggris",
+    formatPngLabel: "Gambar PNG",
+    codesTitle: "Traktir saya kopi",
+    codesSubtitle: "Jika alat ini membantu, dukungan Anda membantu pemeliharaan berkelanjutan.",
+    shareFailedNotice: "PDF telah disimpan, tetapi panel berbagi sistem tidak terbuka.",
+    fontMissingError: "Font PDF tidak tersedia dan plugin tidak dapat mengunduhnya dari GitHub. Coba lagi saat tersambung ke internet atau letakkan NotoSansSC-Regular.gb2312-subset.ttf di folder fonts plugin.",
+    uniqueFileNameError: "Tidak dapat membuat nama file PDF yang unik.",
+    excalidrawApiMissingError: "API ekspor Excalidraw tidak ditemukan. Pastikan plugin Excalidraw aktif.",
+    excalidrawExportFailedError: "Gambar Excalidraw terlalu besar atau ekspor gagal. Resolusi lebih rendah dan pemisahan halaman sudah dicoba.",
+    excalidrawPngNoImageError: "PNG {scale}x tidak menghasilkan gambar.",
+    lastErrorLabel: "Kesalahan terakhir: {error}",
+    noUsableImageError: "Tidak ada gambar yang dapat digunakan.",
+    excalidrawPreviewUnavailable: "Pratinjau Excalidraw tidak tersedia, sehingga data sumber dilewati.",
+    previewNoExportSizeError: "Lapisan pratinjau tidak memiliki ukuran yang dapat diekspor.",
+    previewNoContentError: "Pratinjau tidak memiliki konten yang dapat diekspor.",
+    pdfRuntimeMissingError: "Mesin PDF belum dimuat.",
+    fontkitMissingError: "Inisialisasi font PDF gagal karena fontkit.create tidak tersedia.",
+    imagePdfCanvasError: "Perenderan PDF gambar gagal karena canvas tidak tersedia.",
+    imageSliceError: "Pemisahan gambar gagal karena canvas tidak tersedia."
+  },
+  tr: {
+    ribbonTitle: "Önizleme PDF'sini dışa aktar",
+    commandName: "Mobile PDF Exporter: Önizleme PDF'sini dışa aktar",
+    noMarkdownNotice: "Önce dışa aktarılabilir bir dosya açın.",
+    optionsTitle: "PDF dışa aktarma seçenekleri",
+    exportModeName: "Dışa aktarma modu",
+    exportModeDesc: "Seçilebilir metin okuma, arama ve kopyalama için uygundur; görüntü PDF görsel düzeni sabit tutar.",
+    exportModeSelectable: "Seçilebilir metin",
+    exportModeImage: "Görüntü PDF",
+    pageSizeName: "Sayfa boyutu",
+    pageSizeCurrent: "Geçerli sayfa boyutu (varsayılan)",
+    pageSizeMobile: "Mobil uzun sayfa 104 x 225 mm",
+    orientationName: "Yönlendirme",
+    orientationPortrait: "Dikey",
+    orientationLandscape: "Yatay",
+    colorName: "Renk",
+    colorOption: "Renkli",
+    grayscaleOption: "Gri tonlama",
+    marginName: "Kenar boşluğu",
+    contentScaleName: "İçerik ölçeği",
+    imageQualityName: "Görüntü PDF kalitesi",
+    imageQualityDesc: "Yalnızca normal notların görüntü PDF'lerini etkiler. Daha yüksek kalite daha büyük dosya oluşturur.",
+    imageQualityStandard: "Standart / daha küçük dosya",
+    imageQualityClear: "Net / önerilen",
+    imageQualityHigh: "Yüksek",
+    imageQualityUltra: "Ultra / büyük dosya",
+    includeTitleName: "Not başlığını dahil et",
+    headerTextName: "Üst bilgi",
+    headerTextDesc: "Devre dışı bırakmak için boş bırakın. {title}, {page}, {pages} ve {date} desteklenir.",
+    footerTextName: "Alt bilgi",
+    footerTextDesc: "Devre dışı bırakmak için boş bırakın. {title}, {page}, {pages} ve {date} desteklenir.",
+    openAfterExportName: "Dışa aktarmadan sonra aç",
+    openAfterExportDesc: "Dışa aktarma tamamlandığında oluşturulan dosyayı açın.",
+    shareAfterExportName: "Mobil paylaşım panelini göster",
+    rememberLastExportOptionsName: "Son dışa aktarma seçeneklerini kullan",
+    rememberLastExportOptionsDesc: "Varsayılan olarak etkin. Bu dışa aktarmanın seçeneklerini sonraki kullanım için kaydeder.",
+    outputLocationName: "Dışa aktarma konumu",
+    outputLocationCurrent: "Geçerli not klasörü (varsayılan)",
+    outputLocationFolder: "Özel klasör",
+    outputLocationCurrentDesc: "PDF'yi geçerli notun yanına kaydedin.",
+    outputLocationFolderDesc: "PDF'yi kasadaki özel bir klasöre kaydedin ve gerekirse klasörü oluşturun.",
+    outputFolderPlaceholder: "PDF Dışa Aktarımları",
+    pdfNameLabel: "PDF adı",
+    exportPdfButton: "PDF'yi dışa aktar",
+    cancelButton: "Diğer biçimler",
+    busyExporting: "PDF dışa aktarılıyor",
+    busyCancelButton: "Dışa aktarmayı iptal et",
+    busyCancelledTitle: "Dışa aktarma iptal edildi",
+    busyCancelledStatus: "PDF kaydedilmedi.",
+    busyCompleteTitle: "Dışa aktarma tamamlandı",
+    busyCompleteStatus: "Tamamlandı",
+    busyFailedTitle: "PDF dışa aktarma başarısız",
+    busyElapsedShort: "{seconds} sn geçti",
+    busyElapsedLong: "{seconds} sn geçti. İşlem sürüyor; Obsidian'ı kapatmayın.",
+    settingsIntro: "Menüler ve düğmeler önce PDF dışa aktarma seçeneklerini açar. Normal Markdown notları seçilebilir metin PDF'si veya görüntü PDF'si olarak dışa aktarılabilir.",
+    settingsGeneralHeading: "Genel",
+    settingsNoteOptionsHeading: "Normal not PDF seçenekleri",
+    pageSizeDesc: "Mobil uzun sayfa telefonda okumaya uygundur. A4/A5/Letter yazdırma ve arşivleme için kullanışlıdır.",
+    orientationDesc: "Yatay yönlendirme sayfa genişliği ile yüksekliğini değiştirir.",
+    colorDesc: "Gri tonlama yazdırma için kullanışlıdır; renkli mod tema, bağlantı ve görüntü renklerini korur.",
+    settingsSaveAndShareHeading: "Kaydetme ve paylaşma",
+    languageName: "Arayüz dili",
+    languageDesc: "Otomatik seçenek Obsidian dilini izler. Düğmeler, menüler, komutlar, seçenekler ve iletiler seçilen dili kullanır.",
+    languageAuto: "Otomatik / Obsidian'ı izle",
+    languageChinese: "Çince",
+    languageEnglish: "İngilizce",
+    formatPngLabel: "PNG görüntüsü",
+    codesTitle: "Bana bir kahve ısmarla",
+    codesSubtitle: "Bu araç işinize yarıyorsa desteğiniz bakımın sürmesine yardımcı olur.",
+    shareFailedNotice: "PDF kaydedildi, ancak sistem paylaşım paneli açılmadı.",
+    fontMissingError: "PDF yazı tipi eksik ve eklenti bunu GitHub'dan indiremedi. Çevrimiçi olarak yeniden deneyin veya NotoSansSC-Regular.gb2312-subset.ttf dosyasını eklentinin fonts klasörüne yerleştirin.",
+    uniqueFileNameError: "Benzersiz bir PDF dosya adı oluşturulamadı.",
+    excalidrawApiMissingError: "Excalidraw dışa aktarma API'si bulunamadı. Excalidraw eklentisinin etkin olduğundan emin olun.",
+    excalidrawExportFailedError: "Excalidraw görüntüsü çok büyüktü veya dışa aktarma başarısız oldu. Daha düşük çözünürlükler ve sayfa bölme zaten denendi.",
+    excalidrawPngNoImageError: "PNG {scale}x görüntü döndürmedi.",
+    lastErrorLabel: "Son hata: {error}",
+    noUsableImageError: "Kullanılabilir bir görüntü oluşturulamadı.",
+    excalidrawPreviewUnavailable: "Excalidraw önizlemesi kullanılamadığı için kaynak veriler atlandı.",
+    previewNoExportSizeError: "Önizleme katmanının dışa aktarılabilir boyutu yok.",
+    previewNoContentError: "Önizlemede dışa aktarılabilir içerik yok.",
+    pdfRuntimeMissingError: "PDF motoru henüz yüklenmedi.",
+    fontkitMissingError: "fontkit.create kullanılamadığı için PDF yazı tipi başlatılamadı.",
+    imagePdfCanvasError: "canvas kullanılamadığı için görüntü PDF oluşturulamadı.",
+    imageSliceError: "canvas kullanılamadığı için görüntü dilimlenemedi."
+  },
+  vi: {
+    ribbonTitle: "Xuất PDF xem trước",
+    commandName: "Mobile PDF Exporter: Xuất PDF xem trước",
+    noMarkdownNotice: "Hãy mở một tệp có thể xuất trước.",
+    optionsTitle: "Tùy chọn xuất PDF",
+    exportModeName: "Chế độ xuất",
+    exportModeDesc: "Văn bản có thể chọn phù hợp để đọc, tìm kiếm và sao chép; PDF dạng ảnh giữ nguyên bố cục hiển thị.",
+    exportModeSelectable: "Văn bản có thể chọn",
+    exportModeImage: "PDF dạng ảnh",
+    pageSizeName: "Kích thước trang",
+    pageSizeCurrent: "Kích thước trang hiện tại (mặc định)",
+    pageSizeMobile: "Trang dài cho di động 104 x 225 mm",
+    orientationName: "Hướng trang",
+    orientationPortrait: "Dọc",
+    orientationLandscape: "Ngang",
+    colorName: "Màu sắc",
+    colorOption: "Màu",
+    grayscaleOption: "Thang xám",
+    marginName: "Lề",
+    contentScaleName: "Tỷ lệ nội dung",
+    imageQualityName: "Chất lượng PDF dạng ảnh",
+    imageQualityDesc: "Chỉ ảnh hưởng đến PDF dạng ảnh của ghi chú thông thường. Chất lượng cao hơn tạo tệp lớn hơn.",
+    imageQualityStandard: "Tiêu chuẩn / tệp nhỏ hơn",
+    imageQualityClear: "Rõ / khuyến nghị",
+    imageQualityHigh: "Cao",
+    imageQualityUltra: "Siêu cao / tệp lớn",
+    includeTitleName: "Bao gồm tiêu đề ghi chú",
+    headerTextName: "Đầu trang",
+    headerTextDesc: "Để trống để tắt. Hỗ trợ {title}, {page}, {pages} và {date}.",
+    footerTextName: "Chân trang",
+    footerTextDesc: "Để trống để tắt. Hỗ trợ {title}, {page}, {pages} và {date}.",
+    openAfterExportName: "Mở sau khi xuất",
+    openAfterExportDesc: "Mở tệp đã tạo khi quá trình xuất hoàn tất.",
+    shareAfterExportName: "Hiện bảng chia sẻ trên di động",
+    rememberLastExportOptionsName: "Dùng tùy chọn xuất gần nhất",
+    rememberLastExportOptionsDesc: "Bật theo mặc định. Lưu các tùy chọn của lần xuất này để dùng lần sau.",
+    outputLocationName: "Vị trí xuất",
+    outputLocationCurrent: "Thư mục ghi chú hiện tại (mặc định)",
+    outputLocationFolder: "Thư mục tùy chỉnh",
+    outputLocationCurrentDesc: "Lưu PDF bên cạnh ghi chú hiện tại.",
+    outputLocationFolderDesc: "Lưu PDF vào thư mục tùy chỉnh trong kho và tạo thư mục khi cần.",
+    outputFolderPlaceholder: "Tệp PDF đã xuất",
+    pdfNameLabel: "Tên PDF",
+    exportPdfButton: "Xuất PDF",
+    cancelButton: "Định dạng khác",
+    busyExporting: "Đang xuất PDF",
+    busyCancelButton: "Hủy xuất",
+    busyCancelledTitle: "Đã hủy xuất",
+    busyCancelledStatus: "Không có PDF nào được lưu.",
+    busyCompleteTitle: "Xuất hoàn tất",
+    busyCompleteStatus: "Hoàn tất",
+    busyFailedTitle: "Xuất PDF thất bại",
+    busyElapsedShort: "Đã qua {seconds} giây",
+    busyElapsedLong: "Đã qua {seconds} giây. Vẫn đang xử lý; đừng đóng Obsidian.",
+    settingsIntro: "Menu và nút sẽ mở tùy chọn xuất PDF trước. Ghi chú Markdown thông thường có thể được xuất thành PDF văn bản có thể chọn hoặc PDF dạng ảnh.",
+    settingsGeneralHeading: "Chung",
+    settingsNoteOptionsHeading: "Tùy chọn PDF cho ghi chú thông thường",
+    pageSizeDesc: "Trang dài phù hợp để đọc trên điện thoại. A4/A5/Letter hữu ích cho in và lưu trữ.",
+    orientationDesc: "Hướng ngang hoán đổi chiều rộng và chiều cao của trang.",
+    colorDesc: "Thang xám phù hợp để in; chế độ màu giữ màu chủ đề, liên kết và hình ảnh.",
+    settingsSaveAndShareHeading: "Lưu và chia sẻ",
+    languageName: "Ngôn ngữ giao diện",
+    languageDesc: "Tự động sẽ theo ngôn ngữ của Obsidian. Nút, menu, lệnh, tùy chọn và thông báo dùng ngôn ngữ đã chọn.",
+    languageAuto: "Tự động / theo Obsidian",
+    languageChinese: "Tiếng Trung",
+    languageEnglish: "Tiếng Anh",
+    formatPngLabel: "Ảnh PNG",
+    codesTitle: "Mời tôi một ly cà phê",
+    codesSubtitle: "Nếu công cụ này hữu ích, sự ủng hộ của bạn giúp duy trì việc phát triển.",
+    shareFailedNotice: "PDF đã được lưu nhưng bảng chia sẻ của hệ thống không mở.",
+    fontMissingError: "Thiếu phông chữ PDF và plugin không thể tải xuống từ GitHub. Hãy thử lại khi có mạng hoặc đặt NotoSansSC-Regular.gb2312-subset.ttf vào thư mục fonts của plugin.",
+    uniqueFileNameError: "Không thể tạo tên tệp PDF duy nhất.",
+    excalidrawApiMissingError: "Không tìm thấy API xuất của Excalidraw. Hãy chắc chắn plugin Excalidraw đã được bật.",
+    excalidrawExportFailedError: "Ảnh Excalidraw quá lớn hoặc xuất thất bại. Đã thử độ phân giải thấp hơn và chia trang.",
+    excalidrawPngNoImageError: "PNG {scale}x không trả về hình ảnh.",
+    lastErrorLabel: "Lỗi gần nhất: {error}",
+    noUsableImageError: "Không tạo được hình ảnh có thể sử dụng.",
+    excalidrawPreviewUnavailable: "Không có bản xem trước Excalidraw nên dữ liệu nguồn đã bị bỏ qua.",
+    previewNoExportSizeError: "Lớp xem trước không có kích thước có thể xuất.",
+    previewNoContentError: "Bản xem trước không có nội dung có thể xuất.",
+    pdfRuntimeMissingError: "Bộ máy PDF chưa được tải.",
+    fontkitMissingError: "Không thể khởi tạo phông chữ PDF vì fontkit.create không khả dụng.",
+    imagePdfCanvasError: "Không thể kết xuất PDF dạng ảnh vì canvas không khả dụng.",
+    imageSliceError: "Không thể cắt ảnh vì canvas không khả dụng."
+  },
+  th: {
+    ribbonTitle: "ส่งออก PDF ตัวอย่าง",
+    commandName: "Mobile PDF Exporter: ส่งออก PDF ตัวอย่าง",
+    noMarkdownNotice: "เปิดไฟล์ที่สามารถส่งออกได้ก่อน",
+    optionsTitle: "ตัวเลือกการส่งออก PDF",
+    exportModeName: "โหมดการส่งออก",
+    exportModeDesc: "ข้อความที่เลือกได้เหมาะสำหรับอ่าน ค้นหา และคัดลอก ส่วน PDF แบบภาพจะคงรูปแบบการแสดงผลไว้",
+    exportModeSelectable: "ข้อความที่เลือกได้",
+    exportModeImage: "PDF แบบภาพ",
+    pageSizeName: "ขนาดหน้า",
+    pageSizeCurrent: "ขนาดหน้าปัจจุบัน (ค่าเริ่มต้น)",
+    pageSizeMobile: "หน้ายาวสำหรับมือถือ 104 x 225 มม.",
+    orientationName: "การวางแนว",
+    orientationPortrait: "แนวตั้ง",
+    orientationLandscape: "แนวนอน",
+    colorName: "สี",
+    colorOption: "สี",
+    grayscaleOption: "ระดับสีเทา",
+    marginName: "ระยะขอบ",
+    contentScaleName: "มาตราส่วนเนื้อหา",
+    imageQualityName: "คุณภาพ PDF แบบภาพ",
+    imageQualityDesc: "มีผลเฉพาะ PDF แบบภาพของโน้ตทั่วไป คุณภาพสูงขึ้นจะทำให้ไฟล์ใหญ่ขึ้น",
+    imageQualityStandard: "มาตรฐาน / ไฟล์เล็กกว่า",
+    imageQualityClear: "ชัดเจน / แนะนำ",
+    imageQualityHigh: "สูง",
+    imageQualityUltra: "สูงสุด / ไฟล์ใหญ่",
+    includeTitleName: "รวมชื่อโน้ต",
+    headerTextName: "หัวกระดาษ",
+    headerTextDesc: "เว้นว่างเพื่อปิดใช้งาน รองรับ {title}, {page}, {pages} และ {date}",
+    footerTextName: "ท้ายกระดาษ",
+    footerTextDesc: "เว้นว่างเพื่อปิดใช้งาน รองรับ {title}, {page}, {pages} และ {date}",
+    openAfterExportName: "เปิดหลังส่งออก",
+    openAfterExportDesc: "เปิดไฟล์ที่สร้างขึ้นเมื่อส่งออกเสร็จ",
+    shareAfterExportName: "แสดงแผงแชร์บนมือถือ",
+    rememberLastExportOptionsName: "ใช้ตัวเลือกการส่งออกครั้งล่าสุด",
+    rememberLastExportOptionsDesc: "เปิดตามค่าเริ่มต้น บันทึกตัวเลือกของการส่งออกนี้ไว้ใช้ครั้งถัดไป",
+    outputLocationName: "ตำแหน่งส่งออก",
+    outputLocationCurrent: "โฟลเดอร์ของโน้ตปัจจุบัน (ค่าเริ่มต้น)",
+    outputLocationFolder: "โฟลเดอร์กำหนดเอง",
+    outputLocationCurrentDesc: "บันทึก PDF ไว้ข้างโน้ตปัจจุบัน",
+    outputLocationFolderDesc: "บันทึก PDF ในโฟลเดอร์กำหนดเองภายในคลัง และสร้างโฟลเดอร์เมื่อจำเป็น",
+    outputFolderPlaceholder: "ไฟล์ PDF ที่ส่งออก",
+    pdfNameLabel: "ชื่อ PDF",
+    exportPdfButton: "ส่งออก PDF",
+    cancelButton: "รูปแบบอื่น",
+    busyExporting: "กำลังส่งออก PDF",
+    busyCancelButton: "ยกเลิกการส่งออก",
+    busyCancelledTitle: "ยกเลิกการส่งออกแล้ว",
+    busyCancelledStatus: "ไม่ได้บันทึก PDF",
+    busyCompleteTitle: "ส่งออกเสร็จแล้ว",
+    busyCompleteStatus: "เสร็จสิ้น",
+    busyFailedTitle: "ส่งออก PDF ไม่สำเร็จ",
+    busyElapsedShort: "ผ่านไป {seconds} วินาที",
+    busyElapsedLong: "ผ่านไป {seconds} วินาที ยังประมวลผลอยู่ โปรดอย่าปิด Obsidian",
+    settingsIntro: "เมนูและปุ่มจะเปิดตัวเลือกการส่งออก PDF ก่อน โน้ต Markdown ทั่วไปสามารถส่งออกเป็น PDF ข้อความที่เลือกได้หรือ PDF แบบภาพ",
+    settingsGeneralHeading: "ทั่วไป",
+    settingsNoteOptionsHeading: "ตัวเลือก PDF สำหรับโน้ตทั่วไป",
+    pageSizeDesc: "หน้ายาวเหมาะสำหรับอ่านบนโทรศัพท์ ส่วน A4/A5/Letter เหมาะสำหรับพิมพ์และเก็บถาวร",
+    orientationDesc: "แนวนอนจะสลับความกว้างและความสูงของหน้า",
+    colorDesc: "ระดับสีเทาเหมาะสำหรับพิมพ์ ส่วนโหมดสีจะคงสีธีม ลิงก์ และรูปภาพไว้",
+    settingsSaveAndShareHeading: "บันทึกและแชร์",
+    languageName: "ภาษาของส่วนติดต่อ",
+    languageDesc: "อัตโนมัติจะใช้ภาษาของ Obsidian ปุ่ม เมนู คำสั่ง ตัวเลือก และข้อความจะใช้ภาษาที่เลือก",
+    languageAuto: "อัตโนมัติ / ตาม Obsidian",
+    languageChinese: "ภาษาจีน",
+    languageEnglish: "ภาษาอังกฤษ",
+    formatPngLabel: "ภาพ PNG",
+    codesTitle: "เลี้ยงกาแฟฉัน",
+    codesSubtitle: "หากเครื่องมือนี้มีประโยชน์ การสนับสนุนของคุณช่วยให้ดูแลต่อไปได้",
+    shareFailedNotice: "บันทึก PDF แล้ว แต่แผงแชร์ของระบบไม่เปิด",
+    fontMissingError: "ไม่พบแบบอักษร PDF และปลั๊กอินดาวน์โหลดจาก GitHub ไม่ได้ โปรดลองอีกครั้งเมื่อออนไลน์ หรือวาง NotoSansSC-Regular.gb2312-subset.ttf ไว้ในโฟลเดอร์ fonts ของปลั๊กอิน",
+    uniqueFileNameError: "ไม่สามารถสร้างชื่อไฟล์ PDF ที่ไม่ซ้ำได้",
+    excalidrawApiMissingError: "ไม่พบ API ส่งออกของ Excalidraw โปรดตรวจสอบว่าเปิดใช้ปลั๊กอิน Excalidraw แล้ว",
+    excalidrawExportFailedError: "ภาพ Excalidraw ใหญ่เกินไปหรือส่งออกไม่สำเร็จ ได้ลองลดความละเอียดและแบ่งหน้าแล้ว",
+    excalidrawPngNoImageError: "PNG {scale}x ไม่ส่งคืนภาพ",
+    lastErrorLabel: "ข้อผิดพลาดล่าสุด: {error}",
+    noUsableImageError: "ไม่สามารถสร้างภาพที่ใช้งานได้",
+    excalidrawPreviewUnavailable: "ไม่สามารถใช้ตัวอย่าง Excalidraw ได้ จึงข้ามข้อมูลต้นฉบับ",
+    previewNoExportSizeError: "เลเยอร์ตัวอย่างไม่มีขนาดที่ส่งออกได้",
+    previewNoContentError: "ตัวอย่างไม่มีเนื้อหาที่ส่งออกได้",
+    pdfRuntimeMissingError: "ยังไม่ได้โหลดเครื่องมือ PDF",
+    fontkitMissingError: "เริ่มต้นแบบอักษร PDF ไม่สำเร็จ เนื่องจากไม่มี fontkit.create",
+    imagePdfCanvasError: "แสดงผล PDF แบบภาพไม่สำเร็จ เนื่องจากไม่มี canvas",
+    imageSliceError: "แบ่งภาพไม่สำเร็จ เนื่องจากไม่มี canvas"
   }
 } as const;
 
@@ -631,14 +1884,6 @@ const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
   letter: { width: 215.9, height: 279.4 }
 };
 
-const PDF_PAGE_LABELS: Record<PdfPagePreset, string> = {
-  current: "当前页面大小（默认）",
-  mobile: "手机长页 104 x 225 mm",
-  a4: "A4 210 x 297 mm",
-  a5: "A5 148 x 210 mm",
-  letter: "Letter 8.5 x 11 in"
-};
-
 const PDF_SUBJECT = "Selectable preview PDF exported from Obsidian";
 const IMAGE_PDF_SUBJECT = "Image preview PDF exported from Obsidian";
 const EXCALIDRAW_IMAGE_PDF_SUBJECT = "Image PDF exported from Obsidian Excalidraw";
@@ -652,7 +1897,6 @@ const EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS = 45000;
 const EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS = 15000;
 const EXCALIDRAW_MIN_EXPORT_SCALE = 0.5;
 const EXCALIDRAW_PREFERRED_MAX_PNG_BYTES = 24 * 1024 * 1024;
-const HTML_VIDEO_INLINE_MAX_BYTES = 64 * 1024 * 1024;
 const EXCALIDRAW_MAX_SLICE_WIDTH_PX = 4096;
 const EXCALIDRAW_MAX_SLICE_HEIGHT_PX = 8192;
 const EXCALIDRAW_MAX_SLICE_PIXELS = 16_000_000;
@@ -685,8 +1929,8 @@ const LOCAL_CJK_FONT_CANDIDATES = [
   "fonts/NotoSansSC-Regular.otf"
 ] as const;
 const SETTINGS_EXTRA_CODE_ASSETS = [
-  { src: `data:image/jpeg;base64,${supportCode1Base64}`, label: "给我买咖啡 / Buy me a coffee", fileName: "buy-me-a-coffee.jpg" },
-  { src: `data:image/png;base64,${supportCode2Base64}`, label: "支持继续维护 / Support this tool", fileName: "support-this-tool.png" }
+  { src: `data:image/jpeg;base64,${supportCode1Base64}`, labelKey: "codesTitle", fileName: "buy-me-a-coffee.jpg" },
+  { src: `data:image/png;base64,${supportCode2Base64}`, labelKey: "codesSubtitle", fileName: "support-this-tool.png" }
 ] as const;
 
 class ExportCancelledError extends Error {
@@ -709,23 +1953,39 @@ function isExportCancelledError(error: unknown): boolean {
 }
 
 function resolveUiLanguage(language: UiLanguage): ResolvedUiLanguage {
-  if (language === "zh" || language === "en") return language;
+  if (language !== "auto") return language;
   const browserLanguage = (activeWindow.navigator.language || "").toLowerCase();
   const browserLanguages = (activeWindow.navigator.languages || []).map((item) => item.toLowerCase());
-  return [browserLanguage, ...browserLanguages].some((item) => item.startsWith("zh")) ? "zh" : "en";
+  for (const candidate of [browserLanguage, ...browserLanguages]) {
+    const matched = UI_LANGUAGES.find((languageCode) => languageCode !== "auto" && candidate.startsWith(languageCode));
+    if (matched && matched !== "auto") return matched;
+  }
+  return "en";
 }
 
 function translate(language: ResolvedUiLanguage, key: TranslationKey): string {
   return UI_TEXT[language][key];
 }
 
+function formatTranslation(
+  language: ResolvedUiLanguage,
+  key: TranslationKey,
+  values: Record<string, string | number>
+): string {
+  return Object.entries(values).reduce(
+    (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
+    translate(language, key)
+  );
+}
+
+let runtimeUiLanguage: ResolvedUiLanguage = "en";
+
 function getPageLabel(preset: PdfPagePreset, language: ResolvedUiLanguage): string {
-  if (language === "zh") return PDF_PAGE_LABELS[preset];
   switch (preset) {
     case "current":
-      return "Current page size (default)";
+      return translate(language, "pageSizeCurrent");
     case "mobile":
-      return "Mobile long page 104 x 225 mm";
+      return translate(language, "pageSizeMobile");
     case "a4":
       return "A4 210 x 297 mm";
     case "a5":
@@ -736,14 +1996,7 @@ function getPageLabel(preset: PdfPagePreset, language: ResolvedUiLanguage): stri
 }
 
 function formatBusyElapsed(language: ResolvedUiLanguage, seconds: number): string {
-  if (language === "zh") {
-    return seconds >= 8
-      ? `已用 ${seconds} 秒，仍在处理，请不要关闭 Obsidian。`
-      : `已用 ${seconds} 秒`;
-  }
-  return seconds >= 8
-    ? `${seconds}s elapsed. Still working; do not close Obsidian.`
-    : `${seconds}s elapsed`;
+  return formatTranslation(language, seconds >= 8 ? "busyElapsedLong" : "busyElapsedShort", { seconds });
 }
 
 type RegisteredFontkit = Parameters<PDFDocument["registerFontkit"]>[0];
@@ -803,7 +2056,7 @@ async function loadPdfRuntime(): Promise<PdfRuntime> {
 
 function getPdfStringRuntime(): PdfLibRuntime["PDFString"] {
   if (!pdfStringRuntime) {
-    throw new Error("PDF 引擎尚未加载。");
+    throw new Error(translate(runtimeUiLanguage, "pdfRuntimeMissingError"));
   }
   return pdfStringRuntime;
 }
@@ -866,7 +2119,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
   }
 
   getResolvedLanguage(): ResolvedUiLanguage {
-    return resolveUiLanguage(this.settings.language);
+    runtimeUiLanguage = resolveUiLanguage(this.settings.language);
+    return runtimeUiLanguage;
   }
 
   t(key: TranslationKey): string {
@@ -949,7 +2203,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
         const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(noteDrawFile, noteDrawHost);
         try {
           await nextAnimationFrame();
-          outputBlob = await buildRenderedDomHtml(file, rendered.pageEl, signal);
+          outputBlob = await buildRenderedDomHtml(
+            this.app,
+            file,
+            rendered.pageEl,
+            noteDrawHost,
+            preparedNoteDraw,
+            signal
+          );
         } finally {
           preparedNoteDraw.cleanup();
         }
@@ -1086,7 +2347,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
             );
             throwIfExportCancelled(signal);
             if (!pngBlob || pngBlob.size <= 0) {
-              errors.push(`PNG ${scale}x 没有返回图片。`);
+              errors.push(formatTranslation(this.getResolvedLanguage(), "excalidrawPngNoImageError", { scale }));
               continue;
             }
 
@@ -1100,10 +2361,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
         }
       }
 
-      const suffix = this.getResolvedLanguage() === "zh"
-        ? (errors.length > 0 ? `最后错误：${errors[errors.length - 1]}` : "未能取得可用图片。")
-        : (errors.length > 0 ? ` Last error: ${errors[errors.length - 1]}` : " No usable image was produced.");
-      throw new Error(`${this.t("excalidrawExportFailedError")}${suffix}`);
+      const suffix = errors.length > 0
+        ? formatTranslation(this.getResolvedLanguage(), "lastErrorLabel", { error: errors[errors.length - 1] })
+        : this.t("noUsableImageError");
+      throw new Error(`${this.t("excalidrawExportFailedError")} ${suffix}`);
     } finally {
       if (lease.destroyAfterUse) lease.api.destroy?.();
     }
@@ -1282,6 +2543,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const liveWidthPx = Math.max(1, scrollEl.clientWidth || rootRect.width);
     const originalScrollTop = scrollEl.scrollTop;
     const originalScrollLeft = scrollEl.scrollLeft;
+    const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, rootEl);
+    const suppressedInlineTitles = this.settings.includeTitle
+      ? []
+      : Array.from(rootEl.querySelectorAll<HTMLElement>(".inline-title"))
+        .filter((element) => !element.classList.contains("mobile-pdf-exporter-skip"));
+    suppressedInlineTitles.forEach((element) => element.classList.add("mobile-pdf-exporter-skip"));
     const captured = createEmptySurfaceCapture();
     const seen = createSurfaceCaptureSeenState();
     const liveCaptureCache = createLiveSurfaceCaptureCache();
@@ -1292,7 +2559,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const previewSectionCaptures = new Map<number, CapturedLivePreviewSection>();
     let capturedPreviewOverlays = false;
     let contentHeightPx = Math.max(1, scrollEl.scrollHeight, rootEl.scrollHeight, rootRect.height);
-    const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, rootEl);
 
     try {
       if (previewRenderer) {
@@ -1458,6 +2724,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     } finally {
       scrollEl.scrollTop = originalScrollTop;
       scrollEl.scrollLeft = originalScrollLeft;
+      suppressedInlineTitles.forEach((element) => element.classList.remove("mobile-pdf-exporter-skip"));
       preparedNoteDraw.cleanup();
       refreshLiveDrawingSurface(rootEl);
       await nextAnimationFrame();
@@ -1727,6 +2994,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       cleanup: () => undefined,
       data: null,
       elements: [],
+      sourceElements: [],
       widthPx: width,
       heightPx: height,
       contentFrame
@@ -1770,9 +3038,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const injectedImageLayers = Array.from(host.querySelectorAll<HTMLElement>(
       ".notedraw-export-image-canvas-layer"
     )).filter((element) => !existingImageLayers.has(element));
-    const elements = hasLiveCanvas
-      ? []
-      : await prepareNoteDrawElementData(this.app, host.ownerDocument, rawData);
+    const sourceElements = await prepareNoteDrawElementData(this.app, host.ownerDocument, rawData);
+    const elements = hasLiveCanvas ? [] : sourceElements;
 
     let canvas: HTMLCanvasElement | null = null;
     let changedPosition = false;
@@ -1838,6 +3105,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       },
       data,
       elements,
+      sourceElements,
       widthPx: width,
       heightPx: height,
       contentFrame
@@ -1933,6 +3201,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
 
     throwIfExportCancelled(signal);
+    await attachEmbeddedAssetsToPdf(pdfDoc, this.app, file.path, model);
+    throwIfExportCancelled(signal);
     const pdfBytes = await pdfDoc.save({ useObjectStreams: true });
     throwIfExportCancelled(signal);
     const pdfBuffer = new ArrayBuffer(pdfBytes.byteLength);
@@ -2000,6 +3270,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
 
     throwIfExportCancelled(signal);
+    await attachEmbeddedAssetsToPdf(pdfDoc, this.app, file.path, model);
+    throwIfExportCancelled(signal);
     const pdfBytes = await pdfDoc.save({ useObjectStreams: true });
     throwIfExportCancelled(signal);
     const pdfBuffer = new ArrayBuffer(pdfBytes.byteLength);
@@ -2019,7 +3291,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         : this.renderPreviewToSelectablePdf(file, model, signal);
     }
     const needsExplicitNoteDraw = format === "docx" || format === "pptx" || format === "png";
-    const pageModel = needsExplicitNoteDraw && hasExplicitNoteDrawContent(model)
+    const needsSourceNoteDrawElements = format === "docx" && Boolean(model.noteDrawSourceElements?.length);
+    const pageModel = needsExplicitNoteDraw && (hasExplicitNoteDrawContent(model) || needsSourceNoteDrawElements)
       ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
       : model;
     if (format === "pptx") {
@@ -2660,7 +3933,7 @@ class MobilePdfExportOptionsModal extends Modal {
       ["", this.plugin.t("cancelButton")],
       ["docx", "Word (.docx)"],
       ["pptx", "PowerPoint (.pptx)"],
-      ["png", "PNG 图片"],
+      ["png", this.plugin.t("formatPngLabel")],
       ["html", "HTML"]
     ] as const) {
       const option = appendElement(formatSelect, "option", { text: label });
@@ -2808,10 +4081,11 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
       .setName(this.plugin.t("languageName"))
       .setDesc(this.plugin.t("languageDesc"))
       .addDropdown((dropdown) => {
+        dropdown.addOption("auto", this.plugin.t("languageAuto"));
+        for (const [language, label] of Object.entries(UI_LANGUAGE_LABELS)) {
+          dropdown.addOption(language, label);
+        }
         dropdown
-          .addOption("auto", this.plugin.t("languageAuto"))
-          .addOption("zh", this.plugin.t("languageChinese"))
-          .addOption("en", this.plugin.t("languageEnglish"))
           .setValue(this.plugin.settings.language)
           .onChange(async (value) => {
             this.plugin.settings.language = normalizeChoice(value, UI_LANGUAGES, DEFAULT_SETTINGS.language);
@@ -3049,6 +4323,7 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
     });
 
     for (const item of SETTINGS_EXTRA_CODE_ASSETS) {
+      const label = this.plugin.t(item.labelKey);
       const codeEl = appendElement(gridEl, "div", {
         cls: "mobile-pdf-exporter-settings-code"
       });
@@ -3059,17 +4334,17 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
       linkEl.target = "_blank";
       linkEl.rel = "noopener";
       linkEl.setAttribute("download", item.fileName);
-      linkEl.setAttribute("aria-label", item.label);
+      linkEl.setAttribute("aria-label", label);
       const imageEl = appendElement(linkEl, "img", {
         cls: "mobile-pdf-exporter-settings-code-image"
       });
       imageEl.src = item.src;
-      imageEl.alt = item.label;
+      imageEl.alt = label;
       imageEl.loading = "lazy";
       imageEl.decoding = "async";
       appendElement(codeEl, "div", {
         cls: "mobile-pdf-exporter-settings-code-label",
-        text: item.label
+        text: label
       });
     }
   }
@@ -3151,7 +4426,7 @@ function resolvePdfFontkit(moduleValue: unknown): RegisteredFontkit {
   const moduleShape = moduleValue as FontkitModuleShape;
   const candidate = typeof moduleShape.create === "function" ? moduleShape : moduleShape.default;
   if (!candidate || typeof candidate.create !== "function") {
-    throw new Error("PDF 字体组件初始化失败：fontkit.create 不存在。");
+    throw new Error(translate(runtimeUiLanguage, "fontkitMissingError"));
   }
   return candidate as RegisteredFontkit;
 }
@@ -3771,6 +5046,179 @@ interface OfficeRenderOptions {
   sourcePath?: string;
 }
 
+type EmbeddedExportAssetUse = "video" | "file";
+
+interface EmbeddedExportAsset {
+  path: string;
+  name: string;
+  extension: string;
+  mimeType: string;
+  bytes: Uint8Array;
+  sourceLinks: string[];
+  uses: EmbeddedExportAssetUse[];
+}
+
+async function collectEmbeddedExportAssets(
+  app: App | undefined,
+  sourcePath: string | undefined,
+  model: PreviewPdfModel
+): Promise<EmbeddedExportAsset[]> {
+  if (!app || !sourcePath) return [];
+  const candidates: Array<{ linkPath: string; mimeType?: string; use: EmbeddedExportAssetUse }> = [];
+  for (const fragment of model.videoFragments) {
+    if (fragment.sourcePath) candidates.push({ linkPath: fragment.sourcePath, use: "video" });
+  }
+  for (const element of model.noteDrawSourceElements ?? model.noteDrawElements ?? []) {
+    if (!element.assetPath || (element.kind !== "video" && element.kind !== "file")) continue;
+    candidates.push({
+      linkPath: element.assetPath,
+      mimeType: element.assetMime || undefined,
+      use: element.kind
+    });
+  }
+
+  const assets = new Map<string, EmbeddedExportAsset>();
+  for (const candidate of candidates) {
+    const loaded = await readVaultEmbeddedAsset(app, sourcePath, candidate.linkPath, candidate.mimeType);
+    if (!loaded) continue;
+    const existing = assets.get(loaded.path);
+    if (existing) {
+      if (!existing.sourceLinks.includes(candidate.linkPath)) existing.sourceLinks.push(candidate.linkPath);
+      if (!existing.uses.includes(candidate.use)) existing.uses.push(candidate.use);
+      continue;
+    }
+    assets.set(loaded.path, {
+      ...loaded,
+      sourceLinks: [candidate.linkPath],
+      uses: [candidate.use]
+    });
+  }
+  return Array.from(assets.values());
+}
+
+async function readVaultEmbeddedAsset(
+  app: App,
+  sourcePath: string,
+  linkPath: string,
+  preferredMimeType?: string
+): Promise<Omit<EmbeddedExportAsset, "sourceLinks" | "uses"> | null> {
+  const file = resolveVaultAssetFile(app, sourcePath, linkPath);
+  if (!file) return null;
+  try {
+    const bytes = new Uint8Array(await app.vault.readBinary(file));
+    return {
+      path: file.path,
+      name: file.name,
+      extension: file.extension.toLowerCase(),
+      mimeType: preferredMimeType || getEmbeddedAssetMimeType(file.extension),
+      bytes
+    };
+  } catch (error) {
+    console.warn(`Mobile PDF Exporter could not embed asset ${file.path}`, error);
+    return null;
+  }
+}
+
+function resolveVaultAssetFile(app: App, sourcePath: string, rawLinkPath: string): TFile | null {
+  let clean = rawLinkPath.trim();
+  if (!clean || /^(?:data|blob|https?):/iu.test(clean)) return null;
+  try {
+    clean = decodeURIComponent(clean);
+  } catch {
+    // Keep non-URI-encoded Vault paths unchanged.
+  }
+  clean = clean
+    .replace(/^app:\/\/obsidian\.md\//iu, "")
+    .replace(/[?#].*$/u, "")
+    .replace(/^\/+|^\.\//u, "")
+    .replace(/\\/gu, "/")
+    .trim();
+  if (!clean) return null;
+
+  const direct = app.vault.getAbstractFileByPath(normalizePath(clean));
+  if (direct instanceof TFile) return direct;
+  const sourceDir = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/")) : "";
+  const relativePath = collapseVaultPathSegments(normalizePath(sourceDir ? `${sourceDir}/${clean}` : clean));
+  const relative = app.vault.getAbstractFileByPath(relativePath);
+  if (relative instanceof TFile) return relative;
+  const resolved = app.metadataCache.getFirstLinkpathDest(clean, sourcePath);
+  return resolved instanceof TFile ? resolved : null;
+}
+
+function getEmbeddedAssetMimeType(extension: string): string {
+  const normalized = extension.toLowerCase().replace(/^\./u, "");
+  return ({
+    mp4: "video/mp4",
+    m4v: "video/mp4",
+    mov: "video/quicktime",
+    webm: "video/webm",
+    ogv: "video/ogg",
+    avi: "video/x-msvideo",
+    mkv: "video/x-matroska",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    pdf: "application/pdf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    zip: "application/zip",
+    txt: "text/plain",
+    md: "text/markdown",
+    html: "text/html",
+    htm: "text/html",
+    json: "application/json",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    svg: "image/svg+xml"
+  } as Record<string, string>)[normalized] ?? "application/octet-stream";
+}
+
+function findEmbeddedExportAsset(
+  assets: EmbeddedExportAsset[],
+  linkPath: string | null
+): EmbeddedExportAsset | null {
+  if (!linkPath) return null;
+  return assets.find((asset) => asset.sourceLinks.includes(linkPath)) ?? null;
+}
+
+async function attachEmbeddedAssetsToPdf(
+  pdfDoc: PDFDocument,
+  app: App,
+  sourcePath: string,
+  model: PreviewPdfModel
+): Promise<void> {
+  const assets = await collectEmbeddedExportAssets(app, sourcePath, model);
+  const usedNames = new Set<string>();
+  for (const asset of assets) {
+    const name = getUniqueEmbeddedAssetName(asset.name, usedNames);
+    await pdfDoc.attach(asset.bytes, name, {
+      mimeType: asset.mimeType,
+      description: `Embedded source asset: ${asset.path}`
+    });
+  }
+}
+
+function getUniqueEmbeddedAssetName(rawName: string, usedNames: Set<string>): string {
+  const printableName = Array.from(rawName, (character) => character.charCodeAt(0) < 32 ? "_" : character).join("");
+  const cleanName = printableName.replace(/[\\/:*?"<>|]/gu, "_").trim() || "attachment.bin";
+  const dotIndex = cleanName.lastIndexOf(".");
+  const baseName = dotIndex > 0 ? cleanName.slice(0, dotIndex) : cleanName;
+  const extension = dotIndex > 0 ? cleanName.slice(dotIndex) : "";
+  let candidate = cleanName;
+  let suffix = 2;
+  while (usedNames.has(candidate.toLowerCase())) {
+    candidate = `${baseName}-${suffix}${extension}`;
+    suffix += 1;
+  }
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
 async function getOfficeMediaFragments(
   model: PreviewPdfModel,
   pageIndex: number,
@@ -3844,6 +5292,87 @@ async function getOfficeMediaFragments(
   return media;
 }
 
+async function getOfficeNoteDrawFragments(
+  model: PreviewPdfModel,
+  pageIndex: number,
+  renderOptions: OfficeRenderOptions
+): Promise<OfficeMediaFragment[]> {
+  const pageTopPx = model.pageBreaks[pageIndex];
+  const pageBottomPx = model.pageBreaks[pageIndex + 1];
+  const media: OfficeMediaFragment[] = [];
+  const appendRegion = (
+    left: number,
+    top: number,
+    right: number,
+    bottom: number,
+    draw: (context: CanvasRenderingContext2D) => void
+  ): void => {
+    const clippedLeft = clampNumber(left, 0, model.sourceWidthPx, 0);
+    const clippedRight = clampNumber(right, 0, model.sourceWidthPx, model.sourceWidthPx);
+    const clippedTop = clampNumber(top, pageTopPx, pageBottomPx, pageTopPx);
+    const clippedBottom = clampNumber(bottom, pageTopPx, pageBottomPx, pageBottomPx);
+    if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) return;
+    const widthPx = clippedRight - clippedLeft;
+    const heightPx = clippedBottom - clippedTop;
+    const requestedScale = clampNumber(renderOptions.rasterScale, 1, 3, 1.5);
+    const safeScale = Math.min(
+      requestedScale,
+      Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, widthPx * heightPx))
+    );
+    const scale = Math.max(0.75, safeScale);
+    const canvas = createCanvas(model.ownerDocument);
+    canvas.width = Math.max(1, Math.ceil(widthPx * scale));
+    canvas.height = Math.max(1, Math.ceil(heightPx * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+    context.translate(-clippedLeft, -(clippedTop - pageTopPx));
+    draw(context);
+    if (renderOptions.colorMode === "grayscale") {
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      applyCanvasGrayscale(context, canvas.width, canvas.height);
+    }
+    media.push({
+      data: dataUrlToUint8Array(canvas.toDataURL("image/png")),
+      leftPx: clippedLeft,
+      topPx: model.bodyTopInsetPx + clippedTop - pageTopPx,
+      widthPx,
+      heightPx
+    });
+  };
+
+  for (const element of model.noteDrawSourceElements ?? model.noteDrawElements ?? []) {
+    if (element.bottom <= pageTopPx || element.top >= pageBottomPx) continue;
+    const padding = Math.max(3, element.width * 2);
+    appendRegion(
+      element.left - padding,
+      element.top - padding,
+      element.right + padding,
+      element.bottom + padding,
+      (context) => drawCanvasNoteDrawElementLayer(context, [element], {
+        pageTopPx,
+        pageBottomPx,
+        sourceWidthPx: model.sourceWidthPx
+      })
+    );
+  }
+
+  for (const stroke of model.noteDrawInkStrokes ?? []) {
+    if (stroke.points.length === 0) continue;
+    const left = Math.min(...stroke.points.map((point) => point.x));
+    const top = Math.min(...stroke.points.map((point) => point.y));
+    const right = Math.max(...stroke.points.map((point) => point.x));
+    const bottom = Math.max(...stroke.points.map((point) => point.y));
+    if (bottom <= pageTopPx || top >= pageBottomPx) continue;
+    const padding = Math.max(4, stroke.widthPx * Math.max(2, stroke.count + 1));
+    appendRegion(left - padding, top - padding, right + padding, bottom + padding, (context) => {
+      drawCanvasNoteDrawInkLayer(context, [stroke], { pageTopPx, pageBottomPx });
+    });
+  }
+
+  return media;
+}
+
 function canvasFragmentSliceToPngBytes(fragment: CanvasFragment, slice: MediaPageSlice): Uint8Array | null {
   const cssWidth = Math.max(1, fragment.right - fragment.left);
   const cssHeight = Math.max(1, fragment.bottom - fragment.top);
@@ -3864,6 +5393,102 @@ function canvasFragmentSliceToPngBytes(fragment: CanvasFragment, slice: MediaPag
   return dataUrlToUint8Array(canvas.toDataURL("image/png"));
 }
 
+interface PptxVideoPlacement {
+  asset: EmbeddedExportAsset;
+  leftPx: number;
+  topPx: number;
+  widthPx: number;
+  heightPx: number;
+  cover?: string;
+}
+
+async function getPptxVideoPlacements(
+  model: PreviewPdfModel,
+  pageIndex: number,
+  assets: EmbeddedExportAsset[]
+): Promise<PptxVideoPlacement[]> {
+  const pageTopPx = model.pageBreaks[pageIndex];
+  const pageBottomPx = model.pageBreaks[pageIndex + 1];
+  const sliceOptions = {
+    pageTopPx,
+    pageBottomPx,
+    sourceWidthPx: model.sourceWidthPx,
+    pageHeightPx: model.bodyHeightPx
+  };
+  const placements: PptxVideoPlacement[] = [];
+
+  for (const fragment of model.videoFragments) {
+    const asset = findEmbeddedExportAsset(assets, fragment.sourcePath);
+    const slice = getMediaPageSlice(fragment, sliceOptions);
+    if (!asset || !slice) continue;
+    placements.push({
+      asset,
+      leftPx: slice.x,
+      topPx: model.bodyTopInsetPx + slice.y,
+      widthPx: slice.width,
+      heightPx: slice.height,
+      cover: await getVideoCoverDataUrl(fragment.element)
+    });
+  }
+
+  for (const element of model.noteDrawSourceElements ?? model.noteDrawElements ?? []) {
+    if (element.kind !== "video") continue;
+    const asset = findEmbeddedExportAsset(assets, element.assetPath);
+    const slice = getMediaPageSlice(element, sliceOptions);
+    if (!asset || !slice) continue;
+    placements.push({
+      asset,
+      leftPx: slice.x,
+      topPx: model.bodyTopInsetPx + slice.y,
+      widthPx: slice.width,
+      heightPx: slice.height,
+      cover: noteDrawMediaToPngDataUrl(element.media)
+    });
+  }
+
+  return placements;
+}
+
+async function getVideoCoverDataUrl(video: HTMLVideoElement): Promise<string | undefined> {
+  try {
+    const source = await getVideoExportFrame(video);
+    if (!source) return undefined;
+    const sourceWidth = source.instanceOf(HTMLVideoElement) ? source.videoWidth : source.naturalWidth;
+    const sourceHeight = source.instanceOf(HTMLVideoElement) ? source.videoHeight : source.naturalHeight;
+    if (sourceWidth <= 0 || sourceHeight <= 0) return undefined;
+    const scale = Math.min(1, 1280 / sourceWidth, 720 / sourceHeight);
+    const canvas = createCanvas(video);
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return undefined;
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
+  } catch (error) {
+    console.warn("Mobile PDF Exporter could not create a PowerPoint video cover", error);
+    return undefined;
+  }
+}
+
+function noteDrawMediaToPngDataUrl(media: HTMLImageElement | HTMLCanvasElement | null): string | undefined {
+  if (!media) return undefined;
+  try {
+    if (media.instanceOf(HTMLCanvasElement)) return media.toDataURL("image/png");
+    const width = Math.max(1, media.naturalWidth || media.width);
+    const height = Math.max(1, media.naturalHeight || media.height);
+    const canvas = createCanvas(media);
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return undefined;
+    context.drawImage(media, 0, 0, width, height);
+    return canvas.toDataURL("image/png");
+  } catch (error) {
+    console.warn("Mobile PDF Exporter could not create a NoteDraw media cover", error);
+    return undefined;
+  }
+}
+
 async function buildEditablePptx(
   file: TFile,
   model: PreviewPdfModel,
@@ -3879,6 +5504,7 @@ async function buildEditablePptx(
   pptx.author = "Obsidian Mobile PDF Exporter";
   pptx.subject = file.basename;
   pptx.title = file.basename;
+  const embeddedAssets = await collectEmbeddedExportAssets(options.app, options.sourcePath, model);
   const pageCount = Math.max(0, model.pageBreaks.length - 1);
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
     const slide = pptx.addSlide();
@@ -3898,6 +5524,19 @@ async function buildEditablePptx(
         y: media.topPx * model.pxToPt / 72,
         w: media.widthPx * model.pxToPt / 72,
         h: media.heightPx * model.pxToPt / 72
+      });
+    }
+    for (const placement of await getPptxVideoPlacements(model, pageIndex, embeddedAssets)) {
+      slide.addMedia({
+        type: "video",
+        data: bytesToDataUrl(placement.asset.bytes, placement.asset.mimeType),
+        extn: placement.asset.extension || "mp4",
+        cover: placement.cover,
+        objectName: placement.asset.name,
+        x: placement.leftPx * model.pxToPt / 72,
+        y: placement.topPx * model.pxToPt / 72,
+        w: placement.widthPx * model.pxToPt / 72,
+        h: placement.heightPx * model.pxToPt / 72
       });
     }
     for (const line of getPageOfficeTextLines(model, pageIndex)) {
@@ -3933,7 +5572,12 @@ async function buildEditablePptx(
       type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     });
   }
-  return injectOfficePreviewPages(blob, model, await renderOfficePreviewPages(model, options));
+  return injectOfficePreviewPages(
+    blob,
+    model,
+    await renderOfficePreviewPages(model, options),
+    embeddedAssets.filter((asset) => asset.uses.includes("file"))
+  );
 }
 
 interface WordPageDrawingOverlay {
@@ -3960,8 +5604,13 @@ async function buildEditableDocx(
     VerticalPositionRelativeFrom
   } = await import("docx");
   const pageCount = Math.max(0, model.pageBreaks.length - 1);
+  const embeddedAssets = await collectEmbeddedExportAssets(options.app, options.sourcePath, model);
   const sections = await Promise.all(Array.from({ length: pageCount }, async (_, pageIndex) => {
-    const imageRuns = (await getOfficeMediaFragments(model, pageIndex, options)).map((media) => new ImageRun({
+    const pageMedia = [
+      ...await getOfficeMediaFragments(model, pageIndex, options),
+      ...await getOfficeNoteDrawFragments(model, pageIndex, options)
+    ];
+    const imageRuns = pageMedia.map((media) => new ImageRun({
       type: "png",
       data: media.data,
       transformation: {
@@ -4004,7 +5653,12 @@ async function buildEditableDocx(
   });
   const packed = await Packer.toBlob(document);
   const editable = await injectEditableWordTextBoxes(packed, model);
-  return injectOfficePreviewPages(editable, model, await renderOfficePreviewPages(model, options));
+  return injectOfficePreviewPages(
+    editable,
+    model,
+    await renderOfficePreviewPages(model, options),
+    embeddedAssets
+  );
 }
 
 function toWordPixel(model: PreviewPdfModel, valuePx: number): number {
@@ -4138,7 +5792,8 @@ async function renderOfficePreviewPages(
 async function injectOfficePreviewPages(
   blob: Blob,
   model: PreviewPdfModel,
-  pages: Uint8Array[]
+  pages: Uint8Array[],
+  embeddedAssets: EmbeddedExportAsset[] = []
 ): Promise<Blob> {
   const { default: JSZip } = await import("jszip");
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
@@ -4152,6 +5807,26 @@ async function injectOfficePreviewPages(
   pages.forEach((page, pageIndex) => {
     zip.file(`mpe/preview/page-${String(pageIndex + 1).padStart(4, "0")}.png`, page);
   });
+  if (embeddedAssets.length > 0) {
+    const usedNames = new Set<string>();
+    const manifest = embeddedAssets.map((asset) => {
+      const name = getUniqueEmbeddedAssetName(asset.name, usedNames);
+      const archivePath = `mpe/attachments/${name}`;
+      zip.file(archivePath, asset.bytes);
+      return {
+        name,
+        sourcePath: asset.path,
+        mimeType: asset.mimeType,
+        size: asset.bytes.byteLength,
+        archivePath
+      };
+    });
+    zip.file("mpe/attachments/manifest.json", JSON.stringify({
+      schemaVersion: 1,
+      generator: "Obsidian Mobile PDF Exporter",
+      files: manifest
+    }));
+  }
   const bytes = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
   return new Blob([new Uint8Array(bytes).buffer], { type: blob.type });
 }
@@ -4480,7 +6155,14 @@ const HTML_FLOW_SIZE_PROPERTIES = new Set<string>([
 ]);
 const HTML_POSITION_OFFSET_PROPERTIES = new Set<string>(["top", "right", "bottom", "left"]);
 
-async function buildRenderedDomHtml(file: TFile, pageEl: HTMLElement, signal?: AbortSignal): Promise<Blob> {
+async function buildRenderedDomHtml(
+  app: App,
+  file: TFile,
+  pageEl: HTMLElement,
+  noteDrawHost: HTMLElement,
+  preparedNoteDraw: PreparedNoteDrawExportOverlay,
+  signal?: AbortSignal
+): Promise<Blob> {
   throwIfExportCancelled(signal);
   await waitForImages(pageEl, IMAGE_WAIT_TIMEOUT_MS);
   const clone = pageEl.cloneNode(true) as HTMLElement;
@@ -4489,7 +6171,16 @@ async function buildRenderedDomHtml(file: TFile, pageEl: HTMLElement, signal?: A
   for (let index = 0; index < Math.min(sourceElements.length, clonedElements.length); index += 1) {
     copyRenderedHtmlStyle(sourceElements[index], clonedElements[index]);
   }
-  await inlineRenderedHtmlMedia(sourceElements, clonedElements, signal);
+  await inlineRenderedHtmlMedia(app, file.path, sourceElements, clonedElements, signal);
+  await injectRenderedHtmlNoteDrawAssets(
+    app,
+    file.path,
+    noteDrawHost,
+    preparedNoteDraw,
+    sourceElements,
+    clonedElements,
+    signal
+  );
   clone.querySelectorAll("script,style,link,button,.collapse-indicator,.heading-collapse-indicator,.markdown-embed-link,.edit-block-button,.copy-code-button,.notedraw-toolbar,.note-doodle-toolbar").forEach((element) => element.remove());
   removeObsidianOnlyHtmlUrls(clone);
   clone.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {
@@ -4541,6 +6232,8 @@ function copyRenderedHtmlStyle(source: HTMLElement, target: HTMLElement): void {
 }
 
 async function inlineRenderedHtmlMedia(
+  app: App,
+  sourcePath: string,
   sourceElements: HTMLElement[],
   clonedElements: HTMLElement[],
   signal?: AbortSignal
@@ -4564,13 +6257,20 @@ async function inlineRenderedHtmlMedia(
     if (source.instanceOf(HTMLVideoElement) && target.instanceOf(HTMLVideoElement)) {
       const sourceUrl = source.currentSrc || source.src;
       try {
-        const response = sourceUrl ? await source.ownerDocument.win.fetch(sourceUrl, { signal }) : null;
-        const bytes = response?.ok ? new Uint8Array(await response.arrayBuffer()) : null;
-        if (bytes?.byteLength && bytes.byteLength <= HTML_VIDEO_INLINE_MAX_BYTES) {
-          target.src = bytesToDataUrl(bytes, response?.headers.get("content-type")?.split(";", 1)[0] || "video/mp4");
+        const wrapper = source.closest(".internal-embed, .media-embed");
+        const linkPath = wrapper?.getAttribute("src")?.trim() || source.getAttribute("src")?.trim() || "";
+        const vaultAsset = linkPath ? await readVaultEmbeddedAsset(app, sourcePath, linkPath) : null;
+        const response = !vaultAsset && sourceUrl
+          ? await source.ownerDocument.win.fetch(sourceUrl, { signal })
+          : null;
+        const bytes = vaultAsset?.bytes ?? (response?.ok ? new Uint8Array(await response.arrayBuffer()) : null);
+        const mimeType = vaultAsset?.mimeType ?? response?.headers.get("content-type")?.split(";", 1)[0] ?? "video/mp4";
+        if (bytes?.byteLength) {
+          target.src = bytesToDataUrl(bytes, mimeType);
           target.querySelectorAll("source").forEach((element) => element.remove());
           target.controls = true;
           target.setAttribute("playsinline", "true");
+          target.setAttribute("preload", "metadata");
           continue;
         }
       } catch (error) {
@@ -5769,6 +7469,67 @@ async function loadNoteDrawImageMedia(
   }
 }
 
+async function injectRenderedHtmlNoteDrawAssets(
+  app: App,
+  sourcePath: string,
+  noteDrawHost: HTMLElement,
+  prepared: PreparedNoteDrawExportOverlay,
+  sourceElements: HTMLElement[],
+  clonedElements: HTMLElement[],
+  signal?: AbortSignal
+): Promise<void> {
+  const hostIndex = sourceElements.indexOf(noteDrawHost);
+  const targetHost = hostIndex >= 0 ? clonedElements[hostIndex] : null;
+  if (!targetHost) return;
+  if (!targetHost.style.position || targetHost.style.position === "static") {
+    targetHost.setCssStyles({ position: "relative" });
+  }
+  const projectedElements = projectNoteDrawElements(
+    prepared.sourceElements,
+    prepared.widthPx,
+    prepared.heightPx,
+    prepared.contentFrame,
+    0,
+    0,
+    1
+  );
+  for (const element of projectedElements) {
+    if ((element.kind !== "video" && element.kind !== "file") || !element.assetPath) continue;
+    throwIfExportCancelled(signal);
+    const asset = await readVaultEmbeddedAsset(app, sourcePath, element.assetPath, element.assetMime || undefined);
+    if (!asset) continue;
+    const commonStyles = {
+      position: "absolute",
+      left: `${element.left}px`,
+      top: `${element.top}px`,
+      width: `${Math.max(1, element.right - element.left)}px`,
+      height: `${Math.max(1, element.bottom - element.top)}px`,
+      zIndex: "61"
+    };
+    if (element.kind === "video") {
+      const video = (targetHost.ownerDocument.win as ObsidianExportWindow).createEl("video");
+      video.className = "mpe-notedraw-embedded-video";
+      video.src = bytesToDataUrl(asset.bytes, asset.mimeType);
+      video.controls = true;
+      video.playsInline = true;
+      video.preload = "metadata";
+      const poster = noteDrawMediaToPngDataUrl(element.media);
+      if (poster) video.poster = poster;
+      video.setCssStyles({ ...commonStyles, objectFit: "contain" });
+      targetHost.appendChild(video);
+      continue;
+    }
+    const anchor = (targetHost.ownerDocument.win as ObsidianExportWindow).createEl("a");
+    anchor.className = "mpe-notedraw-embedded-file";
+    anchor.href = bytesToDataUrl(asset.bytes, asset.mimeType);
+    anchor.download = asset.name;
+    anchor.setAttribute("aria-label", asset.name);
+    anchor.title = asset.name;
+    anchor.setCssStyles({ ...commonStyles, display: "block", color: "transparent", background: "transparent" });
+    targetHost.appendChild(anchor);
+  }
+}
+
 async function loadNoteDrawVideoFrame(
   app: App,
   ownerDocument: Document,
@@ -5901,8 +7662,20 @@ function attachPreparedNoteDrawToModel(
     options.offsetY,
     options.scale
   );
+  const sourceElements = prepared.sourceElements === prepared.elements
+    ? elements
+    : projectNoteDrawElements(
+      prepared.sourceElements,
+      prepared.widthPx,
+      prepared.heightPx,
+      prepared.contentFrame,
+      options.offsetX,
+      options.offsetY,
+      options.scale
+    );
   model.noteDrawInkStrokes = ink;
   model.noteDrawElements = elements;
+  model.noteDrawSourceElements = sourceElements;
 
   for (const element of elements) {
     if (!element.assetPath || element.kind === "text" || element.kind === "connector") continue;
@@ -7672,7 +9445,7 @@ async function renderPreviewPageToPngBytes(
   const scale = getSafePreviewImageScale(model.sourceWidthPx, model.pageHeightPx, options.rasterScale);
   const canvas = createCanvas(model.ownerDocument);
   const context = canvas.getContext("2d");
-  if (!context) throw new Error("图片版 PDF 渲染失败：canvas 不可用。");
+  if (!context) throw new Error(translate(runtimeUiLanguage, "imagePdfCanvasError"));
 
   canvas.width = Math.max(1, Math.ceil(model.sourceWidthPx * scale));
   canvas.height = Math.max(1, Math.ceil(model.pageHeightPx * scale));
@@ -9227,7 +11000,7 @@ async function imageSliceToPngBytes(
   const targetHeight = Math.max(1, Math.floor(cropHeight * scale));
   const canvas = createCanvas(image);
   const context = canvas.getContext("2d");
-  if (!context) throw new Error("图片切片失败：canvas 不可用。");
+  if (!context) throw new Error(translate(runtimeUiLanguage, "imageSliceError"));
 
   canvas.width = targetWidth;
   canvas.height = targetHeight;

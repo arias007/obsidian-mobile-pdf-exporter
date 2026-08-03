@@ -167,8 +167,8 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /const editable = await injectEditableWordTextBoxes\(packed, model\)/);
   assert.match(source, /drawingRuns\.map\(buildInlineWordMediaRun\)/);
   assert.match(source, /<wp:inline distT="0" distB="0" distL="0" distR="0">/);
-  assert.match(source, /return injectOfficePreviewPages\(editable, model, await renderOfficePreviewPages\(model, options\)\)/);
-  assert.match(source, /return injectOfficePreviewPages\(blob, model, await renderOfficePreviewPages\(model, options\)\)/);
+  assert.match(source, /return injectOfficePreviewPages\(\s*editable,\s*model,\s*await renderOfficePreviewPages\(model, options\),\s*embeddedAssets/);
+  assert.match(source, /return injectOfficePreviewPages\(\s*blob,\s*model,\s*await renderOfficePreviewPages\(model, options\),\s*embeddedAssets\.filter/);
   assert.match(source, /includeNoteDraw:\s*true/);
   assert.match(source, /for \(const line of getPageOfficeTextLines\(model, pageIndex\)\)/);
   assert.match(source, /slide\.addText\(richText,/);
@@ -176,11 +176,16 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /async function getOfficeMediaFragments\([\s\S]*?renderOptions: OfficeRenderOptions/);
   assert.match(source, /for \(const media of await getOfficeMediaFragments\(model, pageIndex, options\)\)/);
   assert.match(source, /slide\.addImage\(\{\s*data: bytesToDataUrl\(media\.data\)/);
+  assert.match(source, /slide\.addMedia\(\{\s*type: "video",\s*data: bytesToDataUrl\(placement\.asset\.bytes, placement\.asset\.mimeType\)/);
   assert.match(source, /const visualBackground = await renderOfficePageVisualBackground\(model, pageIndex, options\)/);
   assert.match(source, /textFragments: \[\],[\s\S]*imageFragments: model\.imageFragments,[\s\S]*canvasFragments: model\.canvasFragments/);
   assert.match(source, /sourcePath: getImageFragmentSourcePath\(image\)/);
   assert.match(source, /linkPath: fragment\.sourcePath/);
   assert.match(source, /new ImageRun\(\{/);
+  assert.match(source, /async function getOfficeNoteDrawFragments\(/);
+  assert.match(source, /for \(const element of model\.noteDrawSourceElements \?\? model\.noteDrawElements \?\? \[\]\)/);
+  assert.match(source, /for \(const stroke of model\.noteDrawInkStrokes \?\? \[\]\)/);
+  assert.match(source, /\.\.\.await getOfficeNoteDrawFragments\(model, pageIndex, options\)/);
   assert.match(source, /behindDocument: false/);
   assert.match(source, /wrap: \{ type: TextWrappingType\.NONE \}/);
   assert.doesNotMatch(source, /new Header\(/);
@@ -224,18 +229,19 @@ test("HTML export uses semantic layers instead of a full-page PNG wrapper", asyn
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /if \(format === "html" && isMarkdown\)/);
-  assert.match(source, /outputBlob = await buildRenderedDomHtml\(file, rendered\.pageEl, signal\)/);
-  assert.match(source, /async function buildRenderedDomHtml\(file: TFile, pageEl: HTMLElement, signal\?: AbortSignal\)/);
+  assert.match(source, /outputBlob = await buildRenderedDomHtml\(\s*this\.app,\s*file,\s*rendered\.pageEl,\s*noteDrawHost,\s*preparedNoteDraw,\s*signal/);
+  assert.match(source, /async function buildRenderedDomHtml\(\s*app: App,\s*file: TFile,\s*pageEl: HTMLElement,\s*noteDrawHost: HTMLElement/);
   assert.match(source, /data-mpe-format="rendered-dom"/);
   assert.match(source, /copyRenderedHtmlStyle\(sourceElements\[index\], clonedElements\[index\]\)/);
   assert.match(source, /const HTML_FLOW_SIZE_PROPERTIES = new Set<string>/);
   assert.match(source, /if \(!preservesSize && HTML_FLOW_SIZE_PROPERTIES\.has\(property\)\) continue/);
   assert.match(source, /\.mpe-rendered-document img\{max-width:100%;height:auto!important\}/);
-  assert.match(source, /await inlineRenderedHtmlMedia\(sourceElements, clonedElements, signal\)/);
+  assert.match(source, /await inlineRenderedHtmlMedia\(app, file\.path, sourceElements, clonedElements, signal\)/);
+  assert.match(source, /await injectRenderedHtmlNoteDrawAssets\(/);
   assert.match(source, /removeObsidianOnlyHtmlUrls\(clone\)/);
   assert.match(source, /function removeObsidianOnlyHtmlUrls\(root: HTMLElement\)/);
   assert.match(source, /\["src", "srcset", "poster", "data", "aria-label"\]/);
-  assert.match(source, /target\.src = bytesToDataUrl\(bytes\)/);
+  assert.match(source, /target\.src = bytesToDataUrl\(bytes, mimeType\)/);
   assert.match(source, /source\.toDataURL\("image\/png"\)/);
   assert.match(source, /target\.replaceWith\(image\)/);
   assert.match(source, /const projectedElements = projectNoteDrawElements\(/);
@@ -304,7 +310,24 @@ test("multilingual text and videos keep visual and selectable export fallbacks",
   assert.match(source, /function captureVideoFragments\(/);
   assert.match(source, /function drawCanvasVideoLayer\(/);
   assert.match(source, /drawCanvasVideoPlayGlyph\(/);
-  assert.match(source, /HTML_VIDEO_INLINE_MAX_BYTES/);
+  assert.match(source, /const bytes = vaultAsset\?\.bytes \?\?/);
+  assert.match(source, /if \(bytes\?\.byteLength\) \{/);
+  assert.doesNotMatch(source, /HTML_VIDEO_INLINE_MAX_BYTES/);
+  assert.match(source, /await pdfDoc\.attach\(asset\.bytes, name,/);
+  assert.match(source, /zip\.file\(archivePath, asset\.bytes\)/);
+});
+
+test("title choices and localized status text are honored across common languages", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /const UI_LANGUAGES = \[[\s\S]*?"auto",[\s\S]*?"zh",[\s\S]*?"en",[\s\S]*?"ja",[\s\S]*?"ko",[\s\S]*?"es",[\s\S]*?"fr",[\s\S]*?"de",[\s\S]*?"ru",[\s\S]*?"pt",[\s\S]*?"it",[\s\S]*?"ar",[\s\S]*?"hi",[\s\S]*?"id",[\s\S]*?"tr",[\s\S]*?"vi",[\s\S]*?"th"[\s\S]*?\] as const/);
+  assert.match(source, /const suppressedInlineTitles = this\.settings\.includeTitle\s*\? \[\]\s*:\s*Array\.from\(rootEl\.querySelectorAll<HTMLElement>\("\.inline-title"\)\)/);
+  assert.match(source, /suppressedInlineTitles\.forEach\(\(element\) => element\.classList\.add\("mobile-pdf-exporter-skip"\)\)/);
+  assert.match(source, /suppressedInlineTitles\.forEach\(\(element\) => element\.classList\.remove\("mobile-pdf-exporter-skip"\)\)/);
+  const translationEnd = source.indexOf("} as const;", source.indexOf("const UI_TEXT ="));
+  assert.ok(translationEnd > 0);
+  const runtimeSource = source.slice(translationEnd);
+  assert.doesNotMatch(runtimeSource, /[\u4e00-\u9fff]/u);
 });
 
 test("punctuation and emoji preserve original grapheme clusters", async () => {

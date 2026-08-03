@@ -342,6 +342,11 @@ interface NoteDoodlePoint {
   x: number;
   y: number;
   t: number;
+  anchor: {
+    basis: "note-content-v1";
+    x: number;
+    y: number;
+  } | null;
 }
 
 interface NoteDoodleStroke {
@@ -1219,6 +1224,28 @@ export default class MobilePdfExporterPlugin extends Plugin {
     return { rootEl, scrollEl, mode: "generic" };
   }
 
+  private getHtmlRenderGeometry(file: TFile): { width: number; paddingLeft: number; paddingRight: number } {
+    const surface = this.getActiveMarkdownSurface(file);
+    if (!surface) {
+      const width = clampNumber(this.settings.currentPageWidthPx, 320, 1600, 960);
+      const padding = clampNumber(width * 0.05, 16, 48, 48);
+      return { width, paddingLeft: padding, paddingRight: padding };
+    }
+
+    const rect = surface.rootEl.getBoundingClientRect();
+    const width = clampNumber(
+      Math.max(surface.rootEl.clientWidth || 0, surface.scrollEl.clientWidth || 0, rect.width || 0),
+      240,
+      1600,
+      960
+    );
+    const frame = measureNoteDrawTargetContentFrame(surface.rootEl, width);
+    const paddingLeft = clampNumber(frame.left, 0, Math.max(0, width - 1), 0);
+    const contentWidth = clampNumber(frame.width, 1, Math.max(1, width - paddingLeft), width - paddingLeft);
+    const paddingRight = Math.max(0, width - paddingLeft - contentWidth);
+    return { width, paddingLeft, paddingRight };
+  }
+
   private getActiveMarkdownSurface(file: TFile): LiveMarkdownSurface | null {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view?.file || view.file.path !== file.path) return null;
@@ -1491,8 +1518,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
     layout: "pdf" | "html" = "pdf"
   ): Promise<RenderedPreview> {
     const pageSizeMm = getConfiguredPageSizeMm(this.settings);
-    const renderWidthPx = layout === "html" ? 960 : mmToPx(pageSizeMm.width);
-    const paddingPx = layout === "html" ? 48 : mmToPx(this.settings.marginMm);
+    const htmlGeometry = layout === "html" ? this.getHtmlRenderGeometry(file) : null;
+    const renderWidthPx = htmlGeometry?.width ?? mmToPx(pageSizeMm.width);
+    const paddingPx = mmToPx(this.settings.marginMm);
+    const paddingLeftPx = htmlGeometry?.paddingLeft ?? paddingPx;
+    const paddingRightPx = htmlGeometry?.paddingRight ?? paddingPx;
     const pageHeightPx = mmToPx(pageSizeMm.height);
     const { bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
     const isExcalidrawFile = isExcalidrawMarkdownFile(file, markdown);
@@ -1511,6 +1541,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       rootEl.setCssProps({
         "--mobile-pdf-exporter-width": `${renderWidthPx}px`,
         "--mobile-pdf-exporter-padding": `${paddingPx}px`,
+        "--mobile-pdf-exporter-padding-left": `${paddingLeftPx}px`,
+        "--mobile-pdf-exporter-padding-right": `${paddingRightPx}px`,
         "--mobile-pdf-exporter-page-height": `${pageHeightPx}px`,
         "--mobile-pdf-exporter-body-height": `${bodyHeightPx}px`,
         "--mobile-pdf-exporter-font-scale": String(this.settings.contentScalePercent / 100)
@@ -1642,6 +1674,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
   private injectNoteDoodleOverlay(file: TFile, markdownEl: HTMLElement): void {
     const overlay = getVisibleLiveDrawingOverlay(file);
     if (!overlay?.canvas && !overlay?.data?.strokes.length) return;
+    const noteDrawApi = (this.app as unknown as {
+      plugins?: { plugins?: Record<string, { api?: NoteDrawApiRuntime }> };
+    }).plugins?.plugins?.notedraw?.api;
+    if (overlay.kind === "notedraw" && noteDrawApi?.readDrawings) return;
 
     const rect = markdownEl.getBoundingClientRect();
     const width = Math.max(1, Math.ceil(markdownEl.scrollWidth || rect.width || 1));
@@ -1767,7 +1803,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const context = canvas.getContext("2d");
       if (context) {
         context.setTransform(ratio, 0, 0, ratio, 0, 0);
-        if (data?.strokes.length) drawNoteDoodleStrokes(context, data.strokes, width, height);
+        if (data?.strokes.length) drawNoteDoodleStrokes(context, data.strokes, width, height, contentFrame);
         const projectedElements = projectNoteDrawElements(
           elements,
           width,
@@ -3368,6 +3404,7 @@ function projectNoteDrawInkStrokes(
   data: NoteDoodleData | null,
   widthPx: number,
   heightPx: number,
+  contentFrame: NoteDrawContentFrame,
   offsetX: number,
   offsetY: number,
   scale: number
@@ -3381,7 +3418,7 @@ function projectNoteDrawInkStrokes(
       opacity: stroke.opacity,
       count: stroke.count,
       points: stroke.points.map((point) => ({
-        x: offsetX + point.x * widthPx * scale,
+        x: offsetX + noteDoodlePointToCanvas(point, widthPx, heightPx, contentFrame).x * scale,
         y: offsetY + point.y * heightPx * scale
       }))
     }))
@@ -3418,14 +3455,29 @@ function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
 }
 
 function normalizeNoteDoodlePoint(point: unknown): NoteDoodlePoint | null {
-  const candidate = point && typeof point === "object" ? point as { x?: unknown; y?: unknown; t?: unknown } : null;
+  const candidate = point && typeof point === "object"
+    ? point as { x?: unknown; y?: unknown; t?: unknown; anchor?: unknown }
+    : null;
   const x = Number(candidate?.x);
   const y = Number(candidate?.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const rawAnchor = candidate?.anchor && typeof candidate.anchor === "object"
+    ? candidate.anchor as { basis?: unknown; x?: unknown; y?: unknown }
+    : null;
+  const anchorX = Number(rawAnchor?.x);
+  const anchorY = Number(rawAnchor?.y);
+  const anchor = rawAnchor?.basis === "note-content-v1" && Number.isFinite(anchorX) && Number.isFinite(anchorY)
+    ? {
+      basis: "note-content-v1" as const,
+      x: clampNumber(anchorX, -1, 2, 0),
+      y: clampNumber(anchorY, 0, 1, y)
+    }
+    : null;
   return {
     x: clampNumber(x, 0, 1, 0),
     y: clampNumber(y, 0, 1, 0),
-    t: Number.isFinite(Number(candidate?.t)) ? Number(candidate?.t) : Date.now()
+    t: Number.isFinite(Number(candidate?.t)) ? Number(candidate?.t) : Date.now(),
+    anchor
   };
 }
 
@@ -5835,6 +5887,7 @@ function attachPreparedNoteDrawToModel(
     prepared.data,
     prepared.widthPx,
     prepared.heightPx,
+    prepared.contentFrame,
     options.offsetX,
     options.offsetY,
     options.scale
@@ -9350,13 +9403,14 @@ function drawNoteDoodleStrokes(
   context: CanvasRenderingContext2D,
   strokes: NoteDoodleStroke[],
   width: number,
-  height: number
+  height: number,
+  contentFrame?: NoteDrawContentFrame
 ): void {
   for (const stroke of strokes) {
     if (stroke.brush === NOTE_DOODLE_WATERCOLOR) {
-      drawNoteDoodleWatercolorStroke(context, stroke, width, height);
+      drawNoteDoodleWatercolorStroke(context, stroke, width, height, contentFrame);
     } else {
-      drawNoteDoodlePenStroke(context, stroke, width, height);
+      drawNoteDoodlePenStroke(context, stroke, width, height, contentFrame);
     }
   }
 }
@@ -9365,7 +9419,8 @@ function drawNoteDoodlePenStroke(
   context: CanvasRenderingContext2D,
   stroke: NoteDoodleStroke,
   width: number,
-  height: number
+  height: number,
+  contentFrame?: NoteDrawContentFrame
 ): void {
   if (!stroke.points.length) return;
   const offsets = getNoteDoodlePenOffsets(stroke.count, stroke.width);
@@ -9379,11 +9434,11 @@ function drawNoteDoodlePenStroke(
 
   for (const offset of offsets) {
     context.beginPath();
-    const first = noteDoodlePointToCanvas(stroke.points[0], width, height);
+    const first = noteDoodlePointToCanvas(stroke.points[0], width, height, contentFrame);
     context.moveTo(first.x + offset.x, first.y + offset.y);
 
     for (const point of stroke.points.slice(1)) {
-      const next = noteDoodlePointToCanvas(point, width, height);
+      const next = noteDoodlePointToCanvas(point, width, height, contentFrame);
       context.lineTo(next.x + offset.x, next.y + offset.y);
     }
 
@@ -9397,7 +9452,8 @@ function drawNoteDoodleWatercolorStroke(
   context: CanvasRenderingContext2D,
   stroke: NoteDoodleStroke,
   width: number,
-  height: number
+  height: number,
+  contentFrame?: NoteDrawContentFrame
 ): void {
   if (!stroke.points.length) return;
   const strokeWidth = Math.max(2, stroke.width);
@@ -9413,11 +9469,11 @@ function drawNoteDoodleWatercolorStroke(
     context.globalAlpha = opacity * (layerIndex === 0 ? 0.46 : 0.22);
     context.lineWidth = strokeWidth * (layerIndex === 0 ? 2.15 : 1.55);
     context.beginPath();
-    const first = noteDoodlePointToCanvas(stroke.points[0], width, height);
+    const first = noteDoodlePointToCanvas(stroke.points[0], width, height, contentFrame);
     context.moveTo(first.x + offset.x, first.y + offset.y);
 
     for (const point of stroke.points.slice(1)) {
-      const next = noteDoodlePointToCanvas(point, width, height);
+      const next = noteDoodlePointToCanvas(point, width, height, contentFrame);
       context.lineTo(next.x + offset.x, next.y + offset.y);
     }
 
@@ -9427,9 +9483,17 @@ function drawNoteDoodleWatercolorStroke(
   context.restore();
 }
 
-function noteDoodlePointToCanvas(point: NoteDoodlePoint, width: number, height: number): { x: number; y: number } {
+function noteDoodlePointToCanvas(
+  point: NoteDoodlePoint,
+  width: number,
+  height: number,
+  contentFrame?: NoteDrawContentFrame
+): { x: number; y: number } {
+  const x = contentFrame && point.anchor?.basis === "note-content-v1"
+    ? contentFrame.left + point.anchor.x * contentFrame.width
+    : point.x * width;
   return {
-    x: point.x * width,
+    x,
     y: point.y * height
   };
 }

@@ -75,6 +75,10 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.4.15
+
+- Keeps NoteDraw ink and elements on their saved Markdown content lane, removes duplicate HTML overlay layers, and preserves the active Markdown view width in HTML exports.
+
 ### 0.4.14
 
 - Preserves the original spacing around ASCII and full-width colons instead of compacting them into adjacent text.

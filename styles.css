@@ -20,7 +20,7 @@
 .mobile-pdf-exporter-page {
   box-sizing: border-box;
   width: 100%;
-  padding: 0 var(--mobile-pdf-exporter-padding, 40px);
+  padding: 0 var(--mobile-pdf-exporter-padding-right, var(--mobile-pdf-exporter-padding, 40px)) 0 var(--mobile-pdf-exporter-padding-left, var(--mobile-pdf-exporter-padding, 40px));
   background: var(--background-primary);
   color: var(--text-normal);
   overflow: hidden;

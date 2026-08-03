@@ -241,6 +241,10 @@ test("HTML export uses semantic layers instead of a full-page PNG wrapper", asyn
   assert.match(source, /const projectedElements = projectNoteDrawElements\(/);
   assert.match(source, /const htmlFallbackElements = injectedImageLayers\.length > 0/);
   assert.match(source, /drawCanvasNoteDrawElementLayer\(context, htmlFallbackElements/);
+  assert.match(source, /const htmlGeometry = layout === "html" \? this\.getHtmlRenderGeometry\(file\) : null/);
+  assert.match(source, /--mobile-pdf-exporter-padding-left/);
+  assert.match(source, /--mobile-pdf-exporter-padding-right/);
+  assert.match(source, /overlay\.kind === "notedraw" && noteDrawApi\?\.readDrawings/);
   assert.doesNotMatch(source, /return buildSelfContainedHtml\(file, model, pages\)/);
 });
 
@@ -268,7 +272,7 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /rawData = await api\.readDrawings\(file\)/);
   assert.match(source, /rawData as \{ visible\?: unknown \}/);
   assert.match(source, /await api\.injectExportSnapshot\(file, host\)/);
-  assert.match(source, /drawNoteDoodleStrokes\(context, data\.strokes, width, height\)/);
+  assert.match(source, /drawNoteDoodleStrokes\(context, data\.strokes, width, height, contentFrame\)/);
   assert.match(source, /mobile-pdf-exporter-note-doodle-canvas mobile-pdf-exporter-live-drawing-canvas notedraw-canvas/);
   assert.match(source, /function isNoteDrawCanvasFragment\(fragment: CanvasFragment\)/);
   assert.match(source, /canvas\.closest\(\s*"\.notedraw-shell, \.note-doodle-shell, \.notedraw-export-image-canvas-layer"/);
@@ -279,6 +283,8 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /contentWidth: frameContentWidth >= 1 \? frameContentWidth : frameWidth/);
   assert.match(source, /targetContentLeft \+ \(element\.layoutBox\.x - sourceFrame\.contentLeft\) \* frameScaleX/);
   assert.match(source, /targetContentLeft \+ \(normalizedX \* sourceFrame\.surfaceWidth - sourceFrame\.contentLeft\) \* frameScaleX/);
+  assert.match(source, /rawAnchor\?\.basis === "note-content-v1"/);
+  assert.match(source, /contentFrame\.left \+ point\.anchor\.x \* contentFrame\.width/);
   assert.match(source, /function projectNoteDrawElements\(/);
   assert.match(source, /function drawCanvasNoteDrawElementLayer\(/);
   assert.match(source, /candidate\?\.kind === "text" \|\| candidate\?\.kind === "embed" \|\| candidate\?\.connector/);

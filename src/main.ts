@@ -5037,6 +5037,7 @@ interface OfficeMediaFragment {
   topPx: number;
   widthPx: number;
   heightPx: number;
+  assetPath?: string;
 }
 
 interface OfficeRenderOptions {
@@ -5292,6 +5293,47 @@ async function getOfficeMediaFragments(
   return media;
 }
 
+async function getDocxVideoCoverFragments(
+  model: PreviewPdfModel,
+  pageIndex: number
+): Promise<OfficeMediaFragment[]> {
+  const pageTopPx = model.pageBreaks[pageIndex];
+  const pageBottomPx = model.pageBreaks[pageIndex + 1];
+  const options = {
+    pageTopPx,
+    pageBottomPx,
+    sourceWidthPx: model.sourceWidthPx,
+    pageHeightPx: model.bodyHeightPx
+  };
+  const media: OfficeMediaFragment[] = [];
+
+  for (const fragment of model.videoFragments) {
+    const slice = getMediaPageSlice(fragment, options);
+    if (!slice || !fragment.sourcePath) continue;
+    try {
+      const cover = await getVideoCoverDataUrl(fragment.element);
+      if (!cover) continue;
+      const fullBytes = dataUrlToUint8Array(cover);
+      const image = await imageBytesToHtmlImage(fullBytes);
+      const sourceHeight = Math.max(1, image.naturalHeight || image.height);
+      const sourceY = (slice.offsetTopPx / slice.fragmentHeightPx) * sourceHeight;
+      const sourceSliceHeight = (slice.height / slice.fragmentHeightPx) * sourceHeight;
+      media.push({
+        data: await imageSliceToPngBytes(image, sourceY, sourceSliceHeight),
+        leftPx: slice.x,
+        topPx: model.bodyTopInsetPx + slice.y,
+        widthPx: slice.width,
+        heightPx: slice.height,
+        assetPath: fragment.sourcePath
+      });
+    } catch (error) {
+      console.warn("Mobile PDF Exporter DOCX video cover export failed", error);
+    }
+  }
+
+  return media;
+}
+
 async function getOfficeNoteDrawFragments(
   model: PreviewPdfModel,
   pageIndex: number,
@@ -5305,7 +5347,8 @@ async function getOfficeNoteDrawFragments(
     top: number,
     right: number,
     bottom: number,
-    draw: (context: CanvasRenderingContext2D) => void
+    draw: (context: CanvasRenderingContext2D) => void,
+    assetPath?: string
   ): void => {
     const clippedLeft = clampNumber(left, 0, model.sourceWidthPx, 0);
     const clippedRight = clampNumber(right, 0, model.sourceWidthPx, model.sourceWidthPx);
@@ -5337,7 +5380,8 @@ async function getOfficeNoteDrawFragments(
       leftPx: clippedLeft,
       topPx: model.bodyTopInsetPx + clippedTop - pageTopPx,
       widthPx,
-      heightPx
+      heightPx,
+      assetPath
     });
   };
 
@@ -5353,7 +5397,8 @@ async function getOfficeNoteDrawFragments(
         pageTopPx,
         pageBottomPx,
         sourceWidthPx: model.sourceWidthPx
-      })
+      }),
+      element.kind === "video" ? element.assetPath : undefined
     );
   }
 
@@ -5588,6 +5633,11 @@ interface WordPageDrawingOverlay {
   heightPx: number;
 }
 
+interface WordEmbeddedVideo {
+  marker: string;
+  asset: EmbeddedExportAsset;
+}
+
 async function buildEditableDocx(
   file: TFile,
   model: PreviewPdfModel,
@@ -5605,54 +5655,79 @@ async function buildEditableDocx(
   } = await import("docx");
   const pageCount = Math.max(0, model.pageBreaks.length - 1);
   const embeddedAssets = await collectEmbeddedExportAssets(options.app, options.sourcePath, model);
-  const sections = await Promise.all(Array.from({ length: pageCount }, async (_, pageIndex) => {
+  const sectionResults = await Promise.all(Array.from({ length: pageCount }, async (_, pageIndex) => {
     const pageMedia = [
       ...await getOfficeMediaFragments(model, pageIndex, options),
+      ...await getDocxVideoCoverFragments(model, pageIndex),
       ...await getOfficeNoteDrawFragments(model, pageIndex, options)
     ];
-    const imageRuns = pageMedia.map((media) => new ImageRun({
-      type: "png",
-      data: media.data,
-      transformation: {
-        width: Math.max(1, Math.round(toWordPixel(model, media.widthPx))),
-        height: Math.max(1, Math.round(toWordPixel(model, media.heightPx)))
-      },
-      floating: {
-        horizontalPosition: {
-          relative: HorizontalPositionRelativeFrom.PAGE,
-          offset: Math.round(toWordPixel(model, media.leftPx) * 9525)
+    const videos: WordEmbeddedVideo[] = [];
+    const imageRuns = pageMedia.map((media, mediaIndex) => {
+      const videoAsset = media.assetPath
+        ? findEmbeddedExportAsset(embeddedAssets, media.assetPath)
+        : null;
+      const marker = videoAsset?.uses.includes("video")
+        ? `MPE_VIDEO_${pageIndex}_${mediaIndex}`
+        : null;
+      if (marker && videoAsset) videos.push({ marker, asset: videoAsset });
+      return new ImageRun({
+        type: "png",
+        data: media.data,
+        transformation: {
+          width: Math.max(1, Math.round(toWordPixel(model, media.widthPx))),
+          height: Math.max(1, Math.round(toWordPixel(model, media.heightPx)))
         },
-        verticalPosition: {
-          relative: VerticalPositionRelativeFrom.PAGE,
-          offset: Math.round(toWordPixel(model, media.topPx) * 9525)
-        },
-        wrap: { type: TextWrappingType.NONE },
-        behindDocument: false,
-        allowOverlap: true,
-        lockAnchor: true,
-        zIndex: 2
-      }
-    }));
+        ...(marker && videoAsset ? {
+          altText: {
+            name: marker,
+            title: videoAsset.name,
+            description: `Embedded video: ${videoAsset.name}`
+          }
+        } : {}),
+        floating: {
+          horizontalPosition: {
+            relative: HorizontalPositionRelativeFrom.PAGE,
+            offset: Math.round(toWordPixel(model, media.leftPx) * 9525)
+          },
+          verticalPosition: {
+            relative: VerticalPositionRelativeFrom.PAGE,
+            offset: Math.round(toWordPixel(model, media.topPx) * 9525)
+          },
+          wrap: { type: TextWrappingType.NONE },
+          behindDocument: false,
+          allowOverlap: true,
+          lockAnchor: true,
+          zIndex: 2
+        }
+      });
+    });
     return {
-     properties: {
-       page: {
-         size: { width: Math.round(model.pageWidthPt * 20), height: Math.round(model.pageHeightPt * 20) },
-         margin: { top: 360, right: 360, bottom: 360, left: 360 }
-       }
+      section: {
+        properties: {
+          page: {
+            size: { width: Math.round(model.pageWidthPt * 20), height: Math.round(model.pageHeightPt * 20) },
+            margin: { top: 360, right: 360, bottom: 360, left: 360 }
+          }
+        },
+        children: [
+          new Paragraph({ children: [...imageRuns, new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
+        ]
       },
-      children: [
-        new Paragraph({ children: [...imageRuns, new TextRun(`__MPE_PAGE_${pageIndex}__`)] })
-      ]
+      videos
     };
   }));
   const document = new Document({
     creator: "Obsidian Mobile PDF Exporter",
     title: file.basename,
     description: "High-fidelity export with an editable text layer.",
-    sections
+    sections: sectionResults.map((result) => result.section)
   });
   const packed = await Packer.toBlob(document);
-  const editable = await injectEditableWordTextBoxes(packed, model);
+  const editable = await injectEditableWordTextBoxes(
+    packed,
+    model,
+    sectionResults.flatMap((result) => result.videos)
+  );
   return injectOfficePreviewPages(
     editable,
     model,
@@ -5912,13 +5987,19 @@ async function renderNoteDrawPageOverlayToPngBytes(
   };
 }
 
-async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): Promise<Blob> {
+async function injectEditableWordTextBoxes(
+  blob: Blob,
+  model: PreviewPdfModel,
+  embeddedVideos: WordEmbeddedVideo[] = []
+): Promise<Blob> {
   const { default: JSZip } = await import("jszip");
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
   const documentFile = zip.file("word/document.xml");
   if (!documentFile) throw new Error("DOCX document.xml is missing.");
   let xml = await documentFile.async("string");
   const hyperlinkIds = buildWordHyperlinkIdMap(model.textFragments);
+  const videoParts = buildWordEmbeddedVideoParts(embeddedVideos);
+  let videoObjectIndex = 0;
   for (let pageIndex = 0; pageIndex < model.pageBreaks.length - 1; pageIndex += 1) {
     const marker = `__MPE_PAGE_${pageIndex}__`;
     const markerParagraph = new RegExp(`<w:p(?=[ >])(?:(?!<\\/w:p>)[\\s\\S])*?${marker}(?:(?!<\\/w:p>)[\\s\\S])*?<\\/w:p>`, "u");
@@ -5926,75 +6007,104 @@ async function injectEditableWordTextBoxes(blob: Blob, model: PreviewPdfModel): 
     if (!markerMatch) throw new Error(`DOCX page marker ${pageIndex + 1} is missing.`);
     const markerXml = markerMatch[0];
     const drawingRuns = markerXml.match(/<w:r(?=[ >])[\s\S]*?<w:drawing[\s\S]*?<\/w:r>/gu) ?? [];
-    const paragraphs = buildWordFlowTextParagraphsXml(
-      model,
-      pageIndex,
-      hyperlinkIds,
-      drawingRuns.map(buildInlineWordMediaRun).filter((item): item is WordInlineMediaRun => Boolean(item))
-    );
+    const floatingRuns = drawingRuns.map((runXml) => {
+      const videoMarker = runXml.match(/\bname="(MPE_VIDEO_\d+_\d+)"/u)?.[1];
+      const videoPart = videoMarker ? videoParts.byMarker.get(videoMarker) : undefined;
+      if (!videoPart) return runXml;
+      videoObjectIndex += 1;
+      return buildWordOleVideoRun(runXml, videoPart, videoObjectIndex) ?? runXml;
+    });
+    const floatingParagraph = floatingRuns.length > 0
+      ? `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr>${floatingRuns.join("")}</w:p>`
+      : "";
+    const paragraphs = `${floatingParagraph}${buildWordFlowTextParagraphsXml(model, pageIndex, hyperlinkIds)}`;
     xml = xml.replace(markerParagraph, paragraphs);
   }
   zip.file("word/document.xml", xml);
   await injectWordHyperlinkRelationships(zip, hyperlinkIds);
+  await injectWordEmbeddedVideoParts(zip, videoParts.parts);
   const bytes = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
   return new Blob([new Uint8Array(bytes).buffer], {
     type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
   });
 }
 
-interface WordInlineMediaRun {
-  runXml: string;
-  leftPt: number;
-  topPt: number;
-  widthPt: number;
-  heightPt: number;
+interface WordEmbeddedVideoPart {
+  asset: EmbeddedExportAsset;
+  relationshipId: string;
+  archivePath: string;
 }
 
-function buildInlineWordMediaRun(runXml: string): WordInlineMediaRun | null {
+function buildWordEmbeddedVideoParts(videos: WordEmbeddedVideo[]): {
+  parts: WordEmbeddedVideoPart[];
+  byMarker: Map<string, WordEmbeddedVideoPart>;
+} {
+  const partsByPath = new Map<string, WordEmbeddedVideoPart>();
+  const byMarker = new Map<string, WordEmbeddedVideoPart>();
+  for (const video of videos) {
+    let part = partsByPath.get(video.asset.path);
+    if (!part) {
+      const index = partsByPath.size + 1;
+      part = {
+        asset: video.asset,
+        relationshipId: `rIdMpeVideo${index}`,
+        archivePath: `word/embeddings/mpe-video-${index}.bin`
+      };
+      partsByPath.set(video.asset.path, part);
+    }
+    byMarker.set(video.marker, part);
+  }
+  return { parts: Array.from(partsByPath.values()), byMarker };
+}
+
+function buildWordOleVideoRun(
+  runXml: string,
+  video: WordEmbeddedVideoPart,
+  objectIndex: number
+): string | null {
   const anchor = runXml.match(/<wp:anchor(?=[ >])[^>]*>([\s\S]*?)<\/wp:anchor>/u);
   if (!anchor) return null;
   const body = anchor[1];
   const positionH = Number.parseInt(body.match(/<wp:positionH(?=[ >])[\s\S]*?<wp:posOffset>(-?\d+)<\/wp:posOffset>[\s\S]*?<\/wp:positionH>/u)?.[1] ?? "0", 10);
   const positionV = Number.parseInt(body.match(/<wp:positionV(?=[ >])[\s\S]*?<wp:posOffset>(-?\d+)<\/wp:posOffset>[\s\S]*?<\/wp:positionV>/u)?.[1] ?? "0", 10);
   const extent = body.match(/<wp:extent cx="(\d+)" cy="(\d+)"\s*\/>/u);
-  const graphic = body.match(/<a:graphic(?=[ >])[\s\S]*<\/a:graphic>/u)?.[0];
-  if (!extent || !graphic) return null;
-  const effectExtent = body.match(/<wp:effectExtent(?=[ >])[^>]*\/>/u)?.[0] ?? "";
-  const docProperties = body.match(/<wp:docPr(?=[ >])[^>]*\/>/u)?.[0] ?? '<wp:docPr id="1" name="Image"/>';
-  const frameProperties = body.match(/<wp:cNvGraphicFramePr(?=[ >])[\s\S]*?<\/wp:cNvGraphicFramePr>/u)?.[0] ?? "";
-  const inlineDrawing = `<wp:inline distT="0" distB="0" distL="0" distR="0">${extent[0]}${effectExtent}${docProperties}${frameProperties}${graphic}</wp:inline>`;
-  return {
-    runXml: runXml.replace(anchor[0], inlineDrawing),
-    leftPt: positionH / 12700,
-    topPt: positionV / 12700,
-    widthPt: Number.parseInt(extent[1], 10) / 12700,
-    heightPt: Number.parseInt(extent[2], 10) / 12700
-  };
+  const imageRelationshipId = body.match(/<a:blip(?=[ >])[^>]*\br:embed="([^"]+)"/u)?.[1];
+  if (!extent || !imageRelationshipId) return null;
+  const leftPt = positionH / 12700;
+  const topPt = positionV / 12700;
+  const widthPt = Math.max(1, Number.parseInt(extent[1], 10) / 12700);
+  const heightPt = Math.max(1, Number.parseInt(extent[2], 10) / 12700);
+  const shapeId = `_x0000_i${1024 + objectIndex}`;
+  const shapeTypeId = `_x0000_t75_${objectIndex}`;
+  const objectId = `_${100000000 + objectIndex}`;
+  const shapeStyle = [
+    "position:absolute",
+    `margin-left:${formatWordPoint(leftPt)}pt`,
+    `margin-top:${formatWordPoint(topPt)}pt`,
+    `width:${formatWordPoint(widthPt)}pt`,
+    `height:${formatWordPoint(heightPt)}pt`,
+    "z-index:3",
+    "mso-position-horizontal-relative:page",
+    "mso-position-vertical-relative:page",
+    "mso-wrap-style:none"
+  ].join(";");
+  const shapeType = `<v:shapetype id="${shapeTypeId}" coordsize="21600,21600" o:spt="75" o:preferrelative="t" path="m@4@5l@4@11@9@11@9@5xe" filled="f" stroked="f"><v:stroke joinstyle="miter"/><v:formulas><v:f eqn="if lineDrawn pixelLineWidth 0"/><v:f eqn="sum @0 1 0"/><v:f eqn="sum 0 0 @1"/><v:f eqn="prod @2 1 2"/><v:f eqn="prod @3 21600 pixelWidth"/><v:f eqn="sum @0 0 1"/><v:f eqn="prod @6 1 2"/><v:f eqn="prod @7 21600 pixelWidth"/><v:f eqn="sum @8 21600 0"/><v:f eqn="prod @7 21600 pixelHeight"/><v:f eqn="sum @10 21600 0"/></v:formulas><v:path o:extrusionok="f" gradientshapeok="t" o:connecttype="rect"/><o:lock v:ext="edit" aspectratio="t"/></v:shapetype>`;
+  return `<w:r><w:object w:dxaOrig="${Math.round(widthPt * 20)}" w:dyaOrig="${Math.round(heightPt * 20)}">${shapeType}<v:shape id="${shapeId}" type="#${shapeTypeId}" style="${shapeStyle}" o:allowoverlap="t" o:ole=""><v:imagedata r:id="${imageRelationshipId}" o:title="${escapeXml(video.asset.name)}"/></v:shape><o:OLEObject Type="Embed" ProgID="Package" ShapeID="${shapeId}" DrawAspect="Content" ObjectID="${objectId}" r:id="${video.relationshipId}"/></w:object></w:r>`;
+}
+
+function formatWordPoint(value: number): string {
+  return value.toFixed(3).replace(/\.0+$/u, "").replace(/(\.\d*?)0+$/u, "$1");
 }
 
 function buildWordFlowTextParagraphsXml(
   model: PreviewPdfModel,
   pageIndex: number,
-  hyperlinkIds: ReadonlyMap<string, string>,
-  mediaRuns: WordInlineMediaRun[] = []
+  hyperlinkIds: ReadonlyMap<string, string>
 ): string {
   const pageTop = model.pageBreaks[pageIndex];
   const pageMarginTwips = 360;
   let cursorPt = pageMarginTwips / 20 + 1;
   const entries: Array<{ topPt: number; order: number; render: () => string }> = [];
-
-  for (const media of mediaRuns) {
-    entries.push({
-      topPt: media.topPt,
-      order: 0,
-      render: () => {
-        const beforeTwips = Math.max(0, Math.round((media.topPt - cursorPt) * 20));
-        const leftTwips = Math.max(-pageMarginTwips, Math.round(media.leftPt * 20) - pageMarginTwips);
-        cursorPt = Math.max(cursorPt, media.topPt) + media.heightPt;
-        return `<w:p><w:pPr><w:spacing w:before="${beforeTwips}" w:after="0"/><w:ind w:left="${leftTwips}"/></w:pPr>${media.runXml}</w:p>`;
-      }
-    });
-  }
 
   for (const line of getPageOfficeTextLines(model, pageIndex)) {
     const fragments = line.fragments.filter((fragment) => fragment.text.trim());
@@ -6066,8 +6176,17 @@ function buildWordHyperlinkIdMap(fragments: TextFragment[]): Map<string, string>
   return result;
 }
 
+interface WordZipArchive {
+  file(path: string): { async(type: "string"): Promise<string> } | null;
+  file(
+    path: string,
+    data: string | Uint8Array,
+    options?: { compression?: "STORE" | "DEFLATE" }
+  ): unknown;
+}
+
 async function injectWordHyperlinkRelationships(
-  zip: { file(path: string): { async(type: "string"): Promise<string> } | null; file(path: string, data: string): unknown },
+  zip: WordZipArchive,
   hyperlinkIds: ReadonlyMap<string, string>
 ): Promise<void> {
   if (hyperlinkIds.size === 0) return;
@@ -6080,6 +6199,321 @@ async function injectWordHyperlinkRelationships(
   if (!/<\/Relationships>/u.test(relationships)) throw new Error("DOCX relationships XML is invalid.");
   relationships = relationships.replace(/<\/Relationships>/u, `${additions}</Relationships>`);
   zip.file("word/_rels/document.xml.rels", relationships);
+}
+
+async function injectWordEmbeddedVideoParts(
+  zip: WordZipArchive,
+  parts: WordEmbeddedVideoPart[]
+): Promise<void> {
+  if (parts.length === 0) return;
+  const relationshipFile = zip.file("word/_rels/document.xml.rels");
+  const contentTypesFile = zip.file("[Content_Types].xml");
+  if (!relationshipFile || !contentTypesFile) throw new Error("DOCX package metadata is missing.");
+
+  let relationships = await relationshipFile.async("string");
+  const relationshipAdditions = parts.map((part) => (
+    `<Relationship Id="${part.relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/${part.archivePath.split("/").pop()}"/>`
+  )).join("");
+  if (!/<\/Relationships>/u.test(relationships)) throw new Error("DOCX relationships XML is invalid.");
+  relationships = relationships.replace(/<\/Relationships>/u, `${relationshipAdditions}</Relationships>`);
+  zip.file("word/_rels/document.xml.rels", relationships);
+
+  let contentTypes = await contentTypesFile.async("string");
+  if (!/<Default\s+Extension="bin"\b/iu.test(contentTypes)) {
+    const oleType = '<Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.oleObject"/>';
+    if (!/<\/Types>/u.test(contentTypes)) throw new Error("DOCX content types XML is invalid.");
+    contentTypes = contentTypes.replace(/<\/Types>/u, `${oleType}</Types>`);
+    zip.file("[Content_Types].xml", contentTypes);
+  }
+
+  for (const part of parts) {
+    zip.file(part.archivePath, buildOlePackage(part.asset.name, part.asset.bytes), { compression: "STORE" });
+  }
+}
+
+const OLE_FREE_SECTOR = 0xffffffff;
+const OLE_END_OF_CHAIN = 0xfffffffe;
+const OLE_FAT_SECTOR = 0xfffffffd;
+const OLE_DIFAT_SECTOR = 0xfffffffc;
+const OLE_MARKER_BYTES = new Uint8Array([
+  1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+]);
+const OLE_COMP_OBJ_BYTES = oleBytesFromHex(
+  "0100feff030a0000ffffffff0c00030000000000c0000000000000460c000000" +
+  "4f4c45205061636b6167650000000000080000005061636b61676500f439b271" +
+  "000000000000000000000000"
+);
+const OLE_OBJ_INFO_BYTES = oleBytesFromHex("000003000d00");
+const OLE_PACKAGE_CLSID = oleBytesFromHex("0c00030000000000c000000000000046");
+
+interface OleDirectoryStream {
+  name: string;
+  start: number;
+  size: number;
+  sectorCount: number;
+}
+
+function buildOlePackage(filename: string, payload: Uint8Array): Uint8Array {
+  const safeName = getOleSafeFilename(filename);
+  return buildOleCompoundFile([
+    ["\x01Ole", OLE_MARKER_BYTES],
+    ["\x01CompObj", OLE_COMP_OBJ_BYTES],
+    ["\x03ObjInfo", OLE_OBJ_INFO_BYTES],
+    ["\x01Ole10Native", buildOle10Native(safeName, payload)]
+  ]);
+}
+
+function buildOle10Native(filename: string, payload: Uint8Array): Uint8Array {
+  const safeName = getOleSafeFilename(filename);
+  const tempPath = `C:\\Users\\Public\\AppData\\Local\\Temp\\{00000000-0000-0000-0000-000000000000}\\${safeName}`;
+  const sourcePath = `C:\\Users\\Public\\Desktop\\${safeName}`;
+  const body = oleConcatBytes([
+    oleUint16(2),
+    oleAnsi(safeName),
+    new Uint8Array([0]),
+    oleAnsi(sourcePath),
+    new Uint8Array([0]),
+    oleUint16(0),
+    oleUint16(3),
+    oleUint32(tempPath.length + 1),
+    oleAnsi(tempPath),
+    new Uint8Array([0]),
+    oleUint32(payload.length),
+    payload,
+    oleUint32(tempPath.length),
+    oleUtf16Le(tempPath),
+    oleUint32(safeName.length),
+    oleUtf16Le(safeName),
+    oleUint32(sourcePath.length),
+    oleUtf16Le(sourcePath)
+  ]);
+  return oleConcatBytes([oleUint32(body.length), body]);
+}
+
+function buildOleCompoundFile(streams: Array<[string, Uint8Array]>): Uint8Array {
+  const sectorSize = 512;
+  const sectors: Uint8Array[] = [];
+  const directoryStreams: OleDirectoryStream[] = [];
+
+  for (const [name, data] of streams) {
+    const storedSize = Math.max(data.length, 4096);
+    const paddedSize = Math.ceil(storedSize / sectorSize) * sectorSize;
+    const padded = olePadBytes(data, paddedSize);
+    const start = sectors.length;
+    for (let offset = 0; offset < padded.length; offset += sectorSize) {
+      sectors.push(padded.slice(offset, offset + sectorSize));
+    }
+    directoryStreams.push({
+      name,
+      start,
+      size: padded.length,
+      sectorCount: padded.length / sectorSize
+    });
+  }
+
+  const directoryStart = sectors.length;
+  const directoryData = buildOleDirectoryStream(directoryStreams);
+  for (let offset = 0; offset < directoryData.length; offset += sectorSize) {
+    sectors.push(directoryData.slice(offset, offset + sectorSize));
+  }
+  const directorySectorCount = directoryData.length / sectorSize;
+  const nonFatSectorCount = sectors.length;
+  let fatSectorCount = 1;
+  let difatSectorCount = 0;
+  while (true) {
+    const nextFatCount = Math.max(
+      1,
+      Math.ceil((nonFatSectorCount + fatSectorCount + difatSectorCount) / 128)
+    );
+    const nextDifatCount = Math.max(0, Math.ceil((nextFatCount - 109) / 127));
+    if (nextFatCount === fatSectorCount && nextDifatCount === difatSectorCount) break;
+    fatSectorCount = nextFatCount;
+    difatSectorCount = nextDifatCount;
+  }
+
+  const fatStart = nonFatSectorCount;
+  const fatSectorIds = oleRange(fatStart, fatStart + fatSectorCount);
+  const difatStart = fatStart + fatSectorCount;
+  const difatSectorIds = oleRange(difatStart, difatStart + difatSectorCount);
+  const fatEntries = new Array<number>(fatSectorCount * 128).fill(OLE_FREE_SECTOR);
+  for (const stream of directoryStreams) {
+    markOleSectorChain(fatEntries, stream.start, stream.sectorCount);
+  }
+  markOleSectorChain(fatEntries, directoryStart, directorySectorCount);
+  for (const sector of fatSectorIds) fatEntries[sector] = OLE_FAT_SECTOR;
+  for (const sector of difatSectorIds) fatEntries[sector] = OLE_DIFAT_SECTOR;
+
+  const fatBytes = new Uint8Array(fatSectorCount * sectorSize);
+  const fatView = new DataView(fatBytes.buffer);
+  fatEntries.forEach((value, index) => fatView.setUint32(index * 4, value, true));
+  const difatBytes = buildOleDifatSectors(fatSectorIds.slice(109), difatSectorIds);
+  return oleConcatBytes([
+    buildOleCompoundHeader(fatSectorCount, directoryStart, fatSectorIds, difatSectorIds),
+    ...sectors,
+    fatBytes,
+    difatBytes
+  ]);
+}
+
+function buildOleDirectoryStream(streams: OleDirectoryStream[]): Uint8Array {
+  const entries = [
+    buildOleDirectoryEntry("Root Entry", 5, OLE_FREE_SECTOR, OLE_FREE_SECTOR, 1, OLE_END_OF_CHAIN, 0, OLE_PACKAGE_CLSID),
+    buildOleDirectoryEntry(streams[0].name, 2, OLE_FREE_SECTOR, 2, OLE_FREE_SECTOR, streams[0].start, streams[0].size),
+    buildOleDirectoryEntry(streams[1].name, 2, OLE_FREE_SECTOR, 3, OLE_FREE_SECTOR, streams[1].start, streams[1].size),
+    buildOleDirectoryEntry(streams[2].name, 2, OLE_FREE_SECTOR, 4, OLE_FREE_SECTOR, streams[2].start, streams[2].size),
+    buildOleDirectoryEntry(streams[3].name, 2, OLE_FREE_SECTOR, OLE_FREE_SECTOR, OLE_FREE_SECTOR, streams[3].start, streams[3].size)
+  ];
+  const bytes = oleConcatBytes(entries);
+  return olePadBytes(bytes, Math.ceil(bytes.length / 512) * 512);
+}
+
+function buildOleDirectoryEntry(
+  name: string,
+  type: number,
+  left: number,
+  right: number,
+  child: number,
+  start: number,
+  size: number,
+  clsid?: Uint8Array
+): Uint8Array {
+  const output = new Uint8Array(128);
+  const encodedName = oleConcatBytes([oleUtf16Le(name), new Uint8Array([0, 0])]).slice(0, 64);
+  output.set(encodedName, 0);
+  output.set(oleUint16(encodedName.length), 64);
+  output[66] = type;
+  output[67] = 1;
+  output.set(oleUint32(left), 68);
+  output.set(oleUint32(right), 72);
+  output.set(oleUint32(child), 76);
+  if (clsid) output.set(clsid, 80);
+  output.set(oleUint32(start), 116);
+  output.set(oleUint64(BigInt(size)), 120);
+  return output;
+}
+
+function buildOleCompoundHeader(
+  fatSectorCount: number,
+  firstDirectorySector: number,
+  fatSectorIds: number[],
+  difatSectorIds: number[]
+): Uint8Array {
+  const output = new Uint8Array(512);
+  output.set(oleBytesFromHex("d0cf11e0a1b11ae1"), 0);
+  output.set(oleUint16(0x003e), 24);
+  output.set(oleUint16(0x0003), 26);
+  output.set(oleUint16(0xfffe), 28);
+  output.set(oleUint16(9), 30);
+  output.set(oleUint16(6), 32);
+  output.set(oleUint32(0), 40);
+  output.set(oleUint32(fatSectorCount), 44);
+  output.set(oleUint32(firstDirectorySector), 48);
+  output.set(oleUint32(0), 52);
+  output.set(oleUint32(4096), 56);
+  output.set(oleUint32(OLE_END_OF_CHAIN), 60);
+  output.set(oleUint32(0), 64);
+  output.set(oleUint32(difatSectorIds[0] ?? OLE_END_OF_CHAIN), 68);
+  output.set(oleUint32(difatSectorIds.length), 72);
+  const headerDifat = [
+    ...fatSectorIds.slice(0, 109),
+    ...new Array<number>(Math.max(0, 109 - fatSectorIds.length)).fill(OLE_FREE_SECTOR)
+  ];
+  headerDifat.forEach((sector, index) => output.set(oleUint32(sector), 76 + index * 4));
+  return output;
+}
+
+function buildOleDifatSectors(fatSectorIds: number[], difatSectorIds: number[]): Uint8Array {
+  if (difatSectorIds.length === 0) return new Uint8Array();
+  const output = new Uint8Array(difatSectorIds.length * 512);
+  const view = new DataView(output.buffer);
+  for (let sectorIndex = 0; sectorIndex < difatSectorIds.length; sectorIndex += 1) {
+    const sectorOffset = sectorIndex * 512;
+    const ids = fatSectorIds.slice(sectorIndex * 127, (sectorIndex + 1) * 127);
+    for (let entryIndex = 0; entryIndex < 127; entryIndex += 1) {
+      view.setUint32(
+        sectorOffset + entryIndex * 4,
+        ids[entryIndex] ?? OLE_FREE_SECTOR,
+        true
+      );
+    }
+    view.setUint32(
+      sectorOffset + 127 * 4,
+      difatSectorIds[sectorIndex + 1] ?? OLE_END_OF_CHAIN,
+      true
+    );
+  }
+  return output;
+}
+
+function markOleSectorChain(fat: number[], start: number, count: number): void {
+  for (let offset = 0; offset < count; offset += 1) {
+    fat[start + offset] = offset < count - 1 ? start + offset + 1 : OLE_END_OF_CHAIN;
+  }
+}
+
+function oleConcatBytes(parts: Uint8Array[]): Uint8Array {
+  const output = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+  return output;
+}
+
+function olePadBytes(bytes: Uint8Array, length: number): Uint8Array {
+  if (bytes.length >= length) return bytes;
+  const output = new Uint8Array(length);
+  output.set(bytes);
+  return output;
+}
+
+function oleUint16(value: number): Uint8Array {
+  const output = new Uint8Array(2);
+  new DataView(output.buffer).setUint16(0, value, true);
+  return output;
+}
+
+function oleUint32(value: number): Uint8Array {
+  const output = new Uint8Array(4);
+  new DataView(output.buffer).setUint32(0, value, true);
+  return output;
+}
+
+function oleUint64(value: bigint): Uint8Array {
+  const output = new Uint8Array(8);
+  new DataView(output.buffer).setBigUint64(0, value, true);
+  return output;
+}
+
+function oleUtf16Le(value: string): Uint8Array {
+  const output = new Uint8Array(value.length * 2);
+  const view = new DataView(output.buffer);
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint16(index * 2, value.charCodeAt(index), true);
+  }
+  return output;
+}
+
+function oleAnsi(value: string): Uint8Array {
+  return Uint8Array.from(Array.from(value, (character) => character.charCodeAt(0)));
+}
+
+function oleBytesFromHex(hex: string): Uint8Array {
+  const output = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < hex.length; index += 2) {
+    output[index / 2] = Number.parseInt(hex.slice(index, index + 2), 16);
+  }
+  return output;
+}
+
+function oleRange(start: number, end: number): number[] {
+  return Array.from({ length: end - start }, (_, index) => start + index);
+}
+
+function getOleSafeFilename(filename: string): string {
+  const basename = filename.split(/[\\/]/u).pop() ?? "video.mp4";
+  return basename.replace(/[^A-Za-z0-9._ &-]+/gu, "_").trim() || "video.mp4";
 }
 
 function buildWordTextRunXml(model: PreviewPdfModel, fragment: TextFragment, text: string): string {

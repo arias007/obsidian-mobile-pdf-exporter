@@ -301,6 +301,24 @@ test("multilingual text and videos keep visual and selectable export fallbacks",
   assert.match(source, /HTML_VIDEO_INLINE_MAX_BYTES/);
 });
 
+test("punctuation and emoji preserve original grapheme clusters", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /new Segmenter\(undefined, \{ granularity: "grapheme" \}\)/);
+  assert.match(source, /\p\{Extended_Pictographic\}/);
+  assert.match(source, /\p\{Regional_Indicator\}/);
+  assert.match(source, /\p\{Emoji_Modifier\}/);
+  assert.match(source, /\|\\uFE0F\|\\u20E3/);
+  assert.match(source, /\[0x2000, 0x2bff\]/);
+  assert.match(source, /\[0x2e00, 0x2e7f\]/);
+  assert.match(source, /\[0x3000, 0x303f\]/);
+  assert.match(source, /\[0xfe00, 0xfe6f\]/);
+  assert.match(source, /\[0xff01, 0xff65\]/);
+  assert.match(source, /context\.fillText\(emoji, x, baselineY\)/);
+  assert.doesNotMatch(source, /return " · "/);
+  assert.doesNotMatch(source, /replace\(\/\\uFE0F/);
+});
+
 test("plugin UI follows Obsidian window and settings conventions", async () => {
   const source = await readFile(sourceUrl, "utf8");
 

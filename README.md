@@ -75,6 +75,12 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.4.13
+
+- Preserves original punctuation instead of replacing standalone bullets or middle dots during visual fallback rendering.
+- Extends visual text fallback coverage to general, supplemental, CJK, full-width, and compatibility punctuation and symbol ranges.
+- Segments Emoji as complete grapheme clusters and prefers the platform Emoji font so families, flags, skin tones, keycaps, and variation-selector sequences stay intact.
+
 ### 0.4.12
 
 - Clips link-line raster text to its measured DOM bounds so adjacent text no longer overlaps.

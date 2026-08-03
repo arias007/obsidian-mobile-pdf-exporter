@@ -3174,12 +3174,17 @@ function selectPdfFont(fonts: ExportFontSet, text: string): PDFFont {
 }
 
 function requiresRasterTextFallback(text: string): boolean {
-  return containsCodePointInRanges(text, [
+  return isEmojiLikeText(text) || containsCodePointInRanges(text, [
     [0x0590, 0x0e7f],
     [0x1100, 0x11ff],
     [0x1780, 0x18af],
+    [0x2000, 0x2bff],
+    [0x2e00, 0x2e7f],
+    [0x3000, 0x303f],
     [0x3040, 0x30ff],
     [0xac00, 0xd7af],
+    [0xfe00, 0xfe6f],
+    [0xff01, 0xff65],
     [0x1f000, 0x1faff]
   ]);
 }
@@ -8710,12 +8715,26 @@ function drawCanvasText(
   return { text: clean, size, width };
 }
 
+let canvasGraphemeSegmenter: { segment(input: string): Iterable<{ segment: string }> } | null | undefined;
+
+function getCanvasGraphemeSegments(text: string): string[] {
+  if (canvasGraphemeSegmenter === undefined) {
+    const Segmenter = (Intl as unknown as {
+      Segmenter?: new (
+        locales?: string | string[],
+        options?: { granularity: "grapheme" }
+      ) => { segment(input: string): Iterable<{ segment: string }> };
+    }).Segmenter;
+    canvasGraphemeSegmenter = Segmenter ? new Segmenter(undefined, { granularity: "grapheme" }) : null;
+  }
+  return canvasGraphemeSegmenter
+    ? Array.from(canvasGraphemeSegmenter.segment(text), (entry) => entry.segment)
+    : Array.from(text);
+}
+
 function splitCanvasTextRuns(text: string): Array<{ text: string; emoji: boolean }> {
   const runs: Array<{ text: string; emoji: boolean }> = [];
-  const segments = Array.from(
-    text.matchAll(/(?:[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]\uFE0F?|[^\uFE0F])/gu),
-    (match) => match[0]
-  );
+  const segments = getCanvasGraphemeSegments(text);
   for (const segment of segments) {
     const emoji = isEmojiLikeText(segment);
     const previous = runs[runs.length - 1];
@@ -8741,7 +8760,7 @@ function measureCanvasTextRuns(
   let width = 0;
   for (const run of runs) {
     if (run.emoji) {
-      width += measureEmojiCanvasText(run.text, size);
+      width += measureEmojiCanvasText(context, run.text, size, fontOptions);
       continue;
     }
     context.font = getCanvasTextFont(size, run.emoji, fontOptions);
@@ -8765,7 +8784,7 @@ function drawCanvasTextRuns(
   let cursorX = x;
   for (const run of runs) {
     if (run.emoji) {
-      cursorX += drawEmojiCanvasText(context, run.text, cursorX, y, size);
+      cursorX += drawEmojiCanvasText(context, run.text, cursorX, y, size, fontOptions);
       continue;
     }
     context.font = getCanvasTextFont(size, run.emoji, fontOptions);
@@ -8807,45 +8826,79 @@ function normalizeCanvasFontPart(value: string | undefined, fallback: string): s
 
 function normalizeCanvasVisibleText(text: string): string {
   const singleLine = text.replace(/[\r\n\t\u00A0]+/gu, " ").replace(/ {2,}/gu, " ");
-  if (isSeparatorOnlyText(singleLine)) return " · ";
   return singleLine.trim();
 }
 
-function isSeparatorOnlyText(text: string): boolean {
-  return /^[\s\u00A0]*[·•・][\s\u00A0]*$/u.test(text);
-}
-
 function isEmojiLikeText(text: string): boolean {
-  return /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(text);
+  return /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|\p{Emoji_Modifier}|\uFE0F|\u20E3)/u.test(text);
 }
 
-function measureEmojiCanvasText(text: string, size: number): number {
-  return getEmojiSegments(text).reduce((width, segment) => width + getEmojiIconAdvance(segment, size), 0);
+function measureEmojiCanvasText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  size: number,
+  fontOptions: { fontFamily?: string; fontWeight?: string; fontStyle?: string } = {}
+): number {
+  return getEmojiSegments(text).reduce(
+    (width, segment) => width + getEmojiIconAdvance(context, segment, size, fontOptions),
+    0
+  );
 }
 
-function drawEmojiCanvasText(context: CanvasRenderingContext2D, text: string, x: number, baselineY: number, size: number): number {
+function drawEmojiCanvasText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  baselineY: number,
+  size: number,
+  fontOptions: { fontFamily?: string; fontWeight?: string; fontStyle?: string } = {}
+): number {
   let cursorX = x;
   for (const segment of getEmojiSegments(text)) {
-    const advance = getEmojiIconAdvance(segment, size);
-    drawEmojiIcon(context, segment, cursorX, baselineY, size);
+    const advance = getEmojiIconAdvance(context, segment, size, fontOptions);
+    drawEmojiIcon(context, segment, cursorX, baselineY, size, fontOptions);
     cursorX += advance;
   }
   return cursorX - x;
 }
 
 function getEmojiSegments(text: string): string[] {
-  return Array.from(
-    text.replace(/\uFE0F/gu, "").matchAll(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]|./gu),
-    (match) => match[0]
-  ).filter((segment) => segment && segment !== "\uFE0F");
+  return getCanvasGraphemeSegments(text).filter(Boolean);
 }
 
-function getEmojiIconAdvance(segment: string, size: number): number {
-  if (segment === "🔤") return size * 1.3;
+function getEmojiIconAdvance(
+  context: CanvasRenderingContext2D,
+  segment: string,
+  size: number,
+  fontOptions: { fontFamily?: string; fontWeight?: string; fontStyle?: string } = {}
+): number {
+  context.save();
+  context.font = getCanvasTextFont(size, isEmojiLikeText(segment), fontOptions);
+  const measured = context.measureText(segment).width;
+  context.restore();
+  if (measured > 0.1) return measured;
   return isEmojiLikeText(segment) ? size * 1.08 : size * 0.55;
 }
 
-function drawEmojiIcon(context: CanvasRenderingContext2D, emoji: string, x: number, baselineY: number, size: number): void {
+function drawEmojiIcon(
+  context: CanvasRenderingContext2D,
+  emoji: string,
+  x: number,
+  baselineY: number,
+  size: number,
+  fontOptions: { fontFamily?: string; fontWeight?: string; fontStyle?: string } = {}
+): void {
+  context.save();
+  context.font = getCanvasTextFont(size, isEmojiLikeText(emoji), fontOptions);
+  context.textAlign = "left";
+  context.textBaseline = "alphabetic";
+  if (context.measureText(emoji).width > 0.1) {
+    context.fillText(emoji, x, baselineY);
+    context.restore();
+    return;
+  }
+  context.restore();
+
   if (!isEmojiLikeText(emoji)) {
     context.fillText(emoji, x, baselineY);
     return;

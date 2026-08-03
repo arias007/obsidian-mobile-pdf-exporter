@@ -304,6 +304,7 @@ test("multilingual text and videos keep visual and selectable export fallbacks",
 test("punctuation and emoji preserve original grapheme clusters", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
+  assert.match(source, /isEmojiLikeText\(text\) \|\| \/\[:：\]\/u\.test\(text\)/);
   assert.match(source, /new Segmenter\(undefined, \{ granularity: "grapheme" \}\)/);
   assert.match(source, /\p\{Extended_Pictographic\}/);
   assert.match(source, /\p\{Regional_Indicator\}/);
@@ -317,6 +318,8 @@ test("punctuation and emoji preserve original grapheme clusters", async () => {
   assert.match(source, /context\.fillText\(emoji, x, baselineY\)/);
   assert.doesNotMatch(source, /return " · "/);
   assert.doesNotMatch(source, /replace\(\/\\uFE0F/);
+  assert.doesNotMatch(source, /\[·•・\|｜\/、，,;；:：<>/);
+  assert.doesNotMatch(source, /\(\[A-Za-z0-9\]\)\(\[:：\]\)/);
 });
 
 test("plugin UI follows Obsidian window and settings conventions", async () => {

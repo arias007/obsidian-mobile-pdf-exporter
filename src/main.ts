@@ -3174,7 +3174,7 @@ function selectPdfFont(fonts: ExportFontSet, text: string): PDFFont {
 }
 
 function requiresRasterTextFallback(text: string): boolean {
-  return isEmojiLikeText(text) || containsCodePointInRanges(text, [
+  return isEmojiLikeText(text) || /[:：]/u.test(text) || containsCodePointInRanges(text, [
     [0x0590, 0x0e7f],
     [0x1100, 0x11ff],
     [0x1780, 0x18af],
@@ -6819,12 +6819,11 @@ function compactSeparatorSpacing(text: string): string {
   if (!clean || isPdfJumpHref(clean)) return clean;
 
   const hasCjk = /[\u3400-\u9FFF\uF900-\uFAFF]/u.test(clean);
-  const separatorCount = (clean.match(/[·•・|｜/、，,;；:：<>#()[\]（）【】]/gu) ?? []).length;
+  const separatorCount = (clean.match(/[·•・|｜/、，,;；<>#()[\]（）【】]/gu) ?? []).length;
   if (!hasCjk && separatorCount < 2) return clean;
 
   return clean
-    .replace(/\s*([·•・|｜/、，,;；:：<>#()[\]（）【】])\s*/gu, "$1")
-    .replace(/([A-Za-z0-9])([:：])(?=[A-Za-z0-9])/gu, "$1$2 ")
+    .replace(/\s*([·•・|｜/、，,;；<>#()[\]（）【】])\s*/gu, "$1")
     .replace(/[ \t\u00A0]{2,}/gu, " ")
     .trim();
 }

@@ -75,6 +75,11 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.4.14
+
+- Preserves the original spacing around ASCII and full-width colons instead of compacting them into adjacent text.
+- Renders colon-containing visual text through the measured DOM-font fallback layer to prevent PDF font-width differences from causing overlap.
+
 ### 0.4.13
 
 - Preserves original punctuation instead of replacing standalone bullets or middle dots during visual fallback rendering.

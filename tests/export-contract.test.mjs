@@ -40,6 +40,9 @@ test("external and internal links produce PDF URI annotations", async () => {
   assert.match(source, /captureLinkFragments\(rootEl, linkContext\)/);
   assert.match(source, /S:\s*"URI"/);
   assert.match(source, /URI:\s*getPdfStringRuntime\(\)\.of\(target\)/);
+  assert.match(source, /const maxWidth = Math\.max\(1, Math\.min\(availableWidth, measuredWidth\)\)/);
+  assert.match(source, /context\.rect\([\s\S]*?left,[\s\S]*?measuredWidth,[\s\S]*?fragment\.bottom - fragment\.top/);
+  assert.match(source, /context\.clip\(\)/);
 });
 
 test("live capture avoids virtual-scroll loss, blank trailing pages, and split text lines", async () => {
@@ -235,6 +238,9 @@ test("HTML export uses semantic layers instead of a full-page PNG wrapper", asyn
   assert.match(source, /target\.src = bytesToDataUrl\(bytes\)/);
   assert.match(source, /source\.toDataURL\("image\/png"\)/);
   assert.match(source, /target\.replaceWith\(image\)/);
+  assert.match(source, /const projectedElements = projectNoteDrawElements\(/);
+  assert.match(source, /const htmlFallbackElements = injectedImageLayers\.length > 0/);
+  assert.match(source, /drawCanvasNoteDrawElementLayer\(context, htmlFallbackElements/);
   assert.doesNotMatch(source, /return buildSelfContainedHtml\(file, model, pages\)/);
 });
 
@@ -268,6 +274,11 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /canvas\.closest\(\s*"\.notedraw-shell, \.note-doodle-shell, \.notedraw-export-image-canvas-layer"/);
   assert.match(source, /canvasFragments: model\.canvasFragments\.filter\(\(fragment\) => !isNoteDrawCanvasFragment\(fragment\)\)/);
   assert.match(source, /prepareNoteDrawElementData\(this\.app, host\.ownerDocument, rawData\)/);
+  assert.match(source, /function measureNoteDrawTargetContentFrame\(host: HTMLElement, surfaceWidth: number\)/);
+  assert.match(source, /contentLeft: Number\.isFinite\(frameContentLeft\) \? frameContentLeft : 0/);
+  assert.match(source, /contentWidth: frameContentWidth >= 1 \? frameContentWidth : frameWidth/);
+  assert.match(source, /targetContentLeft \+ \(element\.layoutBox\.x - sourceFrame\.contentLeft\) \* frameScaleX/);
+  assert.match(source, /targetContentLeft \+ \(normalizedX \* sourceFrame\.surfaceWidth - sourceFrame\.contentLeft\) \* frameScaleX/);
   assert.match(source, /function projectNoteDrawElements\(/);
   assert.match(source, /function drawCanvasNoteDrawElementLayer\(/);
   assert.match(source, /candidate\?\.kind === "text" \|\| candidate\?\.kind === "embed" \|\| candidate\?\.connector/);

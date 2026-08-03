@@ -375,6 +375,12 @@ interface PreparedNoteDrawExportOverlay {
   elements: NoteDrawElementData[];
   widthPx: number;
   heightPx: number;
+  contentFrame: NoteDrawContentFrame;
+}
+
+interface NoteDrawContentFrame {
+  left: number;
+  width: number;
 }
 
 type NoteDrawElementKind = "text" | "image" | "video" | "file" | "connector";
@@ -400,7 +406,12 @@ interface NoteDrawElementData {
   textWidth: number | null;
   points: Array<{ x: number; y: number }>;
   layoutBox: { x: number; y: number; width: number; height: number } | null;
-  layoutFrame: { width: number; height: number } | null;
+  layoutFrame: {
+    surfaceWidth: number;
+    contentLeft: number;
+    contentWidth: number;
+    documentHeight: number;
+  } | null;
   media: HTMLImageElement | HTMLCanvasElement | null;
 }
 
@@ -1675,12 +1686,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const rect = host.getBoundingClientRect();
     const width = Math.max(1, Math.ceil(host.scrollWidth || rect.width || 1));
     const height = Math.max(1, Math.ceil(host.scrollHeight || rect.height || 1));
+    const contentFrame = measureNoteDrawTargetContentFrame(host, width);
     const empty = (): PreparedNoteDrawExportOverlay => ({
       cleanup: () => undefined,
       data: null,
       elements: [],
       widthPx: width,
-      heightPx: height
+      heightPx: height,
+      contentFrame
     });
     const plugins = (this.app as unknown as {
       plugins?: { plugins?: Record<string, { api?: NoteDrawApiRuntime }> };
@@ -1728,7 +1741,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     let canvas: HTMLCanvasElement | null = null;
     let changedPosition = false;
     const previousInlinePosition = host.style.position;
-    if (!hasLiveCanvas && data?.strokes.length) {
+    if (!hasLiveCanvas && (data?.strokes.length || elements.length)) {
       const maxPixelScale = Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, width * height));
       const ratio = clampNumber(Math.min(activeWindow.devicePixelRatio || 1, maxPixelScale), 0.5, 2, 1);
       if (getComputedStyle(host).position === "static") {
@@ -1754,7 +1767,24 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const context = canvas.getContext("2d");
       if (context) {
         context.setTransform(ratio, 0, 0, ratio, 0, 0);
-        drawNoteDoodleStrokes(context, data.strokes, width, height);
+        if (data?.strokes.length) drawNoteDoodleStrokes(context, data.strokes, width, height);
+        const projectedElements = projectNoteDrawElements(
+          elements,
+          width,
+          height,
+          contentFrame,
+          0,
+          0,
+          1
+        );
+        const htmlFallbackElements = injectedImageLayers.length > 0
+          ? projectedElements.filter((element) => element.kind !== "image")
+          : projectedElements;
+        drawCanvasNoteDrawElementLayer(context, htmlFallbackElements, {
+          pageTopPx: 0,
+          pageBottomPx: height,
+          sourceWidthPx: width
+        });
       } else {
         canvas.remove();
         canvas = null;
@@ -1773,7 +1803,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       data,
       elements,
       widthPx: width,
-      heightPx: height
+      heightPx: height,
+      contentFrame
     };
   }
 
@@ -5556,6 +5587,29 @@ async function prepareNoteDrawElementData(
   return elements;
 }
 
+function measureNoteDrawTargetContentFrame(host: HTMLElement, surfaceWidth: number): NoteDrawContentFrame {
+  const content = host.querySelector<HTMLElement>(".cm-content") ??
+    host.querySelector<HTMLElement>(":scope > .markdown-preview-sizer") ??
+    host.querySelector<HTMLElement>(".markdown-preview-sizer") ??
+    host.querySelector<HTMLElement>(".cm-sizer") ??
+    host;
+  const hostRect = host.getBoundingClientRect();
+  const contentRect = content.getBoundingClientRect();
+  const visualScale = host.clientWidth > 1 && hostRect.width > 1
+    ? clampNumber(hostRect.width / host.clientWidth, 0.1, 10, 1)
+    : 1;
+  const measuredLeft = (contentRect.left - hostRect.left + host.scrollLeft * visualScale) / visualScale;
+  const left = clampNumber(measuredLeft, -surfaceWidth, surfaceWidth * 2, 0);
+  const availableWidth = Math.max(1, surfaceWidth - Math.max(0, left));
+  let width = clampNumber(contentRect.width / visualScale, 1, surfaceWidth * 2, availableWidth);
+  const isMobile = Boolean(host.ownerDocument.body?.matches(".is-mobile, .mod-mobile"));
+  if (!isMobile && surfaceWidth >= 900 && width / surfaceWidth >= 0.78) {
+    const laneLimit = clampNumber(surfaceWidth * 0.72, 720, 860, 720);
+    width = Math.min(width, laneLimit, availableWidth);
+  }
+  return { left, width };
+}
+
 function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
   const stroke = value && typeof value === "object" ? value as Record<string, unknown> : null;
   if (!stroke) return null;
@@ -5604,11 +5658,18 @@ function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
     }
     : null;
   const frameWidth = Number(rawFrame?.surfaceWidth);
+  const frameContentLeft = Number(rawFrame?.contentLeft);
+  const frameContentWidth = Number(rawFrame?.contentWidth);
   const frameHeight = Number(rawFrame?.documentHeight);
   const layoutFrame = frameWidth >= 24 && frameHeight >= 24 && (
     !layoutBox || (layoutBox.width <= frameWidth * 4 && layoutBox.height <= frameHeight * 4)
   )
-    ? { width: frameWidth, height: frameHeight }
+    ? {
+      surfaceWidth: frameWidth,
+      contentLeft: Number.isFinite(frameContentLeft) ? frameContentLeft : 0,
+      contentWidth: frameContentWidth >= 1 ? frameContentWidth : frameWidth,
+      documentHeight: frameHeight
+    }
     : null;
 
   return {
@@ -5693,15 +5754,26 @@ function projectNoteDrawElements(
   elements: NoteDrawElementData[],
   widthPx: number,
   heightPx: number,
+  contentFrame: NoteDrawContentFrame,
   offsetX: number,
   offsetY: number,
   scale: number
 ): PdfNoteDrawElement[] {
   return elements.flatMap((element) => {
-    const frameScaleX = element.layoutFrame ? widthPx / element.layoutFrame.width : 1;
-    const frameScaleY = element.layoutFrame ? heightPx / element.layoutFrame.height : 1;
+    const sourceFrame = element.layoutFrame;
+    const targetContentLeft = clampNumber(contentFrame.left, -widthPx, widthPx * 2, 0);
+    const targetContentWidth = clampNumber(contentFrame.width, 1, widthPx * 2, widthPx);
+    const frameScaleX = sourceFrame ? targetContentWidth / sourceFrame.contentWidth : 1;
+    const frameScaleY = sourceFrame ? heightPx / sourceFrame.documentHeight : 1;
+    const projectPointX = (normalizedX: number): number => sourceFrame
+      ? targetContentLeft + (normalizedX * sourceFrame.surfaceWidth - sourceFrame.contentLeft) * frameScaleX
+      : normalizedX * widthPx;
     const first = element.points[0];
-    const rawLeft = element.layoutBox ? element.layoutBox.x * frameScaleX : first.x * widthPx;
+    const rawLeft = element.layoutBox
+      ? sourceFrame
+        ? targetContentLeft + (element.layoutBox.x - sourceFrame.contentLeft) * frameScaleX
+        : element.layoutBox.x
+      : projectPointX(first.x);
     const rawTop = element.layoutBox ? element.layoutBox.y * frameScaleY : first.y * heightPx;
     const fallbackWidth = element.kind === "text"
       ? element.textWidth ?? Math.max(28, element.text.length * element.fontSize * 0.62)
@@ -5712,7 +5784,7 @@ function projectNoteDrawElements(
     const rawWidth = element.layoutBox ? element.layoutBox.width * frameScaleX : fallbackWidth * frameScaleX;
     const rawHeight = element.layoutBox ? element.layoutBox.height * frameScaleY : fallbackHeight * frameScaleY;
     const projectedPoints = element.points.map((point) => ({
-      x: offsetX + point.x * widthPx * scale,
+      x: offsetX + projectPointX(point.x) * scale,
       y: offsetY + point.y * heightPx * scale
     }));
     const pointBounds = element.kind === "connector"
@@ -5766,6 +5838,7 @@ function attachPreparedNoteDrawToModel(
     prepared.elements,
     prepared.widthPx,
     prepared.heightPx,
+    prepared.contentFrame,
     options.offsetX,
     options.offsetY,
     options.scale
@@ -8546,7 +8619,17 @@ function drawCanvasTextLayer(
     const x = fragment.direction === "rtl" ? right : left;
     const y = fragment.top - options.pageTopPx + fragment.fontSizePx * 0.86;
     const measuredWidth = Math.max(1, fragment.right - fragment.left);
-    const maxWidth = Math.max(8, Math.min(options.sourceWidthPx - x - 2, measuredWidth + fragment.fontSizePx * 0.75));
+    const availableWidth = fragment.direction === "rtl" ? right : options.sourceWidthPx - left;
+    const maxWidth = Math.max(1, Math.min(availableWidth, measuredWidth));
+    context.save();
+    context.beginPath();
+    context.rect(
+      left,
+      fragment.top - options.pageTopPx - fragment.fontSizePx * 0.2,
+      measuredWidth,
+      Math.max(1, fragment.bottom - fragment.top + fragment.fontSizePx * 0.4)
+    );
+    context.clip();
     const drawn = drawCanvasText(context, fragment.text, {
       x,
       y,
@@ -8580,6 +8663,7 @@ function drawCanvasTextLayer(
       context.lineTo(fragment.direction === "rtl" ? x : x + decorationWidth, strikeY);
       context.stroke();
     }
+    context.restore();
   }
 }
 

@@ -75,6 +75,12 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.4.12
+
+- Clips link-line raster text to its measured DOM bounds so adjacent text no longer overlaps.
+- Projects persisted NoteDraw elements through their saved content lane instead of stretching positions across the full page width.
+- Includes persisted NoteDraw text, nodes, connectors, videos, and attachments in rendered HTML exports while avoiding duplicate image snapshots.
+
 ### 0.4.11
 
 - Fixes extra visual spacing before links while preserving selectable text and clickable PDF link annotations.

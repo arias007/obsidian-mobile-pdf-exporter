@@ -3942,7 +3942,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const pageHeightPx = pageHeightPt / pxToPt;
       const { bodyTopInsetPx, bodyBottomInsetPx, bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
       const boxFragments = captureBoxFragments(pageEl);
-      const textFragments = captureTextFragments(pageEl, linkContext);
+      const textFragments = dedupeOverlappingLiveTextFragments(captureTextFragments(pageEl, linkContext));
       const imageFragments = captureImageFragments(pageEl);
       const videoFragments = captureVideoFragments(pageEl);
       const canvasFragments = captureCanvasFragments(pageEl);
@@ -7980,6 +7980,7 @@ function dedupeOverlappingLiveTextFragments(fragments: TextFragment[]): TextFrag
 function areOverlappingDuplicateTextFragments(left: TextFragment, right: TextFragment): boolean {
   const overlapWidth = Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
   const overlapHeight = Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+  if (overlapWidth <= 0 || overlapHeight <= 0) return false;
   const minWidth = Math.max(0.5, Math.min(left.right - left.left, right.right - right.left));
   const minHeight = Math.max(0.5, Math.min(left.bottom - left.top, right.bottom - right.top));
   const horizontalRatio = overlapWidth / minWidth;
@@ -7990,7 +7991,18 @@ function areOverlappingDuplicateTextFragments(left: TextFragment, right: TextFra
     Math.abs(left.right - right.right) <= 5 &&
     Math.abs(left.bottom - right.bottom) <= 4
   );
-  return nearlyAligned || (horizontalRatio >= 0.82 && verticalRatio >= 0.72);
+  // The same glyph run is repeatedly captured twice in Live Preview / reading view:
+  // once by the scroll-band capture of the preview surface, and again by the
+  // per-section preview overlays (captureLivePreviewRootOverlays /
+  // appendLivePreviewSectionCaptures). Their measured boxes almost never line up
+  // pixel-for-pixel (the section layout heights differ from the live-rendered
+  // positions by a few px), so a strict alignment / 82%&72% overlap test lets the
+  // duplicate slip through and the text ghosts. Treat two same-text fragments as
+  // duplicates whenever they overlap substantially in BOTH axes. Legitimately
+  // repeated text on different lines never overlaps vertically, and side-by-side
+  // words never overlap horizontally, so this stays safe.
+  const substantiallyOverlapping = horizontalRatio >= 0.5 && verticalRatio >= 0.5;
+  return nearlyAligned || substantiallyOverlapping;
 }
 
 function transformSurfaceCapture(

@@ -3905,7 +3905,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (format === "html") {
       return buildSemanticHtml(file, model);
     }
-    const pages = await this.renderModelPagesToPng(model, signal, true, true);
+    // NOTE: must render from pageModel, not model. pageModel has the NoteDraw
+    // canvas fragments stripped when explicit ink data is available; rendering
+    // from the raw model draws the NoteDraw canvases in the bitmap layer AND
+    // the same strokes again via drawCanvasNoteDrawInkLayer, which is exactly
+    // the "one solid + one faint offset copy" ghosting reported for PNG export.
+    const pages = await this.renderModelPagesToPng(pageModel, signal, true, true);
     if (format === "png") return combinePngPages(pages);
     throw new Error("Unsupported export format.");
   }

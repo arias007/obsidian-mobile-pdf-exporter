@@ -230,6 +230,7 @@
 .mobile-pdf-exporter-options-toolbar-inner {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: flex-end;
   gap: 10px;
@@ -259,6 +260,53 @@
   min-width: 86px;
 }
 
+.mobile-pdf-exporter-format-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.mobile-pdf-exporter-format-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 64px;
+  padding: 6px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.mobile-pdf-exporter-format-button:hover:not(:disabled) {
+  background: var(--interactive-hover);
+}
+
+.mobile-pdf-exporter-format-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.mobile-pdf-exporter-format-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mobile-pdf-exporter-format-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.mobile-pdf-exporter-format-label {
+  font-weight: 600;
+}
+
 @media (max-width: 600px) {
   .mobile-pdf-exporter-options-toolbar-inner {
     display: grid;
@@ -270,6 +318,10 @@
   .mobile-pdf-exporter-options-name {
     grid-column: 1 / -1;
     width: 100%;
+  }
+
+  .mobile-pdf-exporter-format-buttons {
+    grid-column: 1 / -1;
   }
 
   .mobile-pdf-exporter-options-button {

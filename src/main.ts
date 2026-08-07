@@ -10,7 +10,8 @@ import {
   Setting,
   TFile,
   normalizePath,
-  requestUrl
+  requestUrl,
+  setIcon
 } from "obsidian";
 import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
 import embeddedCjkFontGzipBase64 from "../fonts/NotoSansSC-Regular.gb2312-subset.ttf.gz";
@@ -69,8 +70,139 @@ type NotePdfExportMode = typeof NOTE_PDF_EXPORT_MODES[number];
 const PDF_PAGE_PRESETS = ["current", "mobile", "a4", "a5", "letter"] as const;
 type PdfPagePreset = typeof PDF_PAGE_PRESETS[number];
 
-const EXPORT_FORMATS = ["pdf", "docx", "pptx", "png", "html"] as const;
+const EXPORT_FORMATS = ["pdf", "docx", "pptx", "png", "html", "zip"] as const;
 type ExportFormat = typeof EXPORT_FORMATS[number];
+
+// Obsidian wikilinks: ![[target#heading|alias]] or [[target]]
+const ZIP_WIKILINK_PATTERN = /(!?)\[\[([^\]|#]+)((?:#[^\]|]*)?)((?:\|[^\]]*)?)\]\]/gu;
+// Standard Markdown links/embeds: ![alt](target "title") or [text](target)
+// Tolerates unencoded spaces and one level of parentheses inside the target,
+// which Obsidian accepts even though strict CommonMark does not.
+const ZIP_MARKDOWN_LINK_PATTERN =
+  /(!?)\[([^\]]*)\]\(\s*(<[^>]*>|(?:[^()\n"]|\([^()\n]*\))*?)((?:\s+(?:"[^"]*"|'[^']*'))?)\s*\)/gu;
+
+function isExternalLinkTarget(target: string): boolean {
+  const value = target.trim();
+  if (!value) return true;
+  if (value.startsWith("#")) return true;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return true;
+  if (/^(?:data|mailto|tel|obsidian|file|blob|javascript):/i.test(value)) return true;
+  return value.startsWith("//");
+}
+
+function decodeVaultLinkTarget(target: string): string {
+  const trimmed = target.trim();
+  const unwrapped = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
+  try {
+    return decodeURIComponent(unwrapped);
+  } catch {
+    return unwrapped;
+  }
+}
+
+function stripLinkFragment(target: string): string {
+  const hashIndex = target.indexOf("#");
+  const base = hashIndex >= 0 ? target.slice(0, hashIndex) : target;
+  return base.trim();
+}
+
+function resolveVaultRelativePath(baseDir: string, target: string): string {
+  const segments = target.startsWith("/") ? [] : baseDir.split("/").filter(Boolean);
+  for (const part of target.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      segments.pop();
+      continue;
+    }
+    segments.push(part);
+  }
+  return segments.join("/");
+}
+
+function encodeMarkdownLinkTarget(target: string): string {
+  const encoded = target.replace(/[\s()<>"'`]/gu, (char) => encodeURIComponent(char));
+  return encoded;
+}
+
+// Inline HTML images, e.g. <img src="https://host/pic.png"> — common in Obsidian notes.
+const ZIP_HTML_IMG_PATTERN = /<img\b[^>]*?\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)[^>]*>/giu;
+
+function unwrapHtmlAttributeValue(raw: string): string {
+  const value = raw.trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1).trim();
+  }
+  return value;
+}
+
+function isRemoteHttpUrl(target: string): boolean {
+  const value = target.trim().replace(/^<|>$/gu, "");
+  return /^https?:\/\//i.test(value) || value.startsWith("//");
+}
+
+function normalizeRemoteUrl(target: string): string {
+  const value = target.trim().replace(/^<|>$/gu, "");
+  return value.startsWith("//") ? `https:${value}` : value;
+}
+
+const REMOTE_MIME_EXTENSIONS: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+  "image/avif": "avif",
+  "image/heic": "heic",
+  "image/tiff": "tiff",
+  "image/x-icon": "ico",
+  "image/vnd.microsoft.icon": "ico",
+  "application/pdf": "pdf"
+};
+
+const REMOTE_SAFE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "heic", "tiff", "tif", "ico", "pdf"
+]);
+
+function sanitizeZipFileName(name: string, fallback: string): string {
+  const cleaned = name
+    .replace(/[\\/:*?"<>|#]+/gu, "-")
+    .replace(/\s+/gu, " ")
+    .replace(/^[.\s-]+|[.\s-]+$/gu, "")
+    .slice(0, 80)
+    .trim();
+  return cleaned || fallback;
+}
+
+/** Derives a stable, filesystem-safe base name + extension for a downloaded remote asset. */
+function deriveRemoteAssetName(url: string, contentType: string, index: number): { base: string; extension: string } {
+  let pathname = "";
+  let hostname = "";
+  try {
+    const parsed = new URL(normalizeRemoteUrl(url));
+    pathname = decodeURIComponent(parsed.pathname);
+    hostname = parsed.hostname;
+  } catch {
+    pathname = normalizeRemoteUrl(url).split(/[?#]/u)[0] ?? "";
+  }
+
+  const lastSegment = pathname.split("/").filter(Boolean).pop() ?? "";
+  const dotIndex = lastSegment.lastIndexOf(".");
+  const rawBase = dotIndex > 0 ? lastSegment.slice(0, dotIndex) : lastSegment;
+  const urlExtension = dotIndex > 0 ? lastSegment.slice(dotIndex + 1).toLowerCase() : "";
+
+  const mime = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  const mimeExtension = REMOTE_MIME_EXTENSIONS[mime] ?? "";
+
+  const extension = REMOTE_SAFE_EXTENSIONS.has(urlExtension)
+    ? urlExtension
+    : mimeExtension || (urlExtension && /^[a-z0-9]{1,5}$/u.test(urlExtension) ? urlExtension : "png");
+
+  const fallbackBase = hostname ? `${hostname.replace(/^www\./iu, "")}-${index + 1}` : `remote-image-${index + 1}`;
+  const base = sanitizeZipFileName(rawBase, sanitizeZipFileName(fallbackBase, `remote-image-${index + 1}`));
+  return { base, extension };
+}
 
 const PDF_ORIENTATIONS = ["portrait", "landscape"] as const;
 type PdfOrientation = typeof PDF_ORIENTATIONS[number];
@@ -105,6 +237,7 @@ interface MobilePdfExporterSettings {
   imageRasterScale: number;
   currentPageWidthPx: number;
   currentPageHeightPx: number;
+  zipEmbedDepth: number;
 }
 
 interface RenderedPreview {
@@ -169,6 +302,7 @@ interface ExportFileOptions {
   signal?: AbortSignal;
   format?: ExportFormat;
   noteDrawSourcePath?: string;
+  zipEmbedDepth?: number;
 }
 
 interface PdfLinkContext {
@@ -1873,7 +2007,8 @@ const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   contentScalePercent: 100,
   imageRasterScale: 3,
   currentPageWidthPx: 794,
-  currentPageHeightPx: 1123
+  currentPageHeightPx: 1123,
+  zipEmbedDepth: 0
 };
 
 const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
@@ -2066,6 +2201,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
   private fontBytesPromise: Promise<ArrayBuffer> | null = null;
   private ribbonIconEl: HTMLElement | null = null;
   private exportCommand: { name: string } | null = null;
+  private zipVaultFileIndex: TFile[] | null = null;
 
   async onload(): Promise<void> {
     this.settings = normalizeSettings(await this.loadData());
@@ -2197,7 +2333,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
       throwIfExportCancelled(signal);
       let outputBlob: Blob;
       let model: PreviewPdfModel | null = null;
-      if (format === "html" && isMarkdown) {
+      if (format === "zip" && isMarkdown) {
+        outputBlob = await this.exportNotesToZip(file, markdown, options.zipEmbedDepth ?? this.settings.zipEmbedDepth, signal);
+      } else if (format === "html" && isMarkdown) {
         rendered = await this.renderMarkdownPreview(file, markdown, "html");
         const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
         const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(noteDrawFile, noteDrawHost);
@@ -2285,6 +2423,452 @@ export default class MobilePdfExporterPlugin extends Plugin {
       exportingPrompt.closeSoon();
       this.settings = previousSettings;
     }
+  }
+
+  private async exportNotesToZip(
+    sourceFile: TFile,
+    sourceMarkdown: string,
+    embedDepth: number,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    throwIfExportCancelled(signal);
+    const { default: JSZip } = await import("jszip");
+    const zip = new JSZip();
+    // Refresh the vault file index for this export run so link fallbacks stay accurate.
+    this.zipVaultFileIndex = null;
+
+    // Collect all notes recursively
+    type CollectedNote = {
+      content: string;
+      originalPath: string;
+      level: number;
+      zipName: string;
+      zipPath: string;
+    };
+    type CollectedAsset = {
+      file: TFile;
+      level: number;
+      zipName: string;
+      zipPath: string;
+    };
+
+    const collected = new Map<string, CollectedNote>();
+    const assetFiles = new Map<string, CollectedAsset>();
+    const visited = new Set<string>();
+    const usedZipPaths = new Set<string>();
+    const remoteRefLevels = new Map<string, number>();
+
+    // The source note (level 0) lives at the archive root. Every other collected file is nested
+    // under src/levelN where N is its collection depth.
+    const folderForLevel = (level: number): string => (level <= 0 ? "" : `src/level${level}`);
+
+    const uniqueZipName = (baseName: string, extension: string, folder: string): string => {
+      const suffix = extension ? `.${extension}` : "";
+      const prefix = folder ? `${folder.replace(/\/$/u, "")}/` : "";
+      let candidate = baseName;
+      let counter = 1;
+      while (usedZipPaths.has(`${prefix}${candidate}${suffix}`.toLowerCase())) {
+        candidate = `${baseName}-${counter}`;
+        counter += 1;
+      }
+      usedZipPaths.add(`${prefix}${candidate}${suffix}`.toLowerCase());
+      return candidate;
+    };
+
+    const buildNoteEntry = (file: TFile, level: number): CollectedNote => {
+      const ext = file.extension ? `.${file.extension}` : "";
+      const name = uniqueZipName(file.basename, file.extension, folderForLevel(level));
+      const folder = folderForLevel(level);
+      const zipPath = folder ? `${folder}/${name}${ext}` : `${name}${ext}`;
+      return { content: "", originalPath: file.path, level, zipName: name, zipPath };
+    };
+
+    const registerAsset = (file: TFile, level: number): void => {
+      const key = normalizePath(file.path);
+      if (assetFiles.has(key)) return;
+      const ext = file.extension ? `.${file.extension}` : "";
+      const name = uniqueZipName(file.basename, file.extension, folderForLevel(level));
+      const folder = folderForLevel(level);
+      const zipPath = folder ? `${folder}/${name}${ext}` : `${name}${ext}`;
+      assetFiles.set(key, { file, level, zipName: name, zipPath });
+    };
+
+    const collectNote = async (file: TFile, level: number): Promise<void> => {
+      throwIfExportCancelled(signal);
+      const normalizedPath = normalizePath(file.path);
+      if (visited.has(normalizedPath)) return;
+      visited.add(normalizedPath);
+
+      const content = file.path === sourceFile.path ? sourceMarkdown : await this.app.vault.cachedRead(file);
+      const entry = buildNoteEntry(file, level);
+      entry.content = content;
+      collected.set(normalizedPath, entry);
+
+      if (level >= embedDepth + 1) return;
+
+      const isSourceNote = file.path === sourceFile.path;
+      // The source note (level 0): at depth 0 only visible embeds are pulled in; at any higher
+      // depth every link on the source note is exported so any link can be opened. Deeper notes
+      // always export every link they contain.
+      const links = this.parseMarkdownLinks(content);
+      for (const link of links) {
+        const shouldCollect = isSourceNote ? (embedDepth === 0 ? link.isEmbed : true) : true;
+        if (!shouldCollect) continue;
+
+        const maybeRemote = link.target.replace(/^<|>$/gu, "");
+        if (isRemoteHttpUrl(maybeRemote)) {
+          const url = normalizeRemoteUrl(maybeRemote);
+          if (url) {
+            const prev = remoteRefLevels.get(url);
+            remoteRefLevels.set(url, prev === undefined ? level + 1 : Math.min(prev, level + 1));
+          }
+          continue;
+        }
+
+        const targetFile = this.resolveMarkdownLink(link.target, file.path);
+        if (!targetFile) continue;
+        if (targetFile.extension.toLowerCase() === "md") {
+          if (!visited.has(normalizePath(targetFile.path))) {
+            await collectNote(targetFile, level + 1);
+          }
+        } else {
+          registerAsset(targetFile, level + 1);
+        }
+      }
+    };
+
+    await collectNote(sourceFile, 0);
+
+    // Ensure the source note's NoteDraw raw data file is exported as-is (no rasterization).
+    // NoteDraw keeps each drawing in a dedicated <note>.notedraw.md file; pulling it in as a
+    // regular note preserves the native data so it can be reopened with the NoteDraw plugin.
+    const noteDrawFile = await this.findNoteDrawDataFile(sourceFile);
+    if (noteDrawFile && !visited.has(normalizePath(noteDrawFile.path))) {
+      await collectNote(noteDrawFile, 1);
+    }
+
+    // Download remote (http/https) assets referenced by packed notes, nested by their level.
+    const remoteAssets = new Map<string, { zipPath: string; data: ArrayBuffer }>();
+    const failedRemoteUrls: string[] = [];
+    const remoteUrlList = [...remoteRefLevels.entries()].sort((a, b) => a[1] - b[1]);
+    const REMOTE_DOWNLOAD_CONCURRENCY = 4;
+    for (let offset = 0; offset < remoteUrlList.length; offset += REMOTE_DOWNLOAD_CONCURRENCY) {
+      throwIfExportCancelled(signal);
+      const batch = remoteUrlList.slice(offset, offset + REMOTE_DOWNLOAD_CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async ([url, level], batchIndex) => ({
+          url,
+          level,
+          index: offset + batchIndex,
+          result: await this.downloadRemoteAsset(url, signal)
+        }))
+      );
+      for (const { url, level, index, result } of results) {
+        if (!result) {
+          failedRemoteUrls.push(url);
+          continue;
+        }
+        const { base, extension } = deriveRemoteAssetName(url, result.contentType, index);
+        const name = uniqueZipName(base, extension, folderForLevel(level));
+        const folder = folderForLevel(level);
+        const zipPath = folder ? `${folder}/${name}${extension ? `.${extension}` : ""}` : `${name}${extension ? `.${extension}` : ""}`;
+        remoteAssets.set(url, { zipPath, data: result.data });
+      }
+    }
+
+    // Write notes with links rewritten to their nested locations.
+    for (const entry of collected.values()) {
+      const fixedContent = this.fixMarkdownLinksForZip(entry, collected, assetFiles, remoteAssets);
+      zip.file(entry.zipPath, fixedContent);
+    }
+
+    // Write binary asset files (images, attachments) to their nested locations.
+    for (const { file: assetFile, zipPath } of assetFiles.values()) {
+      throwIfExportCancelled(signal);
+      const data = await this.app.vault.readBinary(assetFile);
+      zip.file(zipPath, data);
+    }
+
+    // Write downloaded remote assets to their nested locations.
+    for (const { zipPath, data } of remoteAssets.values()) {
+      zip.file(zipPath, data);
+    }
+
+    if (failedRemoteUrls.length > 0) {
+      console.warn("Mobile PDF Exporter kept the original URL for assets it could not download", failedRemoteUrls);
+      new Notice(`ZIP: ${failedRemoteUrls.length} remote image(s) could not be downloaded; original URLs kept.`, 6000);
+    }
+
+    throwIfExportCancelled(signal);
+    const zipData = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    this.zipVaultFileIndex = null;
+    return new Blob([zipData.buffer as ArrayBuffer], { type: "application/zip" });
+  }
+
+  private parseMarkdownLinks(content: string): Array<{ target: string; isEmbed: boolean; raw: string }> {
+    const links: Array<{ target: string; isEmbed: boolean; raw: string }> = [];
+    const wikilinkRanges: Array<[number, number]> = [];
+
+    // Match Obsidian wikilinks: ![[target]] or [[target]], with optional heading/alias
+    const wikilinkRegex = new RegExp(ZIP_WIKILINK_PATTERN.source, ZIP_WIKILINK_PATTERN.flags);
+    let match: RegExpExecArray | null;
+    while ((match = wikilinkRegex.exec(content)) !== null) {
+      wikilinkRanges.push([match.index, match.index + match[0].length]);
+      const target = stripLinkFragment(decodeVaultLinkTarget(match[2]));
+      if (!target || isExternalLinkTarget(target)) continue;
+      links.push({ target, isEmbed: match[1] === "!", raw: match[0] });
+    }
+
+    // Match standard Markdown links/embeds: ![alt](target "title") or [text](target)
+    const markdownRegex = new RegExp(ZIP_MARKDOWN_LINK_PATTERN.source, ZIP_MARKDOWN_LINK_PATTERN.flags);
+    while ((match = markdownRegex.exec(content)) !== null) {
+      const start = match.index;
+      if (wikilinkRanges.some(([from, to]) => start >= from && start < to)) continue;
+      const rawTarget = match[3];
+      if (isExternalLinkTarget(rawTarget.replace(/^<|>$/gu, ""))) continue;
+      const target = stripLinkFragment(decodeVaultLinkTarget(rawTarget));
+      if (!target || isExternalLinkTarget(target)) continue;
+      links.push({ target, isEmbed: match[1] === "!", raw: match[0] });
+    }
+
+    // Match inline HTML images: <img src="..."> — always treated as an embed.
+    const htmlImgRegex = new RegExp(ZIP_HTML_IMG_PATTERN.source, ZIP_HTML_IMG_PATTERN.flags);
+    while ((match = htmlImgRegex.exec(content)) !== null) {
+      const rawSrc = unwrapHtmlAttributeValue(match[1] ?? "");
+      if (!rawSrc || isExternalLinkTarget(rawSrc)) continue;
+      const target = stripLinkFragment(decodeVaultLinkTarget(rawSrc));
+      if (!target || isExternalLinkTarget(target)) continue;
+      links.push({ target, isEmbed: true, raw: match[0] });
+    }
+
+    return links;
+  }
+
+  /**
+   * Collects every remote (http/https) asset URL referenced by a note.
+   * Markdown embeds `![](url)`, wiki embeds `![[url]]` and `<img src="url">` all count as embeds;
+   * plain `[text](url)` links are only collected once the depth allows non-embed links.
+   */
+  private parseRemoteAssetUrls(content: string): Array<{ url: string; isEmbed: boolean }> {
+    const found = new Map<string, boolean>();
+    const wikilinkRanges: Array<[number, number]> = [];
+    const remember = (rawUrl: string, isEmbed: boolean): void => {
+      const url = normalizeRemoteUrl(rawUrl);
+      if (!url) return;
+      found.set(url, (found.get(url) ?? false) || isEmbed);
+    };
+
+    const wikilinkRegex = new RegExp(ZIP_WIKILINK_PATTERN.source, ZIP_WIKILINK_PATTERN.flags);
+    let match: RegExpExecArray | null;
+    while ((match = wikilinkRegex.exec(content)) !== null) {
+      wikilinkRanges.push([match.index, match.index + match[0].length]);
+      const raw = String(match[2] ?? "").trim();
+      if (isRemoteHttpUrl(raw)) remember(raw, match[1] === "!");
+    }
+
+    const markdownRegex = new RegExp(ZIP_MARKDOWN_LINK_PATTERN.source, ZIP_MARKDOWN_LINK_PATTERN.flags);
+    while ((match = markdownRegex.exec(content)) !== null) {
+      const start = match.index;
+      if (wikilinkRanges.some(([from, to]) => start >= from && start < to)) continue;
+      const raw = String(match[3] ?? "").replace(/^<|>$/gu, "").trim();
+      if (isRemoteHttpUrl(raw)) remember(raw, match[1] === "!");
+    }
+
+    const htmlImgRegex = new RegExp(ZIP_HTML_IMG_PATTERN.source, ZIP_HTML_IMG_PATTERN.flags);
+    while ((match = htmlImgRegex.exec(content)) !== null) {
+      const raw = unwrapHtmlAttributeValue(match[1] ?? "");
+      if (isRemoteHttpUrl(raw)) remember(raw, true);
+    }
+
+    return [...found.entries()].map(([url, isEmbed]) => ({ url, isEmbed }));
+  }
+
+  /** Downloads a remote asset through Obsidian's requestUrl so CORS never blocks the export. */
+  private async downloadRemoteAsset(
+    url: string,
+    signal?: AbortSignal
+  ): Promise<{ data: ArrayBuffer; contentType: string } | null> {
+    throwIfExportCancelled(signal);
+    try {
+      const response = await requestUrl({ url, method: "GET", throw: false });
+      if (response.status < 200 || response.status >= 300) return null;
+      const data = response.arrayBuffer;
+      if (!data || data.byteLength === 0) return null;
+      const headers = response.headers ?? {};
+      const contentTypeKey = Object.keys(headers).find((key) => key.toLowerCase() === "content-type");
+      const contentType = contentTypeKey ? String(headers[contentTypeKey] ?? "") : "";
+      return { data, contentType };
+    } catch (error) {
+      console.warn(`Mobile PDF Exporter could not download remote asset: ${url}`, error);
+      return null;
+    }
+  }
+
+  private resolveMarkdownLink(target: string, sourcePath: string): TFile | null {
+    const cleaned = stripLinkFragment(decodeVaultLinkTarget(target));
+    if (!cleaned || isExternalLinkTarget(cleaned)) return null;
+
+    const resolved = this.app.metadataCache.getFirstLinkpathDest(cleaned, sourcePath);
+    if (resolved) return resolved;
+
+    const sourceDir = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/")) : "";
+    const relative = resolveVaultRelativePath(sourceDir, cleaned);
+    const candidates = [cleaned, `${cleaned}.md`, relative, `${relative}.md`];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const file = this.app.vault.getAbstractFileByPath(normalizePath(candidate));
+      if (file instanceof TFile) return file;
+    }
+
+    // Fallback: scan the whole vault so links still resolve even when the
+    // metadata cache has not indexed the target yet (or the link uses a bare name).
+    const normalizedTarget = normalizePath(cleaned).toLowerCase();
+    const normalizedRelative = relative ? normalizePath(relative).toLowerCase() : "";
+    const bareName = cleaned.includes("/") ? cleaned.slice(cleaned.lastIndexOf("/") + 1) : cleaned;
+    const allFiles = (this.zipVaultFileIndex ??= this.app.vault.getFiles());
+    const byPath = allFiles.find((file) => {
+      const lower = file.path.toLowerCase();
+      return (
+        lower === normalizedTarget ||
+        lower === `${normalizedTarget}.md` ||
+        (normalizedRelative !== "" && (lower === normalizedRelative || lower === `${normalizedRelative}.md`))
+      );
+    });
+    if (byPath) return byPath;
+    const byName = allFiles.find(
+      (file) => file.name.toLowerCase() === bareName.toLowerCase() || file.basename.toLowerCase() === bareName.toLowerCase()
+    );
+    return byName ?? null;
+  }
+
+  private relativeZipPath(fromZipPath: string, toZipPath: string): string {
+    const fromParts = fromZipPath.split("/").slice(0, -1); // directory of the source file
+    const toParts = toZipPath.split("/");
+    let i = 0;
+    while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i]) i++;
+    const up = fromParts.length - i;
+    const down = toParts.slice(i);
+    return [...Array(up).fill(".."), ...down].join("/");
+  }
+
+  private fixMarkdownLinksForZip(
+    entry: { content: string; originalPath: string; zipPath: string },
+    collected: Map<string, { originalPath: string; zipPath: string; zipName: string; level: number }>,
+    assetFiles: Map<string, { file: TFile; zipPath: string; zipName: string; level: number }>,
+    remoteAssets: Map<string, { zipPath: string }>
+  ): string {
+    const currentZipPath = entry.zipPath;
+
+    const zipPathFor = (resolved: TFile): { zipPath: string; isNote: boolean } | null => {
+      const key = normalizePath(resolved.path);
+      const note = collected.get(key);
+      if (note) return { zipPath: note.zipPath, isNote: true };
+      const asset = assetFiles.get(key);
+      if (asset) return { zipPath: asset.zipPath, isNote: false };
+      return null;
+    };
+    const remotePathFor = (rawUrl: string): string | null => {
+      if (!isRemoteHttpUrl(rawUrl)) return null;
+      return remoteAssets.get(normalizeRemoteUrl(rawUrl))?.zipPath ?? null;
+    };
+
+    // Wikilinks: keep them clean (no .md), resolved relative to the current file's folder.
+    const wikilinkRegex = new RegExp(ZIP_WIKILINK_PATTERN.source, ZIP_WIKILINK_PATTERN.flags);
+    let output = entry.content.replace(wikilinkRegex, (fullMatch, bang, target, heading, alias) => {
+      const rawTarget = String(target).trim();
+      const remotePath = remotePathFor(rawTarget);
+      if (remotePath) {
+        const rel = this.relativeZipPath(currentZipPath, remotePath);
+        return `${bang}[[${rel}${alias ?? ""}]]`;
+      }
+      const cleaned = stripLinkFragment(decodeVaultLinkTarget(rawTarget));
+      if (!cleaned || isExternalLinkTarget(cleaned)) return fullMatch;
+      const resolved = this.resolveMarkdownLink(cleaned, entry.originalPath);
+      if (!resolved) return fullMatch;
+      const zipPath = zipPathFor(resolved);
+      if (!zipPath) return fullMatch;
+      const rel = this.relativeZipPath(currentZipPath, zipPath.zipPath);
+      // Strip the .md extension for note wikilinks so Obsidian resolves by name.
+      const display = zipPath.isNote ? rel.replace(/\.md$/u, "") : rel;
+      return `${bang}[[${display}${heading ?? ""}${alias ?? ""}]]`;
+    });
+
+    // Standard Markdown links: keep the real file name (with .md for notes).
+    const markdownRegex = new RegExp(ZIP_MARKDOWN_LINK_PATTERN.source, ZIP_MARKDOWN_LINK_PATTERN.flags);
+    output = output.replace(markdownRegex, (fullMatch, bang, label, rawTarget, title) => {
+      const raw = String(rawTarget);
+      const bare = raw.replace(/^<|>$/gu, "");
+      const remotePath = remotePathFor(bare);
+      if (remotePath) {
+        const rel = this.relativeZipPath(currentZipPath, remotePath);
+        return `${bang}[${label ?? ""}](${encodeMarkdownLinkTarget(rel)}${title ?? ""})`;
+      }
+      if (isExternalLinkTarget(bare)) return fullMatch;
+      const decoded = decodeVaultLinkTarget(raw);
+      const cleaned = stripLinkFragment(decoded);
+      if (!cleaned || isExternalLinkTarget(cleaned)) return fullMatch;
+      const resolved = this.resolveMarkdownLink(cleaned, entry.originalPath);
+      if (!resolved) return fullMatch;
+      const zipPath = zipPathFor(resolved);
+      if (!zipPath) return fullMatch;
+      const rel = this.relativeZipPath(currentZipPath, zipPath.zipPath);
+      const hashIndex = decoded.indexOf("#");
+      const fragment = hashIndex >= 0 ? decoded.slice(hashIndex) : "";
+      const encoded = encodeMarkdownLinkTarget(`${rel}${fragment}`);
+      return `${bang}[${label ?? ""}](${encoded}${title ?? ""})`;
+    });
+
+    // Rewrite inline HTML <img src="..."> so both vault assets and downloaded remote images resolve.
+    const htmlImgRegex = new RegExp(ZIP_HTML_IMG_PATTERN.source, ZIP_HTML_IMG_PATTERN.flags);
+    output = output.replace(htmlImgRegex, (fullMatch, rawSrc) => {
+      const attributeValue = String(rawSrc ?? "");
+      const src = unwrapHtmlAttributeValue(attributeValue);
+      if (!src) return fullMatch;
+
+      let replacement: string | null = remotePathFor(src);
+      if (!replacement && !isExternalLinkTarget(src)) {
+        const cleaned = stripLinkFragment(decodeVaultLinkTarget(src));
+        if (cleaned && !isExternalLinkTarget(cleaned)) {
+          const resolved = this.resolveMarkdownLink(cleaned, entry.originalPath);
+          const zipPath = resolved ? zipPathFor(resolved) : null;
+          if (zipPath) replacement = this.relativeZipPath(currentZipPath, zipPath.zipPath);
+        }
+      }
+      if (!replacement) return fullMatch;
+
+      const encoded = encodeMarkdownLinkTarget(replacement);
+      // Replace only the src attribute value, keeping every other attribute untouched.
+      const quote = attributeValue.trim().startsWith("'") ? "'" : '"';
+      return fullMatch.replace(attributeValue, `${quote}${encoded}${quote}`);
+    });
+
+    return output;
+  }
+
+  /**
+   * Returns the NoteDraw raw data file (a dedicated `<note>.notedraw.md`) associated with the
+   * given note, or null when NoteDraw is unavailable or no drawing data exists. Exporting this
+   * file as-is preserves the native drawing data so it can be reopened with the NoteDraw plugin.
+   */
+  private async findNoteDrawDataFile(file: TFile): Promise<TFile | null> {
+    const plugins = (this.app as unknown as {
+      plugins?: { plugins?: Record<string, { api?: { getStoragePaths?: (f: TFile) => { current?: string; legacy?: string } | null } }> };
+    }).plugins?.plugins;
+    const getStoragePaths = plugins?.notedraw?.api?.getStoragePaths;
+    if (!getStoragePaths) return null;
+    let paths: { current?: string; legacy?: string } | null = null;
+    try {
+      paths = getStoragePaths(file);
+    } catch {
+      return null;
+    }
+    if (!paths) return null;
+    for (const candidate of [paths.current, paths.legacy]) {
+      if (!candidate) continue;
+      const resolved = this.app.vault.getAbstractFileByPath(normalizePath(candidate));
+      if (resolved instanceof TFile) return resolved;
+    }
+    return null;
   }
 
   private async renderExcalidrawToImagePdf(file: TFile, signal?: AbortSignal): Promise<Blob> {
@@ -3142,10 +3726,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
     );
     const rasterTextFragments = collectVisualRasterTextFragments(model.textFragments);
     const hiddenVisualTextFragments = new Set(rasterTextFragments);
+    const hasNoteDrawCanvas = model.canvasFragments.some(isNoteDrawCanvasFragment);
     const visualModel = {
       ...model,
       textFragments: rasterTextFragments,
-      canvasFragments: hasExplicitNoteDrawContent(model)
+      canvasFragments: hasNoteDrawCanvas
         ? model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment))
         : model.canvasFragments
     };
@@ -3232,7 +3817,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const pdfDoc = await PDFDocumentRuntime.create();
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
-    const visualModel = hasExplicitNoteDrawContent(model)
+    const visualModel = model.canvasFragments.some(isNoteDrawCanvasFragment)
       ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
       : model;
 
@@ -3753,6 +4338,20 @@ class MobilePdfExportOptionsModal extends Modal {
           });
       });
 
+    const zipDepthSetting = new Setting(contentEl)
+      .setName("ZIP \u5d4c\u5165\u6df1\u5ea6")
+      .setDesc(`\u5bfc\u51fa ZIP \u65f6\u5305\u542b\u7684\u5d4c\u5165\u7b14\u8bb0\u94fe\u63a5\u6df1\u5ea6\uff08\u5f53\u524d: ${this.draft.zipEmbedDepth} \u7ea7\uff09`);
+    zipDepthSetting.addSlider((slider) => {
+      slider
+        .setLimits(0, 5, 1)
+        .setDynamicTooltip()
+        .setValue(this.draft.zipEmbedDepth)
+        .onChange((value) => {
+          this.draft.zipEmbedDepth = value;
+          zipDepthSetting.setDesc(`\u5bfc\u51fa ZIP \u65f6\u5305\u542b\u7684\u5d4c\u5165\u7b14\u8bb0\u94fe\u63a5\u6df1\u5ea6\uff08\u5f53\u524d: ${value} \u7ea7\uff09`);
+        });
+    });
+
     new Setting(contentEl)
       .setName(this.plugin.t("includeTitleName"))
       .addToggle((toggle) => {
@@ -3862,10 +4461,17 @@ class MobilePdfExportOptionsModal extends Modal {
       await exportingPrompt.waitUntilPainted();
       this.close();
 
+      const exportOptions: ExportFileOptions = {
+        outputBaseName,
+        busyPrompt: exportingPrompt,
+        format,
+        zipEmbedDepth: this.draft.zipEmbedDepth
+      };
+
       if (exportSettings.rememberLastExportOptions) {
         this.plugin.settings = cloneSettings(exportSettings);
         await this.plugin.saveSettings();
-        await this.plugin.exportFile(this.file, undefined, { outputBaseName, busyPrompt: exportingPrompt, format });
+        await this.plugin.exportFile(this.file, undefined, exportOptions);
         return;
       }
 
@@ -3874,7 +4480,7 @@ class MobilePdfExportOptionsModal extends Modal {
         await this.plugin.saveSettings();
       }
 
-      await this.plugin.exportFile(this.file, exportSettings, { outputBaseName, busyPrompt: exportingPrompt, format });
+      await this.plugin.exportFile(this.file, exportSettings, exportOptions);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       exportingPrompt.fail(message);
@@ -3926,29 +4532,32 @@ class MobilePdfExportOptionsModal extends Modal {
       });
     });
 
-    const formatSelect = appendElement(innerEl, "select", {
-      cls: "dropdown mobile-pdf-exporter-options-button"
+    // Icon buttons for the secondary export formats, listed below the PDF button.
+    const formatButtons: Array<{ value: ExportFormat; icon: string; label: string }> = [
+      { value: "docx", icon: "file-text", label: "docx" },
+      { value: "pptx", icon: "presentation", label: "pptx" },
+      { value: "png", icon: "image-file", label: "png" },
+      { value: "html", icon: "file-code", label: "html" },
+      { value: "zip", icon: "file-zip", label: "zip" }
+    ];
+    const formatButtonRow = appendElement(innerEl, "div", {
+      cls: "mobile-pdf-exporter-format-buttons"
     });
-    for (const [value, label] of [
-      ["", this.plugin.t("cancelButton")],
-      ["docx", "Word (.docx)"],
-      ["pptx", "PowerPoint (.pptx)"],
-      ["png", this.plugin.t("formatPngLabel")],
-      ["html", "HTML"]
-    ] as const) {
-      const option = appendElement(formatSelect, "option", { text: label });
-      option.value = value;
-    }
-    formatSelect.value = "";
-    formatSelect.addEventListener("change", () => {
-      const format = formatSelect.value as ExportFormat;
-      if (!EXPORT_FORMATS.includes(format) || format === "pdf") return;
-      formatSelect.disabled = true;
-      void this.exportWithDraft(format).catch(() => {
-        formatSelect.disabled = false;
-        formatSelect.value = "";
+    for (const fmt of formatButtons) {
+      const button = appendElement(formatButtonRow, "button", {
+        cls: "mobile-pdf-exporter-format-button"
       });
-    });
+      button.type = "button";
+      const iconEl = appendElement(button, "span", { cls: "mobile-pdf-exporter-format-icon" });
+      setIcon(iconEl, fmt.icon);
+      appendElement(button, "span", { cls: "mobile-pdf-exporter-format-label", text: fmt.label });
+      button.addEventListener("click", () => {
+        button.disabled = true;
+        void this.exportWithDraft(fmt.value).catch(() => {
+          button.disabled = false;
+        });
+      });
+    }
   }
 }
 
@@ -4383,7 +4992,14 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     contentScalePercent: clampNumber(saved.contentScalePercent, 80, 125, DEFAULT_SETTINGS.contentScalePercent),
     imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale),
     currentPageWidthPx: clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx),
-    currentPageHeightPx: clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx)
+    currentPageHeightPx: clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx),
+    // Accept the legacy "zipLinkDepth" key so settings written by other builds carry over.
+    zipEmbedDepth: clampNumber(
+      saved.zipEmbedDepth ?? (saved as { zipLinkDepth?: number }).zipLinkDepth,
+      0,
+      10,
+      DEFAULT_SETTINGS.zipEmbedDepth
+    )
   };
 }
 
@@ -4406,7 +5022,8 @@ function cloneSettings(settings: MobilePdfExporterSettings): MobilePdfExporterSe
     contentScalePercent: settings.contentScalePercent,
     imageRasterScale: settings.imageRasterScale,
     currentPageWidthPx: settings.currentPageWidthPx,
-    currentPageHeightPx: settings.currentPageHeightPx
+    currentPageHeightPx: settings.currentPageHeightPx,
+    zipEmbedDepth: settings.zipEmbedDepth
   };
 }
 
@@ -4504,7 +5121,12 @@ function collectVisualRasterTextFragments(fragments: TextFragment[]): TextFragme
   const linkedFragments = fragments.filter((fragment) => Boolean(fragment.href));
   return fragments.filter((fragment) => (
     requiresRasterTextFallback(fragment.text) ||
-    linkedFragments.some((linked) => areTextFragmentsOnSameVisualLine(fragment, linked))
+    linkedFragments.some((linked) => areTextFragmentsOnSameVisualLine(fragment, linked)) ||
+    // Rasterize bold and italic text so font weight/style is preserved as-is from the DOM.
+    // The PDF text layer uses a single font without bold/italic variants, so without
+    // rasterization, bold/italic formatting would be lost in the exported PDF.
+    Number.parseInt(fragment.fontWeight, 10) >= 600 ||
+    fragment.fontStyle === "italic"
   ));
 }
 
@@ -8126,6 +8748,21 @@ function attachPreparedNoteDrawToModel(
     model.keepBlocks.push({ ...element, priority: 6 });
   }
 
+  // Filter out text fragments that overlap with NoteDraw elements to prevent ghosting.
+  // NoteDraw text elements are rendered both as DOM text (captured as text fragments)
+  // and as NoteDraw elements (drawn via drawCanvasNoteDrawElementLayer). Without filtering,
+  // the text appears twice — once in the text layer and once in the NoteDraw element layer.
+  if (elements.length > 0) {
+    model.textFragments = model.textFragments.filter((fragment) =>
+      !elements.some((element) =>
+        fragment.left < element.right + 2 &&
+        fragment.right > element.left - 2 &&
+        fragment.top < element.bottom + 2 &&
+        fragment.bottom > element.top - 2
+      )
+    );
+  }
+
   const inkBottom = Math.max(0, ...ink.flatMap((stroke) => stroke.points.map((point) => point.y + stroke.widthPx)));
   const elementBottom = Math.max(0, ...elements.map((element) => element.bottom));
   const contentHeight = Math.ceil(Math.max(model.contentHeightPx, inkBottom, elementBottom));
@@ -11384,6 +12021,17 @@ async function svgElementToPngBytes(
     clone.setAttribute("height", String(height));
     if (!clone.getAttribute("viewBox")) clone.setAttribute("viewBox", `0 0 ${width} ${height}`);
     clone.setCssStyles({ color: getComputedStyle(svg).color });
+
+    // Fix text ghosting on Apple/WebKit: Excalidraw SVGs include both <text> and
+    // <foreignObject> elements for the same text content. WebKit renders both,
+    // causing visible ghosting/double-vision. Remove <foreignObject> duplicates
+    // so only the crisp <text> elements are rasterized.
+    clone.querySelectorAll("foreignObject").forEach((node) => node.remove());
+
+    // Set text-rendering to geometricPrecision for consistent cross-platform rendering.
+    clone.querySelectorAll("text").forEach((textEl) => {
+      textEl.setAttribute("text-rendering", "geometricPrecision");
+    });
 
     const xml = new XMLSerializer().serializeToString(clone);
     const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });

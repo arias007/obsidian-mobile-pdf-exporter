@@ -7674,6 +7674,55 @@ function appendLivePreviewSectionCaptures(
   }
 }
 
+function captureLivePreviewOverlayBranch(
+  branchEl: HTMLElement,
+  rootRect: DOMRect,
+  sizerEl: HTMLElement | undefined,
+  linkContext: PdfLinkContext,
+  scrollTop: number,
+  scrollLeft: number,
+  captured: CapturedSurfaceFragments,
+  seen: SurfaceCaptureSeenState
+): void {
+  for (const child of Array.from(branchEl.children)) {
+    if (!(child instanceof HTMLElement)) continue;
+    if (child === sizerEl || sizerEl?.contains(child)) continue;
+
+    // A child that WRAPS the sizer is not an overlay - it is the note body's
+    // container (e.g. NoteDraw's `.notedraw-reading-stage`, which nests the sizer
+    // alongside its drawing canvases). Capturing such a wrapper wholesale copies
+    // every section that appendLivePreviewSectionCaptures() also captures, so every
+    // glyph is emitted twice. The two copies never line up either: the wrapper can
+    // carry a CSS transform (reading zoom), so the overlay copy lands in scaled
+    // viewport space while the section copy is positioned from unscaled offsetTop
+    // layout space - a ~1.5% vertical drift that no overlap-based dedup can catch.
+    // Descend instead, so genuine sibling overlays inside the wrapper (drawing
+    // canvases, embed layers) are still captured exactly once.
+    if (sizerEl && child.contains(sizerEl)) {
+      captureLivePreviewOverlayBranch(
+        child,
+        rootRect,
+        sizerEl,
+        linkContext,
+        scrollTop,
+        scrollLeft,
+        captured,
+        seen
+      );
+      continue;
+    }
+
+    const rect = child.getBoundingClientRect();
+    appendSurfaceCapture(
+      captured,
+      captureSurfaceFragments(child, linkContext),
+      rect.top - rootRect.top + scrollTop,
+      rect.left - rootRect.left + scrollLeft,
+      seen
+    );
+  }
+}
+
 function captureLivePreviewRootOverlays(
   rootEl: HTMLElement,
   renderer: LivePreviewRenderer,
@@ -7687,19 +7736,16 @@ function captureLivePreviewRootOverlays(
   const rootRect = rootEl.getBoundingClientRect();
   const sizerEl = renderer.sizerEl;
 
-  for (const child of Array.from(rootEl.children)) {
-    if (!(child instanceof HTMLElement)) continue;
-    if (child === sizerEl || sizerEl?.contains(child)) continue;
-
-    const rect = child.getBoundingClientRect();
-    appendSurfaceCapture(
-      captured,
-      captureSurfaceFragments(child, linkContext),
-      rect.top - rootRect.top + scrollTop,
-      rect.left - rootRect.left + scrollLeft,
-      seen
-    );
-  }
+  captureLivePreviewOverlayBranch(
+    rootEl,
+    rootRect,
+    sizerEl,
+    linkContext,
+    scrollTop,
+    scrollLeft,
+    captured,
+    seen
+  );
 
   const isOutsideSizer = (element: Element): boolean => !sizerEl?.contains(element);
   const imageFragments = captureImageFragments(rootEl).filter((fragment) => isOutsideSizer(fragment.element));
@@ -7991,16 +8037,20 @@ function areOverlappingDuplicateTextFragments(left: TextFragment, right: TextFra
     Math.abs(left.right - right.right) <= 5 &&
     Math.abs(left.bottom - right.bottom) <= 4
   );
-  // The same glyph run is repeatedly captured twice in Live Preview / reading view:
-  // once by the scroll-band capture of the preview surface, and again by the
-  // per-section preview overlays (captureLivePreviewRootOverlays /
-  // appendLivePreviewSectionCaptures). Their measured boxes almost never line up
-  // pixel-for-pixel (the section layout heights differ from the live-rendered
-  // positions by a few px), so a strict alignment / 82%&72% overlap test lets the
-  // duplicate slip through and the text ghosts. Treat two same-text fragments as
-  // duplicates whenever they overlap substantially in BOTH axes. Legitimately
-  // repeated text on different lines never overlaps vertically, and side-by-side
-  // words never overlap horizontally, so this stays safe.
+  // Safety net for near-miss duplicates: when the same glyph run is captured by two
+  // paths, the measured boxes rarely line up pixel-for-pixel (section layout heights
+  // differ from live-rendered positions by a few px), so a strict alignment /
+  // 82%&72% overlap test lets the duplicate slip through and the text ghosts. Treat
+  // two fragments as duplicates whenever they overlap substantially in BOTH axes.
+  // This only ever runs on fragments that already share identical text AND identical
+  // font, weight, style, colour, heading level and link target, so it is safe:
+  // legitimately repeated text on different lines never overlaps vertically, and
+  // side-by-side words never overlap horizontally.
+  //
+  // NOTE: this cannot catch a wholesale double capture of the note body - those two
+  // copies are pushed apart by the reading-zoom scale mismatch and often do not
+  // overlap at all. That class of duplication is prevented structurally, in
+  // captureLivePreviewOverlayBranch().
   const substantiallyOverlapping = horizontalRatio >= 0.5 && verticalRatio >= 0.5;
   return nearlyAligned || substantiallyOverlapping;
 }

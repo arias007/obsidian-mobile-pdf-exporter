@@ -2447,7 +2447,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
     };
     type CollectedAsset = {
       file: TFile;
-      level: number;
       zipName: string;
       zipPath: string;
     };
@@ -2456,12 +2455,15 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const assetFiles = new Map<string, CollectedAsset>();
     const visited = new Set<string>();
     const usedZipPaths = new Set<string>();
-    const remoteRefLevels = new Map<string, number>();
+    // Remote (http/https) assets: downloaded once, then copied into every folder that references
+    // them so relative links stay correct.
+    const remoteDownloads = new Map<string, { data: ArrayBuffer; base: string; extension: string }>();
+    const remoteRefDirs = new Map<string, Set<string>>();
 
-    // The source note (level 0) lives at the archive root. Every other collected file is nested
-    // under src/levelN where N is its collection depth.
-    const folderForLevel = (level: number): string => (level <= 0 ? "" : `src/level${level}`);
-
+    // Each note's outgoing links are written into a folder that shares the note's own (deduped)
+    // name and lives in the note's own directory. The archive therefore mirrors the link graph:
+    // SourceNote.md at the root, its links in SourceNote/, each of those links' links in
+    // SourceNote/<Child>/, and so on — no flat "level"/"src" layout.
     const uniqueZipName = (baseName: string, extension: string, folder: string): string => {
       const suffix = extension ? `.${extension}` : "";
       const prefix = folder ? `${folder.replace(/\/$/u, "")}/` : "";
@@ -2475,43 +2477,39 @@ export default class MobilePdfExporterPlugin extends Plugin {
       return candidate;
     };
 
-    const buildNoteEntry = (file: TFile, level: number): CollectedNote => {
-      const ext = file.extension ? `.${file.extension}` : "";
-      const name = uniqueZipName(file.basename, file.extension, folderForLevel(level));
-      const folder = folderForLevel(level);
-      const zipPath = folder ? `${folder}/${name}${ext}` : `${name}${ext}`;
-      return { content: "", originalPath: file.path, level, zipName: name, zipPath };
-    };
-
-    const registerAsset = (file: TFile, level: number): void => {
+    // Register a non-markdown attachment (image, file) inside the given folder.
+    const registerAsset = (file: TFile, folder: string): void => {
       const key = normalizePath(file.path);
       if (assetFiles.has(key)) return;
       const ext = file.extension ? `.${file.extension}` : "";
-      const name = uniqueZipName(file.basename, file.extension, folderForLevel(level));
-      const folder = folderForLevel(level);
+      const name = uniqueZipName(file.basename, file.extension, folder);
       const zipPath = folder ? `${folder}/${name}${ext}` : `${name}${ext}`;
-      assetFiles.set(key, { file, level, zipName: name, zipPath });
+      assetFiles.set(key, { file, zipName: name, zipPath });
     };
 
-    const collectNote = async (file: TFile, level: number): Promise<void> => {
+    const collectNote = async (file: TFile, level: number, zipDir: string): Promise<void> => {
       throwIfExportCancelled(signal);
       const normalizedPath = normalizePath(file.path);
       if (visited.has(normalizedPath)) return;
       visited.add(normalizedPath);
 
       const content = file.path === sourceFile.path ? sourceMarkdown : await this.app.vault.cachedRead(file);
-      const entry = buildNoteEntry(file, level);
-      entry.content = content;
-      collected.set(normalizedPath, entry);
+      const ext = file.extension ? `.${file.extension}` : "";
+      // The note is written at <zipDir>/<basename>.md (zipDir is "" for the root source note).
+      const name = uniqueZipName(file.basename, file.extension, zipDir);
+      const zipPath = zipDir ? `${zipDir}/${name}${ext}` : `${name}${ext}`;
+      collected.set(normalizedPath, { content, originalPath: file.path, level, zipName: name, zipPath });
 
       if (level >= embedDepth + 1) return;
 
+      // This note's links live in a folder that shares its (deduped) name, inside its own dir.
+      const childFolder = zipDir ? `${zipDir}/${name}` : name;
       const isSourceNote = file.path === sourceFile.path;
-      // The source note (level 0): at depth 0 only visible embeds are pulled in; at any higher
-      // depth every link on the source note is exported so any link can be opened. Deeper notes
-      // always export every link they contain.
+
       const links = this.parseMarkdownLinks(content);
       for (const link of links) {
+        // The source note at depth 0 only pulls visible embeds; at any higher depth every link on
+        // the source note is exported so any link can be opened. Deeper notes always export all.
         const shouldCollect = isSourceNote ? (embedDepth === 0 ? link.isEmbed : true) : true;
         if (!shouldCollect) continue;
 
@@ -2519,8 +2517,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
         if (isRemoteHttpUrl(maybeRemote)) {
           const url = normalizeRemoteUrl(maybeRemote);
           if (url) {
-            const prev = remoteRefLevels.get(url);
-            remoteRefLevels.set(url, prev === undefined ? level + 1 : Math.min(prev, level + 1));
+            if (!remoteRefDirs.has(url)) remoteRefDirs.set(url, new Set<string>());
+            remoteRefDirs.get(url)!.add(childFolder);
           }
           continue;
         }
@@ -2529,69 +2527,70 @@ export default class MobilePdfExporterPlugin extends Plugin {
         if (!targetFile) continue;
         if (targetFile.extension.toLowerCase() === "md") {
           if (!visited.has(normalizePath(targetFile.path))) {
-            await collectNote(targetFile, level + 1);
+            await collectNote(targetFile, level + 1, childFolder);
           }
         } else {
-          registerAsset(targetFile, level + 1);
+          registerAsset(targetFile, childFolder);
         }
       }
     };
 
-    await collectNote(sourceFile, 0);
+    await collectNote(sourceFile, 0, "");
 
     // Ensure the source note's NoteDraw raw data file is exported as-is (no rasterization).
     // NoteDraw keeps each drawing in a dedicated <note>.notedraw.md file; pulling it in as a
     // regular note preserves the native data so it can be reopened with the NoteDraw plugin.
     const noteDrawFile = await this.findNoteDrawDataFile(sourceFile);
     if (noteDrawFile && !visited.has(normalizePath(noteDrawFile.path))) {
-      await collectNote(noteDrawFile, 1);
+      await collectNote(noteDrawFile, 1, sourceFile.basename);
     }
 
-    // Download remote (http/https) assets referenced by packed notes, nested by their level.
-    const remoteAssets = new Map<string, { zipPath: string; data: ArrayBuffer }>();
+    // Download remote (http/https) assets once; they are copied into every folder that references
+    // them so the relative links stay correct.
     const failedRemoteUrls: string[] = [];
-    const remoteUrlList = [...remoteRefLevels.entries()].sort((a, b) => a[1] - b[1]);
+    const remoteUrlList = [...remoteRefDirs.keys()];
     const REMOTE_DOWNLOAD_CONCURRENCY = 4;
     for (let offset = 0; offset < remoteUrlList.length; offset += REMOTE_DOWNLOAD_CONCURRENCY) {
       throwIfExportCancelled(signal);
       const batch = remoteUrlList.slice(offset, offset + REMOTE_DOWNLOAD_CONCURRENCY);
       const results = await Promise.all(
-        batch.map(async ([url, level], batchIndex) => ({
+        batch.map(async (url, batchIndex) => ({
           url,
-          level,
           index: offset + batchIndex,
           result: await this.downloadRemoteAsset(url, signal)
         }))
       );
-      for (const { url, level, index, result } of results) {
+      for (const { url, index, result } of results) {
         if (!result) {
           failedRemoteUrls.push(url);
           continue;
         }
         const { base, extension } = deriveRemoteAssetName(url, result.contentType, index);
-        const name = uniqueZipName(base, extension, folderForLevel(level));
-        const folder = folderForLevel(level);
-        const zipPath = folder ? `${folder}/${name}${extension ? `.${extension}` : ""}` : `${name}${extension ? `.${extension}` : ""}`;
-        remoteAssets.set(url, { zipPath, data: result.data });
+        remoteDownloads.set(url, { data: result.data, base, extension });
       }
     }
 
     // Write notes with links rewritten to their nested locations.
     for (const entry of collected.values()) {
-      const fixedContent = this.fixMarkdownLinksForZip(entry, collected, assetFiles, remoteAssets);
+      const fixedContent = this.fixMarkdownLinksForZip(entry, collected, assetFiles, remoteDownloads);
       zip.file(entry.zipPath, fixedContent);
     }
 
-    // Write binary asset files (images, attachments) to their nested locations.
+    // Write binary asset files (images, attachments) next to the notes that reference them.
     for (const { file: assetFile, zipPath } of assetFiles.values()) {
       throwIfExportCancelled(signal);
       const data = await this.app.vault.readBinary(assetFile);
       zip.file(zipPath, data);
     }
 
-    // Write downloaded remote assets to their nested locations.
-    for (const { zipPath, data } of remoteAssets.values()) {
-      zip.file(zipPath, data);
+    // Write downloaded remote assets into every folder that referenced them.
+    for (const [url, dirs] of remoteRefDirs.entries()) {
+      const download = remoteDownloads.get(url);
+      if (!download) continue;
+      const fileName = download.extension ? `${download.base}.${download.extension}` : download.base;
+      for (const dir of dirs) {
+        zip.file(dir ? `${dir}/${fileName}` : fileName, download.data);
+      }
     }
 
     if (failedRemoteUrls.length > 0) {
@@ -2754,10 +2753,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
   private fixMarkdownLinksForZip(
     entry: { content: string; originalPath: string; zipPath: string },
     collected: Map<string, { originalPath: string; zipPath: string; zipName: string; level: number }>,
-    assetFiles: Map<string, { file: TFile; zipPath: string; zipName: string; level: number }>,
-    remoteAssets: Map<string, { zipPath: string }>
+    assetFiles: Map<string, { file: TFile; zipPath: string; zipName: string }>,
+    remoteDownloads: Map<string, { base: string; extension: string }>
   ): string {
     const currentZipPath = entry.zipPath;
+    const currentDir = currentZipPath.includes("/")
+      ? currentZipPath.slice(0, currentZipPath.lastIndexOf("/"))
+      : "";
 
     const zipPathFor = (resolved: TFile): { zipPath: string; isNote: boolean } | null => {
       const key = normalizePath(resolved.path);
@@ -2769,7 +2771,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
     };
     const remotePathFor = (rawUrl: string): string | null => {
       if (!isRemoteHttpUrl(rawUrl)) return null;
-      return remoteAssets.get(normalizeRemoteUrl(rawUrl))?.zipPath ?? null;
+      const info = remoteDownloads.get(normalizeRemoteUrl(rawUrl));
+      if (!info) return null;
+      const fileName = info.extension ? `${info.base}.${info.extension}` : info.base;
+      // Remote assets are stored in the same folder as the note that references them.
+      return currentDir ? `${currentDir}/${fileName}` : fileName;
     };
 
     // Wikilinks: keep them clean (no .md), resolved relative to the current file's folder.
@@ -4338,20 +4344,6 @@ class MobilePdfExportOptionsModal extends Modal {
           });
       });
 
-    const zipDepthSetting = new Setting(contentEl)
-      .setName("ZIP \u5d4c\u5165\u6df1\u5ea6")
-      .setDesc(`\u5bfc\u51fa ZIP \u65f6\u5305\u542b\u7684\u5d4c\u5165\u7b14\u8bb0\u94fe\u63a5\u6df1\u5ea6\uff08\u5f53\u524d: ${this.draft.zipEmbedDepth} \u7ea7\uff09`);
-    zipDepthSetting.addSlider((slider) => {
-      slider
-        .setLimits(0, 5, 1)
-        .setDynamicTooltip()
-        .setValue(this.draft.zipEmbedDepth)
-        .onChange((value) => {
-          this.draft.zipEmbedDepth = value;
-          zipDepthSetting.setDesc(`\u5bfc\u51fa ZIP \u65f6\u5305\u542b\u7684\u5d4c\u5165\u7b14\u8bb0\u94fe\u63a5\u6df1\u5ea6\uff08\u5f53\u524d: ${value} \u7ea7\uff09`);
-        });
-    });
-
     new Setting(contentEl)
       .setName(this.plugin.t("includeTitleName"))
       .addToggle((toggle) => {
@@ -4538,12 +4530,45 @@ class MobilePdfExportOptionsModal extends Modal {
       { value: "pptx", icon: "presentation", label: "pptx" },
       { value: "png", icon: "image-file", label: "png" },
       { value: "html", icon: "file-code", label: "html" },
-      { value: "zip", icon: "file-zip", label: "zip" }
+      { value: "zip", icon: "file-archive", label: "zip" }
     ];
     const formatButtonRow = appendElement(innerEl, "div", {
       cls: "mobile-pdf-exporter-format-buttons"
     });
     for (const fmt of formatButtons) {
+      if (fmt.value === "zip") {
+        // ZIP is a combined box: export button + inline depth selector (no visible label).
+        const zipBox = appendElement(formatButtonRow, "div", {
+          cls: "mobile-pdf-exporter-zip-box"
+        });
+        const button = appendElement(zipBox, "button", {
+          cls: "mobile-pdf-exporter-format-button mobile-pdf-exporter-zip-button"
+        });
+        button.type = "button";
+        const iconEl = appendElement(button, "span", { cls: "mobile-pdf-exporter-format-icon" });
+        setIcon(iconEl, fmt.icon);
+        appendElement(button, "span", { cls: "mobile-pdf-exporter-format-label", text: fmt.label });
+        button.addEventListener("click", () => {
+          button.disabled = true;
+          void this.exportWithDraft(fmt.value).catch(() => {
+            button.disabled = false;
+          });
+        });
+        const depthSelect = appendElement(zipBox, "select", {
+          cls: "dropdown mobile-pdf-exporter-zip-depth-select"
+        });
+        for (let d = 0; d <= 5; d++) {
+          const opt = appendElement(depthSelect, "option", { text: String(d) });
+          opt.value = String(d);
+        }
+        depthSelect.value = String(this.draft.zipEmbedDepth);
+        depthSelect.title = `ZIP 链接深度: ${this.draft.zipEmbedDepth} 级`;
+        depthSelect.addEventListener("change", () => {
+          this.draft.zipEmbedDepth = Number(depthSelect.value);
+          depthSelect.title = `ZIP 链接深度: ${depthSelect.value} 级`;
+        });
+        continue;
+      }
       const button = appendElement(formatButtonRow, "button", {
         cls: "mobile-pdf-exporter-format-button"
       });

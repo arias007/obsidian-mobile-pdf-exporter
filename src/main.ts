@@ -11485,9 +11485,9 @@ function drawCanvasBitmapLayer(
 function isNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
   const canvas = fragment.element;
   return canvas.matches(
-    ".mobile-pdf-exporter-note-doodle-canvas, .notedraw-canvas, .notedraw-static-canvas, .note-doodle-canvas, .notedraw-export-image-canvas"
+    ".mobile-pdf-exporter-note-doodle-canvas, .notedraw-canvas, .notedraw-static-canvas, .notedraw-underlay-canvas, .note-doodle-canvas, .notedraw-export-image-canvas"
   ) || Boolean(canvas.closest(
-    ".notedraw-shell, .note-doodle-shell, .notedraw-export-image-canvas-layer"
+    ".notedraw-shell, .notedraw-reading-stage, .note-doodle-shell, .notedraw-export-image-canvas-layer"
   ));
 }
 

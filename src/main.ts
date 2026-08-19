@@ -238,6 +238,7 @@ interface MobilePdfExporterSettings {
   currentPageWidthPx: number;
   currentPageHeightPx: number;
   zipEmbedDepth: number;
+  previewEnabled: boolean;
 }
 
 interface RenderedPreview {
@@ -551,9 +552,24 @@ interface PreparedNoteDrawExportOverlay {
   data: NoteDoodleData | null;
   elements: NoteDrawElementData[];
   sourceElements: NoteDrawElementData[];
+  markdownBlocks: NoteDrawMarkdownBlock[];
   widthPx: number;
   heightPx: number;
   contentFrame: NoteDrawContentFrame;
+}
+
+interface NoteDrawMarkdownBlock {
+  id: string;
+  path: string;
+  lineStart: number | null;
+  lineEnd: number | null;
+  textHint: string;
+  renderKind: string;
+  widthScale: number;
+  contentScale: number;
+  minHeight: number;
+  floating: boolean;
+  floatBox: { x: number; y: number; width: number; height: number } | null;
 }
 
 interface NoteDrawContentFrame {
@@ -590,6 +606,10 @@ interface NoteDrawElementData {
     contentWidth: number;
     documentHeight: number;
   } | null;
+  markdownFlow: boolean;
+  sourcePath: string;
+  lineStart: number | null;
+  lineEnd: number | null;
   media: HTMLImageElement | HTMLCanvasElement | null;
 }
 
@@ -620,7 +640,8 @@ interface LiveDrawingController {
 }
 
 interface NoteDrawApiRuntime {
-  readDrawings?: (fileOrPath: TFile | string) => Promise<unknown>;
+  readDrawings?: (fileOrPath: TFile | string, options?: Record<string, unknown>) => Promise<unknown>;
+  drawingData?: { read?: (fileOrPath: TFile | string, options?: Record<string, unknown>) => Promise<unknown> };
   injectExportSnapshot?: (fileOrPath: TFile | string, container: HTMLElement) => Promise<HTMLElement | null>;
 }
 
@@ -668,6 +689,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "PDF 保存到库内指定文件夹；不存在时自动创建。",
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF 名称",
+    previewName: "PDF 完整预览",
+    previewDesc: "开启后在导出按钮下方显示可滚动的完整 PDF 预览，并记住此设置。",
+    previewButton: "预览",
+    previewLoading: "正在生成 PDF 预览…",
+    previewFailed: "PDF 预览生成失败：{error}",
     exportPdfButton: "导出 PDF",
     cancelButton: "导出其他格式",
     busyExporting: "正在导出 PDF",
@@ -753,6 +779,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Save the PDF to a custom vault folder, creating it when needed.",
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF name",
+    previewName: "Full PDF preview",
+    previewDesc: "Show a scrollable full PDF preview below the export buttons and remember this setting.",
+    previewButton: "Preview",
+    previewLoading: "Generating PDF preview…",
+    previewFailed: "PDF preview failed: {error}",
     exportPdfButton: "Export PDF",
     cancelButton: "Other formats",
     busyExporting: "Exporting PDF",
@@ -838,6 +869,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "PDFを指定したVault内フォルダーに保存し、必要なら作成します。",
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF名",
+    previewName: "PDFプレビュー",
+    previewDesc: "エクスポートボタンの下に完全なPDFプレビューを表示します。",
+    previewButton: "プレビュー",
+    previewLoading: "PDFプレビューを生成中…",
+    previewFailed: "PDFプレビューに失敗しました: {error}",
     exportPdfButton: "PDFを書き出す",
     cancelButton: "他の形式",
     busyExporting: "PDFを書き出しています",
@@ -923,6 +959,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "PDF를 지정한 Vault 폴더에 저장하고 필요하면 폴더를 만듭니다.",
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF 이름",
+    previewName: "전체 PDF 미리보기",
+    previewDesc: "내보내기 버튼 아래에 스크롤 가능한 전체 PDF 미리보기를 표시하고 설정을 기억합니다.",
+    previewButton: "미리보기",
+    previewLoading: "PDF 미리보기를 생성하는 중…",
+    previewFailed: "PDF 미리보기에 실패했습니다: {error}",
     exportPdfButton: "PDF 내보내기",
     cancelButton: "다른 형식",
     busyExporting: "PDF 내보내는 중",
@@ -1008,6 +1049,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Guarda el PDF en una carpeta del Vault y la crea cuando sea necesario.",
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "Nombre del PDF",
+    previewName: "Vista previa PDF completa",
+    previewDesc: "Muestra una vista previa PDF completa y desplazable debajo de los botones de exportación.",
+    previewButton: "Vista previa",
+    previewLoading: "Generando vista previa PDF…",
+    previewFailed: "La vista previa PDF falló: {error}",
     exportPdfButton: "Exportar PDF",
     cancelButton: "Otros formatos",
     busyExporting: "Exportando PDF",
@@ -1093,6 +1139,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Enregistre le PDF dans un dossier du Vault et le crée si nécessaire.",
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "Nom du PDF",
+    previewName: "Aperçu PDF complet",
+    previewDesc: "Affiche un aperçu PDF complet et défilable sous les boutons d’exportation.",
+    previewButton: "Aperçu",
+    previewLoading: "Génération de l’aperçu PDF…",
+    previewFailed: "Échec de l’aperçu PDF : {error}",
     exportPdfButton: "Exporter le PDF",
     cancelButton: "Autres formats",
     busyExporting: "Export du PDF",
@@ -1178,6 +1229,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Speichert das PDF in einem Vault-Ordner und erstellt ihn bei Bedarf.",
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "PDF-Name",
+    previewName: "Vollständige PDF-Vorschau",
+    previewDesc: "Zeigt eine scrollbare vollständige PDF-Vorschau unter den Export-Schaltflächen an.",
+    previewButton: "Vorschau",
+    previewLoading: "PDF-Vorschau wird erstellt…",
+    previewFailed: "PDF-Vorschau fehlgeschlagen: {error}",
     exportPdfButton: "PDF exportieren",
     cancelButton: "Andere Formate",
     busyExporting: "PDF wird exportiert",
@@ -1263,6 +1319,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Сохраняет PDF в указанной папке Vault и создаёт её при необходимости.",
     outputFolderPlaceholder: "PDF Exports",
     pdfNameLabel: "Имя PDF",
+    previewName: "Полный просмотр PDF",
+    previewDesc: "Показывать прокручиваемый полный просмотр PDF под кнопками экспорта.",
+    previewButton: "Просмотр",
+    previewLoading: "Создание просмотра PDF…",
+    previewFailed: "Ошибка просмотра PDF: {error}",
     exportPdfButton: "Экспортировать PDF",
     cancelButton: "Другие форматы",
     busyExporting: "Экспорт PDF",
@@ -1348,6 +1409,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Guardar o PDF numa pasta personalizada do cofre, criando-a quando necessário.",
     outputFolderPlaceholder: "Exportações PDF",
     pdfNameLabel: "Nome do PDF",
+    previewName: "Pré-visualização completa do PDF",
+    previewDesc: "Mostra uma pré-visualização completa e rolável do PDF abaixo dos botões de exportação.",
+    previewButton: "Pré-visualizar",
+    previewLoading: "A gerar pré-visualização PDF…",
+    previewFailed: "Falha na pré-visualização PDF: {error}",
     exportPdfButton: "Exportar PDF",
     cancelButton: "Outros formatos",
     busyExporting: "A exportar PDF",
@@ -1433,6 +1499,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Salva il PDF in una cartella personalizzata del vault, creandola se necessario.",
     outputFolderPlaceholder: "Esportazioni PDF",
     pdfNameLabel: "Nome PDF",
+    previewName: "Anteprima PDF completa",
+    previewDesc: "Mostra un’anteprima PDF completa e scorrevole sotto i pulsanti di esportazione.",
+    previewButton: "Anteprima",
+    previewLoading: "Generazione anteprima PDF…",
+    previewFailed: "Anteprima PDF non riuscita: {error}",
     exportPdfButton: "Esporta PDF",
     cancelButton: "Altri formati",
     busyExporting: "Esportazione PDF",
@@ -1518,6 +1589,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "احفظ ملف PDF في مجلد مخصص داخل الخزنة، مع إنشائه عند الحاجة.",
     outputFolderPlaceholder: "صادرات PDF",
     pdfNameLabel: "اسم ملف PDF",
+    previewName: "معاينة PDF كاملة",
+    previewDesc: "إظهار معاينة PDF كاملة قابلة للتمرير أسفل أزرار التصدير وتذكر الإعداد.",
+    previewButton: "معاينة",
+    previewLoading: "جارٍ إنشاء معاينة PDF…",
+    previewFailed: "فشلت معاينة PDF: {error}",
     exportPdfButton: "تصدير PDF",
     cancelButton: "تنسيقات أخرى",
     busyExporting: "جارٍ تصدير PDF",
@@ -1603,6 +1679,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "PDF को वॉल्ट के कस्टम फ़ोल्डर में सहेजें और आवश्यकता होने पर उसे बनाएँ।",
     outputFolderPlaceholder: "PDF निर्यात",
     pdfNameLabel: "PDF नाम",
+    previewName: "पूर्ण PDF पूर्वावलोकन",
+    previewDesc: "निर्यात बटन के नीचे स्क्रॉल करने योग्य पूर्ण PDF पूर्वावलोकन दिखाएं और सेटिंग याद रखें।",
+    previewButton: "पूर्वावलोकन",
+    previewLoading: "PDF पूर्वावलोकन बनाया जा रहा है…",
+    previewFailed: "PDF पूर्वावलोकन विफल: {error}",
     exportPdfButton: "PDF निर्यात करें",
     cancelButton: "अन्य प्रारूप",
     busyExporting: "PDF निर्यात हो रहा है",
@@ -1688,6 +1769,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Simpan PDF ke folder khusus di vault dan buat folder jika diperlukan.",
     outputFolderPlaceholder: "Ekspor PDF",
     pdfNameLabel: "Nama PDF",
+    previewName: "Pratinjau PDF lengkap",
+    previewDesc: "Tampilkan pratinjau PDF lengkap yang dapat digulir di bawah tombol ekspor dan ingat pengaturan ini.",
+    previewButton: "Pratinjau",
+    previewLoading: "Membuat pratinjau PDF…",
+    previewFailed: "Pratinjau PDF gagal: {error}",
     exportPdfButton: "Ekspor PDF",
     cancelButton: "Format lain",
     busyExporting: "Mengekspor PDF",
@@ -1773,6 +1859,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "PDF'yi kasadaki özel bir klasöre kaydedin ve gerekirse klasörü oluşturun.",
     outputFolderPlaceholder: "PDF Dışa Aktarımları",
     pdfNameLabel: "PDF adı",
+    previewName: "Tam PDF önizlemesi",
+    previewDesc: "Dışa aktarma düğmelerinin altında kaydırılabilir tam PDF önizlemesi gösterilir ve ayar hatırlanır.",
+    previewButton: "Önizleme",
+    previewLoading: "PDF önizlemesi oluşturuluyor…",
+    previewFailed: "PDF önizlemesi başarısız: {error}",
     exportPdfButton: "PDF'yi dışa aktar",
     cancelButton: "Diğer biçimler",
     busyExporting: "PDF dışa aktarılıyor",
@@ -1858,6 +1949,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "Lưu PDF vào thư mục tùy chỉnh trong kho và tạo thư mục khi cần.",
     outputFolderPlaceholder: "Tệp PDF đã xuất",
     pdfNameLabel: "Tên PDF",
+    previewName: "Xem trước PDF đầy đủ",
+    previewDesc: "Hiển thị bản xem trước PDF đầy đủ có thể cuộn bên dưới các nút xuất và ghi nhớ cài đặt.",
+    previewButton: "Xem trước",
+    previewLoading: "Đang tạo bản xem trước PDF…",
+    previewFailed: "Xem trước PDF thất bại: {error}",
     exportPdfButton: "Xuất PDF",
     cancelButton: "Định dạng khác",
     busyExporting: "Đang xuất PDF",
@@ -1943,6 +2039,11 @@ const UI_TEXT = {
     outputLocationFolderDesc: "บันทึก PDF ในโฟลเดอร์กำหนดเองภายในคลัง และสร้างโฟลเดอร์เมื่อจำเป็น",
     outputFolderPlaceholder: "ไฟล์ PDF ที่ส่งออก",
     pdfNameLabel: "ชื่อ PDF",
+    previewName: "ตัวอย่าง PDF แบบเต็ม",
+    previewDesc: "แสดงตัวอย่าง PDF แบบเต็มที่เลื่อนได้ใต้ปุ่มส่งออกและจดจำการตั้งค่านี้",
+    previewButton: "ตัวอย่าง",
+    previewLoading: "กำลังสร้างตัวอย่าง PDF…",
+    previewFailed: "ตัวอย่าง PDF ล้มเหลว: {error}",
     exportPdfButton: "ส่งออก PDF",
     cancelButton: "รูปแบบอื่น",
     busyExporting: "กำลังส่งออก PDF",
@@ -2008,7 +2109,8 @@ const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   imageRasterScale: 3,
   currentPageWidthPx: 794,
   currentPageHeightPx: 1123,
-  zipEmbedDepth: 0
+  zipEmbedDepth: 0,
+  previewEnabled: false
 };
 
 const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
@@ -2099,7 +2201,7 @@ function resolveUiLanguage(language: UiLanguage): ResolvedUiLanguage {
 }
 
 function translate(language: ResolvedUiLanguage, key: TranslationKey): string {
-  return UI_TEXT[language][key];
+  return UI_TEXT[language][key] ?? UI_TEXT.en[key];
 }
 
 function formatTranslation(
@@ -2280,6 +2382,61 @@ export default class MobilePdfExporterPlugin extends Plugin {
     this.openExportOptionsModal(file);
   }
 
+  /** Render the same PDF bytes used by exportFile without writing or sharing a file. */
+  async renderPreviewPdfBlob(
+    file: TFile,
+    exportSettings?: MobilePdfExporterSettings,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    const previousSettings = this.settings;
+    if (exportSettings) this.settings = cloneSettings(exportSettings);
+    let rendered: RenderedPreview | null = null;
+    try {
+      throwIfExportCancelled(signal);
+      cleanupRenderRoots();
+      const isMarkdown = file.extension.toLowerCase() === "md";
+      const markdown = isMarkdown ? await this.app.vault.cachedRead(file) : "";
+      if (isMarkdown && isExcalidrawMarkdownFile(file, markdown)) {
+        return await this.renderExcalidrawToImagePdf(file, signal);
+      }
+
+      let model: PreviewPdfModel | null = null;
+      const liveSurface = this.getActiveExportSurface(file);
+      if (liveSurface) {
+        model = await this.captureLiveViewPdfModel(file, liveSurface, signal);
+      } else if (isMarkdown) {
+        rendered = await this.renderMarkdownPreview(file, markdown);
+        throwIfExportCancelled(signal);
+        const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
+        const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, noteDrawHost);
+        try {
+          await nextAnimationFrame();
+          model = this.capturePreviewPdfModel(file, rendered.pageEl);
+          const pageRect = rendered.pageEl.getBoundingClientRect();
+          const hostRect = noteDrawHost.getBoundingClientRect();
+          attachPreparedNoteDrawToModel(model, preparedNoteDraw, {
+            offsetX: hostRect.left - pageRect.left,
+            offsetY: hostRect.top - pageRect.top,
+            scale: 1,
+            linkContext: createPdfLinkContext(this.app, file)
+          });
+        } finally {
+          preparedNoteDraw.cleanup();
+        }
+      } else {
+        throw new Error(this.t("previewNoContentError"));
+      }
+      if (!model) throw new Error(this.t("previewNoContentError"));
+      return await this.renderModelToFormat(file, model, "pdf", signal);
+    } finally {
+      if (rendered) {
+        rendered.renderComponent.unload();
+        rendered.rootEl.remove();
+      }
+      this.settings = previousSettings;
+    }
+  }
+
   openExportOptionsModal(file: TFile): void {
     this.refreshCurrentPageSizeFromActiveSurface(file);
     new MobilePdfExportOptionsModal(this.app, this, file).open();
@@ -2455,39 +2612,33 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const assetFiles = new Map<string, CollectedAsset>();
     const visited = new Set<string>();
     const usedZipPaths = new Set<string>();
-    // Remote (http/https) assets: downloaded once, then copied into every folder that references
-    // them so relative links stay correct.
+    // Remote (http/https) assets are downloaded once and written to the archive root.
     const remoteDownloads = new Map<string, { data: ArrayBuffer; base: string; extension: string }>();
-    const remoteRefDirs = new Map<string, Set<string>>();
+    const remoteUrls = new Set<string>();
 
-    // Each note's outgoing links are written into a folder that shares the note's own (deduped)
-    // name and lives in the note's own directory. The archive therefore mirrors the link graph:
-    // SourceNote.md at the root, its links in SourceNote/, each of those links' links in
-    // SourceNote/<Child>/, and so on — no flat "level"/"src" layout.
-    const uniqueZipName = (baseName: string, extension: string, folder: string): string => {
+    // Every entry lives at the root. Deduplicate names globally so rewritten links are stable.
+    const uniqueZipName = (baseName: string, extension: string): string => {
       const suffix = extension ? `.${extension}` : "";
-      const prefix = folder ? `${folder.replace(/\/$/u, "")}/` : "";
       let candidate = baseName;
       let counter = 1;
-      while (usedZipPaths.has(`${prefix}${candidate}${suffix}`.toLowerCase())) {
+      while (usedZipPaths.has(`${candidate}${suffix}`.toLowerCase())) {
         candidate = `${baseName}-${counter}`;
         counter += 1;
       }
-      usedZipPaths.add(`${prefix}${candidate}${suffix}`.toLowerCase());
+      usedZipPaths.add(`${candidate}${suffix}`.toLowerCase());
       return candidate;
     };
 
-    // Register a non-markdown attachment (image, file) inside the given folder.
-    const registerAsset = (file: TFile, folder: string): void => {
+    const registerAsset = (file: TFile): void => {
       const key = normalizePath(file.path);
       if (assetFiles.has(key)) return;
       const ext = file.extension ? `.${file.extension}` : "";
-      const name = uniqueZipName(file.basename, file.extension, folder);
-      const zipPath = folder ? `${folder}/${name}${ext}` : `${name}${ext}`;
+      const name = uniqueZipName(file.basename, file.extension);
+      const zipPath = `${name}${ext}`;
       assetFiles.set(key, { file, zipName: name, zipPath });
     };
 
-    const collectNote = async (file: TFile, level: number, zipDir: string): Promise<void> => {
+    const collectNote = async (file: TFile, level: number): Promise<void> => {
       throwIfExportCancelled(signal);
       const normalizedPath = normalizePath(file.path);
       if (visited.has(normalizedPath)) return;
@@ -2495,16 +2646,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
       const content = file.path === sourceFile.path ? sourceMarkdown : await this.app.vault.cachedRead(file);
       const ext = file.extension ? `.${file.extension}` : "";
-      // The note is written at <zipDir>/<basename>.md (zipDir is "" for the root source note).
-      const name = uniqueZipName(file.basename, file.extension, zipDir);
-      const zipPath = zipDir ? `${zipDir}/${name}${ext}` : `${name}${ext}`;
+      const name = uniqueZipName(file.basename, file.extension);
+      const zipPath = `${name}${ext}`;
       collected.set(normalizedPath, { content, originalPath: file.path, level, zipName: name, zipPath });
 
-      if (level >= embedDepth + 1) return;
-
-      // This note's links live in a folder that shares its (deduped) name, inside its own dir.
-      const childFolder = zipDir ? `${zipDir}/${name}` : name;
       const isSourceNote = file.path === sourceFile.path;
+      // Depth 0 is the source note plus visible embeds. For depth N>0, the source
+      // note's direct links are level 1 and recursion stops after level N.
+      if (!isSourceNote && level >= embedDepth) return;
 
       const links = this.parseMarkdownLinks(content);
       for (const link of links) {
@@ -2516,10 +2665,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         const maybeRemote = link.target.replace(/^<|>$/gu, "");
         if (isRemoteHttpUrl(maybeRemote)) {
           const url = normalizeRemoteUrl(maybeRemote);
-          if (url) {
-            if (!remoteRefDirs.has(url)) remoteRefDirs.set(url, new Set<string>());
-            remoteRefDirs.get(url)!.add(childFolder);
-          }
+          if (url) remoteUrls.add(url);
           continue;
         }
 
@@ -2527,28 +2673,28 @@ export default class MobilePdfExporterPlugin extends Plugin {
         if (!targetFile) continue;
         if (targetFile.extension.toLowerCase() === "md") {
           if (!visited.has(normalizePath(targetFile.path))) {
-            await collectNote(targetFile, level + 1, childFolder);
+            await collectNote(targetFile, level + 1);
           }
         } else {
-          registerAsset(targetFile, childFolder);
+          registerAsset(targetFile);
         }
       }
     };
 
-    await collectNote(sourceFile, 0, "");
+    await collectNote(sourceFile, 0);
 
     // Ensure the source note's NoteDraw raw data file is exported as-is (no rasterization).
     // NoteDraw keeps each drawing in a dedicated <note>.notedraw.md file; pulling it in as a
     // regular note preserves the native data so it can be reopened with the NoteDraw plugin.
     const noteDrawFile = await this.findNoteDrawDataFile(sourceFile);
     if (noteDrawFile && !visited.has(normalizePath(noteDrawFile.path))) {
-      await collectNote(noteDrawFile, 1, sourceFile.basename);
+      await collectNote(noteDrawFile, 1);
     }
 
     // Download remote (http/https) assets once; they are copied into every folder that references
     // them so the relative links stay correct.
     const failedRemoteUrls: string[] = [];
-    const remoteUrlList = [...remoteRefDirs.keys()];
+    const remoteUrlList = [...remoteUrls];
     const REMOTE_DOWNLOAD_CONCURRENCY = 4;
     for (let offset = 0; offset < remoteUrlList.length; offset += REMOTE_DOWNLOAD_CONCURRENCY) {
       throwIfExportCancelled(signal);
@@ -2566,31 +2712,30 @@ export default class MobilePdfExporterPlugin extends Plugin {
           continue;
         }
         const { base, extension } = deriveRemoteAssetName(url, result.contentType, index);
-        remoteDownloads.set(url, { data: result.data, base, extension });
+        const uniqueBase = uniqueZipName(base, extension);
+        remoteDownloads.set(url, { data: result.data, base: uniqueBase, extension });
       }
     }
 
-    // Write notes with links rewritten to their nested locations.
+    // Write notes with links rewritten to their root-level names.
     for (const entry of collected.values()) {
       const fixedContent = this.fixMarkdownLinksForZip(entry, collected, assetFiles, remoteDownloads);
       zip.file(entry.zipPath, fixedContent);
     }
 
-    // Write binary asset files (images, attachments) next to the notes that reference them.
+    // Write binary asset files at the archive root.
     for (const { file: assetFile, zipPath } of assetFiles.values()) {
       throwIfExportCancelled(signal);
       const data = await this.app.vault.readBinary(assetFile);
       zip.file(zipPath, data);
     }
 
-    // Write downloaded remote assets into every folder that referenced them.
-    for (const [url, dirs] of remoteRefDirs.entries()) {
+    // Write downloaded remote assets at the archive root.
+    for (const url of remoteUrls) {
       const download = remoteDownloads.get(url);
       if (!download) continue;
       const fileName = download.extension ? `${download.base}.${download.extension}` : download.base;
-      for (const dir of dirs) {
-        zip.file(dir ? `${dir}/${fileName}` : fileName, download.data);
-      }
+      zip.file(fileName, download.data);
     }
 
     if (failedRemoteUrls.length > 0) {
@@ -2774,8 +2919,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const info = remoteDownloads.get(normalizeRemoteUrl(rawUrl));
       if (!info) return null;
       const fileName = info.extension ? `${info.base}.${info.extension}` : info.base;
-      // Remote assets are stored in the same folder as the note that references them.
-      return currentDir ? `${currentDir}/${fileName}` : fileName;
+      // All remote assets are stored at the archive root.
+      return fileName;
     };
 
     // Wikilinks: keep them clean (no .md), resolved relative to the current file's folder.
@@ -2892,7 +3037,32 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const preferredScale = Math.min(2, Math.max(1.25, activeWindow.devicePixelRatio || 1.5));
       const scales = getExcalidrawExportScaleCandidates(preferredScale);
 
-      // Prefer SVG so Excalidraw's own createPNG path does not show "PNG too large" notices.
+      // Prefer Excalidraw's native PNG renderer. On WebKit/iPad, rasterizing an SVG can
+      // expose both its text nodes and foreignObject fallback text and produce ghosting.
+      if (lease.api.createPNG) {
+        for (const scale of getExcalidrawPngFallbackScaleCandidates(false)) {
+          try {
+            throwIfExportCancelled(signal);
+            lease.api.reset?.();
+            const pngBlob = await waitForPromiseOrTimeout(
+              lease.api.createPNG(file.path, scale, exportSettings, loader, "light", 12),
+              EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS
+            );
+            throwIfExportCancelled(signal);
+            if (!pngBlob || pngBlob.size <= 0) {
+              errors.push(formatTranslation(this.getResolvedLanguage(), "excalidrawPngNoImageError", { scale }));
+              continue;
+            }
+            const pdfBlob = await this.tryBuildExcalidrawImagePdf(file, await blobToUint8Array(pngBlob), `PNG ${scale}x`, signal);
+            if (pdfBlob) return pdfBlob;
+          } catch (error) {
+            if (isExportCancelledError(error)) throw error;
+            errors.push(formatErrorMessage(error));
+            console.warn(`Mobile PDF Exporter Excalidraw native PNG ${scale}x failed`, error);
+          }
+        }
+      }
+
       if (lease.api.createSVG) {
         try {
           throwIfExportCancelled(signal);
@@ -2927,7 +3097,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       }
 
       if (lease.api.createPNG) {
-        for (const scale of getExcalidrawPngFallbackScaleCandidates(Boolean(lease.api.createSVG))) {
+        for (const scale of getExcalidrawPngFallbackScaleCandidates(true)) {
           try {
             throwIfExportCancelled(signal);
             lease.api.reset?.();
@@ -3585,6 +3755,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       data: null,
       elements: [],
       sourceElements: [],
+      markdownBlocks: [],
       widthPx: width,
       heightPx: height,
       contentFrame
@@ -3593,18 +3764,25 @@ export default class MobilePdfExporterPlugin extends Plugin {
       plugins?: { plugins?: Record<string, { api?: NoteDrawApiRuntime }> };
     }).plugins?.plugins;
     const api = plugins?.notedraw?.api;
-    if (!api?.readDrawings) return empty();
+    if (!api?.readDrawings && !api?.drawingData?.read) return empty();
 
     let rawData: unknown;
     try {
-      rawData = await api.readDrawings(file);
+      if (api.readDrawings) {
+        rawData = await api.readDrawings(file);
+      } else {
+        rawData = await api.drawingData!.read!(file, { includeResources: true, includeMarkdownLinks: true });
+      }
     } catch (error) {
       console.warn("Mobile PDF Exporter could not read NoteDraw data", error);
       return empty();
     }
 
-    if ((rawData as { visible?: unknown } | null)?.visible === false) return empty();
-    const data = normalizeNoteDoodleData(rawData, file);
+    const legacyData = rawData as { visible?: unknown } | null;
+    const drawingData = unwrapNoteDrawApiData(rawData);
+    if (legacyData?.visible === false || (drawingData as { visible?: unknown } | null)?.visible === false) return empty();
+    const data = normalizeNoteDoodleData(drawingData, file);
+    const markdownBlocks = normalizeNoteDrawMarkdownBlocks(drawingData, file);
     const hasLiveCanvas = Array.from(host.querySelectorAll<HTMLCanvasElement>(
       ".notedraw-canvas, .note-doodle-canvas"
     )).some((canvas) => {
@@ -3618,7 +3796,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     });
 
     const existingImageLayers = new Set(host.querySelectorAll(".notedraw-export-image-canvas-layer"));
-    if (api.injectExportSnapshot) {
+    if (api?.injectExportSnapshot) {
       try {
         await api.injectExportSnapshot(file, host);
       } catch (error) {
@@ -3628,8 +3806,15 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const injectedImageLayers = Array.from(host.querySelectorAll<HTMLElement>(
       ".notedraw-export-image-canvas-layer"
     )).filter((element) => !existingImageLayers.has(element));
-    const sourceElements = await prepareNoteDrawElementData(this.app, host.ownerDocument, rawData);
-    const elements = hasLiveCanvas ? [] : sourceElements;
+    const allSourceElements = await prepareNoteDrawElementData(this.app, host.ownerDocument, rawData);
+    // NoteDraw 3.6+ represents Markdown-flow items in both drawing metadata and the
+    // rendered Markdown DOM. Keep the DOM copy as the WYSIWYG source of truth.
+    const sourceElements = allSourceElements.filter(
+      (element) => !isRenderedMarkdownFlowElement(element, markdownBlocks)
+    );
+    const elements = hasLiveCanvas
+      ? []
+      : sourceElements;
 
     let canvas: HTMLCanvasElement | null = null;
     let changedPosition = false;
@@ -3696,6 +3881,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       data,
       elements,
       sourceElements,
+      markdownBlocks,
       widthPx: width,
       heightPx: height,
       contentFrame
@@ -4231,6 +4417,10 @@ class MobilePdfExportOptionsModal extends Modal {
   private draft: MobilePdfExporterSettings;
   private exporting = false;
   private outputBaseName: string;
+  private previewHostEl: HTMLElement | null = null;
+  private previewButtonEl: HTMLButtonElement | null = null;
+  private previewObjectUrl: string | null = null;
+  private previewAbortController: AbortController | null = null;
 
   constructor(
     app: App,
@@ -4245,10 +4435,15 @@ class MobilePdfExportOptionsModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
+    this.modalEl.addClass("mobile-pdf-exporter-options-modal-window");
     contentEl.addClass("mobile-pdf-exporter-options-modal");
     this.plugin.warmupExportRuntime();
 
     this.addActionToolbar(contentEl);
+    this.previewHostEl = appendElement(contentEl, "div", {
+      cls: "mobile-pdf-exporter-preview-host"
+    });
+    this.previewHostEl.hidden = !this.draft.previewEnabled;
 
     appendElement(contentEl, "h2", { text: this.plugin.t("optionsTitle") });
     appendElement(contentEl, "p", {
@@ -4394,6 +4589,8 @@ class MobilePdfExportOptionsModal extends Modal {
           });
       });
 
+    if (this.draft.previewEnabled) void this.refreshPdfPreview();
+
   }
 
   private addOutputLocationSetting(parent: HTMLElement): void {
@@ -4444,7 +4641,75 @@ class MobilePdfExportOptionsModal extends Modal {
   }
 
   onClose(): void {
+    this.previewAbortController?.abort();
+    this.previewAbortController = null;
+    if (this.previewObjectUrl) URL.revokeObjectURL(this.previewObjectUrl);
+    this.previewObjectUrl = null;
+    this.previewHostEl = null;
     this.contentEl.empty();
+  }
+
+  private async togglePreview(): Promise<void> {
+    this.draft.previewEnabled = !this.draft.previewEnabled;
+    if (this.previewButtonEl) {
+      this.previewButtonEl.toggleClass("is-active", this.draft.previewEnabled);
+      this.previewButtonEl.setAttribute("aria-pressed", String(this.draft.previewEnabled));
+    }
+    this.plugin.settings.previewEnabled = this.draft.previewEnabled;
+    await this.plugin.saveSettings();
+    if (!this.draft.previewEnabled) {
+      this.previewAbortController?.abort();
+      this.previewHostEl?.empty();
+      if (this.previewObjectUrl) URL.revokeObjectURL(this.previewObjectUrl);
+      this.previewObjectUrl = null;
+      if (this.previewHostEl) this.previewHostEl.hidden = true;
+      return;
+    }
+    if (this.previewHostEl) this.previewHostEl.hidden = false;
+    await this.refreshPdfPreview();
+  }
+
+  private async refreshPdfPreview(): Promise<void> {
+    const host = this.previewHostEl;
+    if (!host || !this.draft.previewEnabled) return;
+    this.previewAbortController?.abort();
+    const controller = new AbortController();
+    this.previewAbortController = controller;
+    if (this.previewObjectUrl) URL.revokeObjectURL(this.previewObjectUrl);
+    this.previewObjectUrl = null;
+    host.empty();
+    appendElement(host, "div", {
+      cls: "mobile-pdf-exporter-preview-status",
+      text: this.plugin.t("previewLoading")
+    });
+    try {
+      const blob = await this.plugin.renderPreviewPdfBlob(this.file, cloneSettings(this.draft), controller.signal);
+      if (controller.signal.aborted || this.previewHostEl !== host || !this.draft.previewEnabled) return;
+      const url = URL.createObjectURL(blob);
+      this.previewObjectUrl = url;
+      host.empty();
+      const frameWrap = appendElement(host, "div", {
+        cls: "mobile-pdf-exporter-preview-frame-wrap"
+      });
+      const frame = appendElement(frameWrap, "iframe", {
+        cls: "mobile-pdf-exporter-preview-frame"
+      });
+      frame.title = `${this.file.basename} PDF preview`;
+      frame.src = url;
+      frame.setAttribute("loading", "lazy");
+      frame.setAttribute("allow", "fullscreen");
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      host.empty();
+      appendElement(host, "div", {
+        cls: "mobile-pdf-exporter-preview-status mod-warning",
+        text: formatTranslation(this.plugin.getResolvedLanguage(), "previewFailed", {
+          error: error instanceof Error ? error.message : String(error)
+        })
+      });
+    } finally {
+      if (this.previewAbortController === controller) this.previewAbortController = null;
+    }
   }
 
   private async exportWithDraft(format: ExportFormat = "pdf"): Promise<void> {
@@ -4567,10 +4832,10 @@ class MobilePdfExportOptionsModal extends Modal {
           opt.value = String(d);
         }
         depthSelect.value = String(this.draft.zipEmbedDepth);
-        depthSelect.title = `ZIP 链接深度: ${this.draft.zipEmbedDepth} 级`;
+        depthSelect.title = `ZIP link depth: ${this.draft.zipEmbedDepth}`;
         depthSelect.addEventListener("change", () => {
           this.draft.zipEmbedDepth = Number(depthSelect.value);
-          depthSelect.title = `ZIP 链接深度: ${depthSelect.value} 级`;
+          depthSelect.title = `ZIP link depth: ${depthSelect.value}`;
         });
         continue;
       }
@@ -4588,6 +4853,27 @@ class MobilePdfExportOptionsModal extends Modal {
         });
       });
     }
+
+    const previewButton = appendElement(innerEl, "button", {
+      cls: "mobile-pdf-exporter-preview-button"
+    });
+    previewButton.type = "button";
+    previewButton.setAttribute("aria-pressed", String(this.draft.previewEnabled));
+    previewButton.title = this.plugin.t("previewDesc");
+    const previewIcon = appendElement(previewButton, "span", { cls: "mobile-pdf-exporter-format-icon" });
+    setIcon(previewIcon, "eye");
+    appendElement(previewButton, "span", {
+      cls: "mobile-pdf-exporter-format-label",
+      text: this.plugin.t("previewButton")
+    });
+    previewButton.toggleClass("is-active", this.draft.previewEnabled);
+    previewButton.addEventListener("click", () => {
+      previewButton.disabled = true;
+      void this.togglePreview().finally(() => {
+        previewButton.disabled = false;
+      });
+    });
+    this.previewButtonEl = previewButton;
   }
 }
 
@@ -5023,6 +5309,7 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale),
     currentPageWidthPx: clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx),
     currentPageHeightPx: clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx),
+    previewEnabled: typeof saved.previewEnabled === "boolean" ? saved.previewEnabled : DEFAULT_SETTINGS.previewEnabled,
     // Accept the legacy "zipLinkDepth" key so settings written by other builds carry over.
     zipEmbedDepth: clampNumber(
       saved.zipEmbedDepth ?? (saved as { zipLinkDepth?: number }).zipLinkDepth,
@@ -5053,7 +5340,8 @@ function cloneSettings(settings: MobilePdfExporterSettings): MobilePdfExporterSe
     imageRasterScale: settings.imageRasterScale,
     currentPageWidthPx: settings.currentPageWidthPx,
     currentPageHeightPx: settings.currentPageHeightPx,
-    zipEmbedDepth: settings.zipEmbedDepth
+    zipEmbedDepth: settings.zipEmbedDepth,
+    previewEnabled: settings.previewEnabled
   };
 }
 
@@ -8394,6 +8682,9 @@ function captureTextFragments(
       const parent = node.parentElement;
       if (!parent) return NodeFilter.FILTER_REJECT;
       if (!node.nodeValue?.trim()) return NodeFilter.FILTER_REJECT;
+      // SVG (including Excalidraw) is rasterized as one media fragment. Capturing
+      // its internal text nodes as well would draw every label twice on WebKit.
+      if (parent.closest("svg")) return NodeFilter.FILTER_REJECT;
       if (!isExportableElement(parent)) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     }
@@ -8466,6 +8757,69 @@ function captureImageFragments(pageEl: HTMLElement): ImageFragment[] {
     .filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
 }
 
+function unwrapNoteDrawApiData(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const candidate = raw as { drawing?: unknown };
+  return candidate.drawing && typeof candidate.drawing === "object" ? candidate.drawing : raw;
+}
+
+function normalizeNoteDrawMarkdownBlocks(raw: unknown, file: TFile): NoteDrawMarkdownBlock[] {
+  const candidate = raw && typeof raw === "object" ? raw as { markdownBlocks?: unknown } : null;
+  const blocks = Array.isArray(candidate?.markdownBlocks) ? candidate.markdownBlocks : [];
+  return blocks.flatMap((value, index) => {
+    if (!value || typeof value !== "object") return [];
+    const block = value as Record<string, unknown>;
+    const path = normalizePath(typeof block.path === "string" && block.path ? block.path : file.path);
+    const lineStart = Number.isFinite(Number(block.lineStart)) ? Math.max(0, Math.round(Number(block.lineStart))) : null;
+    const lineEnd = Number.isFinite(Number(block.lineEnd))
+      ? Math.max(lineStart ?? 0, Math.round(Number(block.lineEnd)))
+      : lineStart;
+    const textHint = normalizeLineText(typeof block.textHint === "string" ? block.textHint : "");
+    return [{
+      id: typeof block.id === "string" && block.id ? block.id : `md-${index}`,
+      path,
+      lineStart,
+      lineEnd,
+      textHint,
+      renderKind: typeof block.renderKind === "string" ? block.renderKind : "",
+      widthScale: clampNumber(block.widthScale, 0.2, 1, 1),
+      contentScale: clampNumber(block.contentScale, 0.5, 3, 1),
+      minHeight: clampNumber(block.minHeight, 0, 20000, 0),
+      floating: Boolean(block.floating),
+      floatBox: normalizeNoteDrawFloatBox(block.floatBox)
+    }];
+  });
+}
+
+function normalizeNoteDrawFloatBox(value: unknown): { x: number; y: number; width: number; height: number } | null {
+  if (!value || typeof value !== "object") return null;
+  const box = value as Record<string, unknown>;
+  const values = [box.x, box.y, box.width, box.height].map(Number);
+  if (!values.every(Number.isFinite)) return null;
+  return {
+    x: values[0],
+    y: values[1],
+    width: Math.max(1, values[2]),
+    height: Math.max(1, values[3])
+  };
+}
+
+function isRenderedMarkdownFlowElement(element: NoteDrawElementData, blocks: NoteDrawMarkdownBlock[]): boolean {
+  if (element.kind !== "text" || !element.markdownFlow) return false;
+  if (!blocks.length) return element.render === "markdown" || element.render === "note";
+  const elementPath = normalizePath(element.sourcePath);
+  return blocks.some((block) => {
+    if (block.path && elementPath && block.path !== elementPath) return false;
+    if (element.lineStart !== null && block.lineStart !== null) {
+      const end = block.lineEnd ?? block.lineStart;
+      if (element.lineStart < block.lineStart || element.lineStart > end) return false;
+    }
+    if (!block.textHint) return true;
+    const text = normalizeLineText(element.text);
+    return text === block.textHint || text.includes(block.textHint) || block.textHint.includes(text);
+  });
+}
+
 function getImageFragmentSourcePath(image: HTMLImageElement): string | null {
   const wrapper = image.closest(".internal-embed.image-embed, .image-embed, .media-embed");
   return wrapper?.getAttribute("src")?.trim() || null;
@@ -8476,7 +8830,8 @@ async function prepareNoteDrawElementData(
   ownerDocument: Document,
   data: unknown
 ): Promise<NoteDrawElementData[]> {
-  const candidate = data && typeof data === "object" ? data as { strokes?: unknown } : null;
+  const unwrapped = unwrapNoteDrawApiData(data);
+  const candidate = unwrapped && typeof unwrapped === "object" ? unwrapped as { strokes?: unknown } : null;
   const rawStrokes = Array.isArray(candidate?.strokes) ? candidate.strokes : [];
   const elements = rawStrokes
     .map(normalizeNoteDrawElement)
@@ -8576,6 +8931,19 @@ function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
       documentHeight: frameHeight
     }
     : null;
+  const textAnchor = stroke.textAnchor && typeof stroke.textAnchor === "object"
+    ? stroke.textAnchor as Record<string, unknown>
+    : null;
+  const render = typeof stroke.render === "string" ? stroke.render : "plain";
+  const sourcePath = typeof textAnchor?.path === "string"
+    ? normalizePath(textAnchor.path)
+    : typeof stroke.sourcePath === "string" ? normalizePath(stroke.sourcePath) : "";
+  const lineStart = Number.isFinite(Number(textAnchor?.lineStart))
+    ? Math.max(0, Math.round(Number(textAnchor?.lineStart)))
+    : null;
+  const lineEnd = Number.isFinite(Number(textAnchor?.lineEnd))
+    ? Math.max(lineStart ?? 0, Math.round(Number(textAnchor?.lineEnd)))
+    : lineStart;
 
   return {
     kind,
@@ -8588,7 +8956,7 @@ function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
     code: Boolean(stroke.code),
     boxed: Boolean(stroke.boxed),
     buttonStyle: typeof stroke.buttonStyle === "string" ? stroke.buttonStyle : "",
-    render: typeof stroke.render === "string" ? stroke.render : "plain",
+    render,
     assetPath: typeof stroke.assetPath === "string" ? stroke.assetPath : "",
     assetName: typeof stroke.assetName === "string" ? stroke.assetName : "",
     assetMime: typeof stroke.assetMime === "string" ? stroke.assetMime : "",
@@ -8599,6 +8967,10 @@ function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
     points,
     layoutBox,
     layoutFrame,
+    markdownFlow: Boolean(stroke.belowMarkdown || stroke.noteFlow || render === "markdown" || render === "note"),
+    sourcePath,
+    lineStart,
+    lineEnd,
     media: null
   };
 }
@@ -9206,6 +9578,8 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
     const fontSizePx = parseFloat(style.fontSize) || 16;
     const color = parseCssColor(style.color) ?? rgb(0.12, 0.12, 0.12);
     const textLeft = firstRect.left - pageRect.left;
+    const textRight = firstRect.right - pageRect.left;
+    const isRtl = style.direction === "rtl";
     const centerY = firstRect.top - pageRect.top + firstRect.height * 0.52;
     const parent = item.parentElement;
     const isOrdered = parent?.tagName.toLowerCase() === "ol";
@@ -9213,10 +9587,12 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
     if (isOrdered) {
       const text = getOrderedListMarkerText(item);
       const markerWidth = Math.max(fontSizePx * 1.2, text.length * fontSizePx * 0.65);
-      const right = Math.max(0, textLeft - fontSizePx * 0.35);
+      const right = isRtl
+        ? Math.min(pageRect.width, textRight + fontSizePx * 0.35 + markerWidth)
+        : Math.max(0, textLeft - fontSizePx * 0.35);
       decorations.push({
         kind: "marker",
-        left: Math.max(0, right - markerWidth),
+        left: isRtl ? Math.max(0, right - markerWidth) : Math.max(0, right - markerWidth),
         top: centerY - fontSizePx * 0.72,
         right,
         bottom: centerY + fontSizePx * 0.32,
@@ -9229,7 +9605,9 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
       const markerText = getUnorderedListMarkerText(item);
       if (markerText) {
         const markerWidth = Math.max(fontSizePx * 0.9, markerText.length * fontSizePx * 0.65);
-        const right = Math.max(0, textLeft - fontSizePx * 0.35);
+        const right = isRtl
+          ? Math.min(pageRect.width, textRight + fontSizePx * 0.35 + markerWidth)
+          : Math.max(0, textLeft - fontSizePx * 0.35);
         decorations.push({
           kind: "marker",
           left: Math.max(0, right - markerWidth),
@@ -9245,7 +9623,9 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
       }
 
       const size = Math.max(3, fontSizePx * 0.36);
-      const centerX = Math.max(size, textLeft - fontSizePx * 0.72);
+      const centerX = isRtl
+        ? Math.min(pageRect.width - size, textRight + fontSizePx * 0.72)
+        : Math.max(size, textLeft - fontSizePx * 0.72);
       decorations.push({
         kind: "bullet",
         left: centerX - size / 2,
@@ -10174,12 +10554,20 @@ function drawTextLayer(
 
     const localTop = fragment.top - pageTopPx;
     const fontSize = Math.max(3.5, fragment.fontSizePx * pxToPt);
-    const x = clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
+    const visualRight = clampNumber(fragment.right * pxToPt, 4, pageWidthPt, pageWidthPt);
     const baselineY = pageHeightPt - (contentTopInsetPx + localTop + fragment.fontSizePx * 0.86) * pxToPt;
     const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt);
-    const maxWidth = Math.max(8, Math.min(pageWidthPt - x - 2, measuredWidth + 2));
     const font = selectPdfFont(fonts, fragment.text);
     const hiddenInVisualLayer = options.hiddenVisualTextFragments?.has(fragment) ?? false;
+    const naturalWidth = font.widthOfTextAtSize(
+      getEncodablePdfText(font, stripProblematicPdfChars(compactSeparatorSpacing(fragment.text))),
+      fontSize
+    );
+    const isRtl = fragment.direction === "rtl";
+    const x = isRtl
+      ? clampNumber(visualRight - Math.min(measuredWidth, Math.max(1, naturalWidth)), 0, pageWidthPt - 4, 0)
+      : clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
+    const maxWidth = Math.max(8, Math.min(isRtl ? visualRight - x : pageWidthPt - x - 2, measuredWidth + 2));
 
     const drawn = drawSafeText(page, fragment.text, {
       x,
@@ -10195,8 +10583,8 @@ function drawTextLayer(
     if (drawUnderlines && !hiddenInVisualLayer && fragment.underline && inkWidth > 1) {
       const underlineY = baselineY - Math.max(0.55, drawn.size * 0.12);
       page.drawLine({
-        start: { x, y: underlineY },
-        end: { x: x + inkWidth, y: underlineY },
+        start: { x: isRtl ? visualRight - inkWidth : x, y: underlineY },
+        end: { x: isRtl ? visualRight : x + inkWidth, y: underlineY },
         thickness: Math.max(0.35, drawn.size * 0.055),
         color: outputColor(fragment.color, options.colorMode)
       });
@@ -11491,9 +11879,10 @@ function isNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
   const canvas = fragment.element;
   return canvas.matches(
     ".mobile-pdf-exporter-note-doodle-canvas, .notedraw-canvas, .notedraw-static-canvas, .notedraw-underlay-canvas, .note-doodle-canvas, .notedraw-export-image-canvas"
-  ) || Boolean(canvas.closest(
-    ".notedraw-shell, .notedraw-reading-stage, .note-doodle-shell, .notedraw-export-image-canvas-layer"
-  ));
+  ) || Boolean(
+    canvas.closest(".notedraw-shell, .note-doodle-shell, .notedraw-export-image-canvas-layer") ||
+    canvas.closest(".notedraw-reading-stage")
+  );
 }
 
 function drawCanvasDecorationLayer(

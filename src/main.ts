@@ -9206,6 +9206,8 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
     const fontSizePx = parseFloat(style.fontSize) || 16;
     const color = parseCssColor(style.color) ?? rgb(0.12, 0.12, 0.12);
     const textLeft = firstRect.left - pageRect.left;
+    const textRight = firstRect.right - pageRect.left;
+    const isRtl = style.direction === "rtl";
     const centerY = firstRect.top - pageRect.top + firstRect.height * 0.52;
     const parent = item.parentElement;
     const isOrdered = parent?.tagName.toLowerCase() === "ol";
@@ -9213,10 +9215,12 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
     if (isOrdered) {
       const text = getOrderedListMarkerText(item);
       const markerWidth = Math.max(fontSizePx * 1.2, text.length * fontSizePx * 0.65);
-      const right = Math.max(0, textLeft - fontSizePx * 0.35);
+      const right = isRtl
+        ? textRight + fontSizePx * 0.35 + markerWidth
+        : Math.max(0, textLeft - fontSizePx * 0.35);
       decorations.push({
         kind: "marker",
-        left: Math.max(0, right - markerWidth),
+        left: isRtl ? textRight + fontSizePx * 0.35 : Math.max(0, right - markerWidth),
         top: centerY - fontSizePx * 0.72,
         right,
         bottom: centerY + fontSizePx * 0.32,
@@ -9229,10 +9233,12 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
       const markerText = getUnorderedListMarkerText(item);
       if (markerText) {
         const markerWidth = Math.max(fontSizePx * 0.9, markerText.length * fontSizePx * 0.65);
-        const right = Math.max(0, textLeft - fontSizePx * 0.35);
+        const right = isRtl
+          ? textRight + fontSizePx * 0.35 + markerWidth
+          : Math.max(0, textLeft - fontSizePx * 0.35);
         decorations.push({
           kind: "marker",
-          left: Math.max(0, right - markerWidth),
+          left: isRtl ? textRight + fontSizePx * 0.35 : Math.max(0, right - markerWidth),
           top: centerY - fontSizePx * 0.72,
           right,
           bottom: centerY + fontSizePx * 0.32,
@@ -9245,7 +9251,9 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
       }
 
       const size = Math.max(3, fontSizePx * 0.36);
-      const centerX = Math.max(size, textLeft - fontSizePx * 0.72);
+      const centerX = isRtl
+        ? textRight + fontSizePx * 0.72
+        : Math.max(size, textLeft - fontSizePx * 0.72);
       decorations.push({
         kind: "bullet",
         left: centerX - size / 2,

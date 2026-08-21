@@ -67,9 +67,13 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /countMissingLivePreviewSections\(previewRenderer, previewSectionCaptures\)/);
   assert.match(source, /Live reading view did not render/);
   assert.match(source, /await primeLivePreviewLayout\(rootEl, scrollEl, previewRenderer, signal\)/);
-  assert.match(source, /section\.render\?\.\(\)/);
-  assert.match(source, /renderer\.sizerEl\.append\(\.\.\.sectionElements\)/);
-  assert.match(source, /renderer\.measureSection\?\.\(section\)/);
+  assert.doesNotMatch(source, /section\.render\?\.\(\)/);
+  assert.match(source, /renderer\.updateVirtualDisplay\?\.\(scrollEl\.scrollTop\)/);
+  assert.match(source, /function snapshotCanvasElement\(canvas: HTMLCanvasElement\)/);
+  assert.match(source, /await waitForRestoredNoteDrawSurface\(rootEl, signal\)/);
+  assert.match(source, /captured\.canvasFragments = snapshotRestoredNoteDrawCanvases/);
+  assert.doesNotMatch(source, /renderer\.sizerEl\.append\(\.\.\.sectionElements\)/);
+  assert.doesNotMatch(source, /renderer\.measureSection\?\.\(section\)/);
   assert.match(source, /for \(let pass = 0; pass < 3; pass \+= 1\)/);
   assert.match(source, /function buildLivePreviewGapScrollPositions/);
   assert.match(source, /const gapPositions = buildLivePreviewGapScrollPositions/);
@@ -94,6 +98,8 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /else if \(rootEl\.querySelector\("img"\)\) \{\s*await waitForImages\(rootEl, Math\.min\(IMAGE_WAIT_TIMEOUT_MS, 1100\)\);\s*await settleLiveSurfaceAtScrollPosition/);
   assert.match(source, /if \(previewRenderer\) \{\s*captureConnectedLivePreviewSections\(/);
   assert.match(source, /function waitForImagesInElements/);
+  assert.match(source, /function isEmbeddedPreviewPending/);
+  assert.match(source, /const effectiveTimeout = Math\.min\(timeoutMs, 700\)/);
   assert.match(source, /const imageSignature = Array\.from\(rootEl\.querySelectorAll\("img"\)\)/);
   assert.match(source, /function waitForLiveSurfaceSettled/);
   assert.match(source, /interface LiveSurfaceCaptureWindow/);
@@ -160,7 +166,11 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /wrap:\s*false/);
   assert.match(source, /function buildWordFlowTextParagraphsXml\([\s\S]*?model: PreviewPdfModel,[\s\S]*?pageIndex: number,[\s\S]*?hyperlinkIds: ReadonlyMap<string, string>/);
   assert.match(source, /const paragraphs = `\$\{floatingParagraph\}\$\{buildWordFlowTextParagraphsXml\(model, pageIndex, hyperlinkIds\)\}`/);
-  assert.match(source, /const needsExplicitNoteDraw = format === "docx" \|\| format === "pptx" \|\| format === "png"/);
+  assert.match(source, /if \(format === "png"\) \{\s*const visualModel = preferNativeNoteDrawCanvas\(model\)\.model/);
+  assert.match(source, /const needsExplicitNoteDraw = format === "docx" \|\| format === "pptx"/);
+  assert.match(source, /function preferNativeNoteDrawCanvas\(\s*model: PreviewPdfModel\s*\): \{ model: PreviewPdfModel; usesNativeCanvas: boolean \}/);
+  assert.match(source, /const usesNativeCanvas = model\.canvasFragments\.some\(isNativeNoteDrawCanvasFragment\)/);
+  assert.match(source, /noteDrawInkStrokes: \[\],\s*noteDrawElements: \[\]/);
   assert.match(source, /return buildEditablePptx\(file, pageModel, \{/);
   assert.match(source, /return buildEditableDocx\(file, pageModel, \{/);
   assert.doesNotMatch(source, /\(format === "docx" \|\| format === "pptx"\)[\s\S]{0,160}?renderMarkdownPreview/);
@@ -309,6 +319,16 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /AP: \{ N: appearanceRef \}/);
   assert.match(source, /P: page\.ref/);
   assert.match(source, /Subtype: "Form"/);
+});
+
+test("Cancip Office cards keep stable layout and expose a usable file fallback", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /\.obcc-inline-workbench-embed\[data-cancip-inline-path\]/);
+  assert.match(source, /wrapper\.getAttribute\("data-cancip-inline-path"\)/);
+  assert.match(source, /Open original/);
+  assert.doesNotMatch(source, /prepareOfficeEmbedExportLayout/);
+  assert.doesNotMatch(source, /local-direct-test-export/);
 });
 
 test("multilingual text and videos keep visual and selectable export fallbacks", async () => {

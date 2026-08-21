@@ -282,6 +282,7 @@ interface LivePreviewRenderer {
 interface CapturedLivePreviewSection {
   fragments: CapturedSurfaceFragments;
   documentLeft: number;
+  documentTop: number;
   measuredHeight: number;
 }
 
@@ -519,7 +520,44 @@ interface NoteDoodlePoint {
     basis: "note-content-v1";
     x: number;
     y: number;
+    line: number | null;
   } | null;
+}
+
+interface NoteDrawSourceFrame {
+  surfaceWidth: number;
+  contentLeft: number;
+  contentWidth: number;
+  documentHeight: number;
+}
+
+interface NoteDrawFlowPlacement {
+  blockKey: string;
+  path: string;
+  blockStart: number | null;
+  blockEnd: number | null;
+  side: string;
+  rowOffset: number;
+  boxLeftRatio: number;
+  boxWidthRatio: number;
+  boxHeightRatio: number;
+  gap: number;
+}
+
+interface NoteDrawDomBlockRect {
+  path: string;
+  lineStart: number;
+  lineEnd: number;
+  text: string;
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+interface NoteDrawDomLayout {
+  blocks: NoteDrawDomBlockRect[];
+  flowSpacers: Array<{ key: string; side: string; top: number; left: number; right: number }>;
 }
 
 interface NoteDoodleStroke {
@@ -529,6 +567,9 @@ interface NoteDoodleStroke {
   opacity: number;
   count: number;
   points: NoteDoodlePoint[];
+  layoutBox: { x: number; y: number; width: number; height: number } | null;
+  layoutFrame: NoteDrawSourceFrame | null;
+  flow: NoteDrawFlowPlacement | null;
 }
 
 interface NoteDoodleData {
@@ -556,6 +597,7 @@ interface PreparedNoteDrawExportOverlay {
   widthPx: number;
   heightPx: number;
   contentFrame: NoteDrawContentFrame;
+  domLayout: NoteDrawDomLayout;
 }
 
 interface NoteDrawMarkdownBlock {
@@ -580,6 +622,7 @@ interface NoteDrawContentFrame {
 type NoteDrawElementKind = "text" | "image" | "video" | "file" | "connector";
 
 interface NoteDrawElementData {
+  elementId: string;
   kind: NoteDrawElementKind;
   text: string;
   color: string;
@@ -606,6 +649,10 @@ interface NoteDrawElementData {
     contentWidth: number;
     documentHeight: number;
   } | null;
+  layoutLineStart: number | null;
+  layoutLineEnd: number | null;
+  flow: NoteDrawFlowPlacement | null;
+  connector: { fromId: string; toId: string; style: string; arrow: boolean } | null;
   markdownFlow: boolean;
   sourcePath: string;
   lineStart: number | null;
@@ -3299,11 +3346,34 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await waitForPreviewDomStable(rootEl, 900);
       throwIfExportCancelled(signal);
     }
+    await waitForEmbeddedPreviews(rootEl, 1800);
     const rootRect = rootEl.getBoundingClientRect();
     const liveWidthPx = Math.max(1, scrollEl.clientWidth || rootRect.width);
     const originalScrollTop = scrollEl.scrollTop;
     const originalScrollLeft = scrollEl.scrollLeft;
+    const previewRenderer = surface.mode === "preview"
+      ? getLivePreviewRenderer(this.app, rootEl)
+      : null;
+    // NoteDraw flow spacers are virtualized with the Markdown preview. Measure
+    // the source layout at the document origin so line-linked insertions are
+    // available even when the user left the note scrolled near the bottom.
+    if (surface.mode === "preview" && originalScrollTop > 0.5) {
+      scrollEl.scrollTop = 0;
+      await nextAnimationFrame();
+      await waitForPreviewDomStable(rootEl, 320);
+    }
+    // Expand and measure every reading-view section before asking NoteDraw for
+    // line-linked geometry. Otherwise the virtualized view may not contain the
+    // early blocks (for example lines 29-30), forcing a stale saved-coordinate
+    // fallback and moving inserted drawings over later embeds.
+    if (previewRenderer) {
+      await primeLivePreviewLayout(rootEl, scrollEl, previewRenderer, signal);
+      await nextAnimationFrame();
+      await waitForPreviewDomStable(rootEl, 320);
+    }
     const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, rootEl);
+    scrollEl.scrollTop = originalScrollTop;
+    scrollEl.scrollLeft = originalScrollLeft;
     const suppressedInlineTitles = this.settings.includeTitle
       ? []
       : Array.from(rootEl.querySelectorAll<HTMLElement>(".inline-title"))
@@ -3313,16 +3383,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const seen = createSurfaceCaptureSeenState();
     const liveCaptureCache = createLiveSurfaceCaptureCache();
     const linkContext = createPdfLinkContext(this.app, file);
-    const previewRenderer = surface.mode === "preview"
-      ? getLivePreviewRenderer(this.app, rootEl)
-      : null;
     const previewSectionCaptures = new Map<number, CapturedLivePreviewSection>();
     let capturedPreviewOverlays = false;
     let contentHeightPx = Math.max(1, scrollEl.scrollHeight, rootEl.scrollHeight, rootRect.height);
 
     try {
       if (previewRenderer) {
-        await primeLivePreviewLayout(rootEl, scrollEl, previewRenderer, signal);
         contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
         captureConnectedLivePreviewSections(
           rootEl,
@@ -3371,6 +3437,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
         } else if (rootEl.querySelector("img")) {
           await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 1100));
           await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal);
+        }
+        if (await waitForEmbeddedPreviews(rootEl, 420)) {
+          await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal, previewRenderer);
         }
         throwIfExportCancelled(signal);
 
@@ -3466,6 +3535,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
             if (await waitForImagesInElements(connectedSections, 900)) {
               await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
             }
+            if (await waitForEmbeddedPreviews(rootEl, 420)) {
+              await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
+            }
             captureConnectedLivePreviewSections(
               rootEl,
               scrollEl,
@@ -3490,6 +3562,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await nextAnimationFrame();
     }
 
+    // The virtual capture pass makes NoteDraw resize/redraw its reading canvas.
+    // Freeze the final restored surface, not an intermediate scroll frame.
+    await waitForRestoredNoteDrawSurface(rootEl, signal);
+    captured.canvasFragments = snapshotRestoredNoteDrawCanvases(
+      captured.canvasFragments,
+      rootEl,
+      scrollEl
+    );
     throwIfExportCancelled(signal);
     captured.textFragments = dedupeOverlappingLiveTextFragments(captured.textFragments);
 
@@ -3530,6 +3610,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
       footerText: this.settings.footerText,
       exportDate: formatExportDate(new Date())
     };
+    // Keep the semantic projection in addition to the live canvas. The live
+    // reading view can virtualize or temporarily omit its canvas during a
+    // capture pass; persisted NoteDraw data is the fallback that guarantees
+    // inserted ink and labels remain present in the exported document.
     attachPreparedNoteDrawToModel(model, preparedNoteDraw, {
       offsetX: horizontalInsetPx,
       offsetY: 0,
@@ -3749,7 +3833,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const rect = host.getBoundingClientRect();
     const width = Math.max(1, Math.ceil(host.scrollWidth || rect.width || 1));
     const height = Math.max(1, Math.ceil(host.scrollHeight || rect.height || 1));
-    const contentFrame = measureNoteDrawTargetContentFrame(host, width);
+  const contentFrame = measureNoteDrawTargetContentFrame(host, width);
+    const domLayout = measureNoteDrawDomLayout(host, file.path);
     const empty = (): PreparedNoteDrawExportOverlay => ({
       cleanup: () => undefined,
       data: null,
@@ -3758,7 +3843,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       markdownBlocks: [],
       widthPx: width,
       heightPx: height,
-      contentFrame
+      contentFrame,
+      domLayout
     });
     const plugins = (this.app as unknown as {
       plugins?: { plugins?: Record<string, { api?: NoteDrawApiRuntime }> };
@@ -3812,9 +3898,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const sourceElements = allSourceElements.filter(
       (element) => !isRenderedMarkdownFlowElement(element, markdownBlocks)
     );
-    const elements = hasLiveCanvas
-      ? []
-      : sourceElements;
+    // Keep the normalized elements even when the live canvas exists. PDF/PNG
+    // rendering can use the live canvas as the WYSIWYG raster source, while
+    // Office/HTML exports still need the semantic box/connector geometry.
+    const elements = sourceElements;
 
     let canvas: HTMLCanvasElement | null = null;
     let changedPosition = false;
@@ -3853,7 +3940,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
           contentFrame,
           0,
           0,
-          1
+          1,
+          domLayout
         );
         const htmlFallbackElements = injectedImageLayers.length > 0
           ? projectedElements.filter((element) => element.kind !== "image")
@@ -3884,7 +3972,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       markdownBlocks,
       widthPx: width,
       heightPx: height,
-      contentFrame
+      contentFrame,
+      domLayout
     };
   }
 
@@ -3918,13 +4007,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
     );
     const rasterTextFragments = collectVisualRasterTextFragments(model.textFragments);
     const hiddenVisualTextFragments = new Set(rasterTextFragments);
-    const hasNoteDrawCanvas = model.canvasFragments.some(isNoteDrawCanvasFragment);
+    const noteDrawVisual = preferNativeNoteDrawCanvas(model);
     const visualModel = {
-      ...model,
-      textFragments: rasterTextFragments,
-      canvasFragments: hasNoteDrawCanvas
-        ? model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment))
-        : model.canvasFragments
+      ...noteDrawVisual.model,
+      textFragments: rasterTextFragments
     };
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
@@ -4009,9 +4095,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const pdfDoc = await PDFDocumentRuntime.create();
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
-    const visualModel = model.canvasFragments.some(isNoteDrawCanvasFragment)
-      ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
-      : model;
+    const noteDrawVisual = preferNativeNoteDrawCanvas(model);
+    const visualModel = noteDrawVisual.model;
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
@@ -4067,7 +4152,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
         ? this.renderPreviewToImagePdf(file, model, signal)
         : this.renderPreviewToSelectablePdf(file, model, signal);
     }
-    const needsExplicitNoteDraw = format === "docx" || format === "pptx" || format === "png";
+    if (format === "png") {
+      const visualModel = preferNativeNoteDrawCanvas(model).model;
+      const pages = await this.renderModelPagesToPng(visualModel, signal, true, true);
+      return combinePngPages(pages);
+    }
+    const needsExplicitNoteDraw = format === "docx" || format === "pptx";
     const needsSourceNoteDrawElements = format === "docx" && Boolean(model.noteDrawSourceElements?.length);
     const pageModel = needsExplicitNoteDraw && (hasExplicitNoteDrawContent(model) || needsSourceNoteDrawElements)
       ? { ...model, canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment)) }
@@ -4091,13 +4181,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (format === "html") {
       return buildSemanticHtml(file, model);
     }
-    // NOTE: must render from pageModel, not model. pageModel has the NoteDraw
-    // canvas fragments stripped when explicit ink data is available; rendering
-    // from the raw model draws the NoteDraw canvases in the bitmap layer AND
-    // the same strokes again via drawCanvasNoteDrawInkLayer, which is exactly
-    // the "one solid + one faint offset copy" ghosting reported for PNG export.
-    const pages = await this.renderModelPagesToPng(pageModel, signal, true, true);
-    if (format === "png") return combinePngPages(pages);
     throw new Error("Unsupported export format.");
   }
 
@@ -5622,21 +5705,77 @@ function projectNoteDrawInkStrokes(
   contentFrame: NoteDrawContentFrame,
   offsetX: number,
   offsetY: number,
-  scale: number
+  scale: number,
+  domLayout?: NoteDrawDomLayout
 ): PdfInkStroke[] {
   if (!data?.strokes.length) return [];
+  const targetContentLeft = clampNumber(contentFrame.left, -widthPx, widthPx * 2, 0);
+  const targetContentWidth = clampNumber(contentFrame.width, 1, widthPx * 2, widthPx);
   return data.strokes
-    .map((stroke) => ({
-      brush: stroke.brush,
-      color: stroke.color,
-      widthPx: Math.max(0.5, stroke.width * scale),
-      opacity: stroke.opacity,
-      count: stroke.count,
-      points: stroke.points.map((point) => ({
-        x: offsetX + noteDoodlePointToCanvas(point, widthPx, heightPx, contentFrame).x * scale,
-        y: offsetY + point.y * heightPx * scale
-      }))
-    }))
+    .map((stroke) => {
+      const sourceFrame = stroke.layoutFrame;
+      const frameScaleX = sourceFrame ? targetContentWidth / sourceFrame.contentWidth : 1;
+      const frameScaleY = sourceFrame ? heightPx / sourceFrame.documentHeight : 1;
+      const sourceBox = stroke.layoutBox;
+      const flow = stroke.flow;
+      const flowSpacer = flow && domLayout && flow.blockKey
+        ? domLayout.flowSpacers.find((spacer) => spacer.key === flow.blockKey)
+        : null;
+      const flowBlock = flow && domLayout
+        ? domLayout.blocks
+          .filter((block) => (
+            (!flow.path || block.path === flow.path) &&
+            (flow.blockStart === null || block.lineEnd >= flow.blockStart) &&
+            (flow.blockEnd === null || block.lineStart <= flow.blockEnd)
+          ))
+          .sort((left, right) => left.top - right.top)[0]
+        : null;
+      const sourceLeft = sourceBox && sourceFrame
+        ? targetContentLeft + (sourceBox.x - sourceFrame.contentLeft) * frameScaleX
+        : sourceBox?.x ?? 0;
+      const sourceTop = sourceBox && sourceFrame ? sourceBox.y * frameScaleY : sourceBox?.y ?? 0;
+      const sourceWidth = sourceBox && sourceFrame ? sourceBox.width * frameScaleX : sourceBox?.width ?? 0;
+      const sourceHeight = sourceBox && sourceFrame ? sourceBox.height * frameScaleY : sourceBox?.height ?? 0;
+      const flowWidth = flow ? Math.max(1, flow.boxWidthRatio * targetContentWidth) : 0;
+      const flowHeight = flow ? Math.max(1, flow.boxHeightRatio * targetContentWidth) : 0;
+      // The block geometry is the current WYSIWYG position. The spacer is a
+      // virtual-layout hint and can retain a stale absolute position after a
+      // note changes, so use it only when the live block is unavailable.
+      const flowAnchorTop = flowBlock?.bottom ?? flowSpacer?.top ?? null;
+      const flowAnchorBottom = flowBlock?.top ?? flowSpacer?.top ?? null;
+      const flowTop = flow && flowAnchorTop !== null
+        ? flow.side === "before"
+          ? (flowAnchorBottom ?? flowAnchorTop) - flow.gap - flow.rowOffset - flowHeight
+          : flowAnchorTop + flow.gap + flow.rowOffset
+        : null;
+      const mapPoint = (point: NoteDoodlePoint): { x: number; y: number } => {
+        const sourceX = point.anchor?.basis === "note-content-v1" && sourceFrame
+          ? targetContentLeft + (point.anchor.x * sourceFrame.surfaceWidth - sourceFrame.contentLeft) * frameScaleX
+          : noteDoodlePointToCanvas(point, widthPx, heightPx, contentFrame).x;
+        const lineY = point.anchor?.line !== null && point.anchor?.line !== undefined
+          ? mapNoteDrawLineToDomY(domLayout ?? { blocks: [], flowSpacers: [] }, point.anchor.line)
+          : null;
+        const sourceY = lineY ?? point.y * heightPx;
+        if (flow && flowTop !== null && sourceBox && sourceWidth > 0 && sourceHeight > 0 && flowWidth > 0 && flowHeight > 0) {
+          return {
+            x: targetContentLeft + flow.boxLeftRatio * targetContentWidth + (sourceX - sourceLeft) * (flowWidth / sourceWidth),
+            y: flowTop + (sourceY - sourceTop) * (flowHeight / sourceHeight)
+          };
+        }
+        return { x: sourceX, y: sourceY };
+      };
+      return {
+        brush: stroke.brush,
+        color: stroke.color,
+        widthPx: Math.max(0.5, stroke.width * scale),
+        opacity: stroke.opacity,
+        count: stroke.count,
+        points: stroke.points.map((point) => {
+          const mapped = mapPoint(point);
+          return { x: offsetX + mapped.x * scale, y: offsetY + mapped.y * scale };
+        })
+      };
+    })
     .filter((stroke) => stroke.points.length > 0);
 }
 
@@ -5650,6 +5789,8 @@ function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
     opacity?: unknown;
     count?: unknown;
     points?: unknown;
+    layout?: unknown;
+    noteFlow?: unknown;
   } : null;
   if (candidate?.kind === "text" || candidate?.kind === "embed" || candidate?.connector) return null;
   const points = Array.isArray(candidate?.points) ? candidate.points : [];
@@ -5665,7 +5806,14 @@ function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
     width: clampNumber(Number(candidate?.width), 0.5, 48, 3),
     opacity: clampNumber(Number(candidate?.opacity ?? NOTE_DOODLE_DEFAULT_OPACITY), 0.08, 1, NOTE_DOODLE_DEFAULT_OPACITY),
     count: Math.round(clampNumber(Number(candidate?.count ?? 1), 1, NOTE_DOODLE_MAX_PEN_COUNT, 1)),
-    points: normalizedPoints
+    points: normalizedPoints,
+    layoutBox: normalizeNoteDrawLayoutBox(candidate?.layout),
+    layoutFrame: normalizeNoteDrawSourceFrame(
+      candidate?.layout && typeof candidate.layout === "object"
+        ? (candidate.layout as Record<string, unknown>).sourceFrame
+        : null
+    ),
+    flow: normalizeNoteDrawFlowPlacement(candidate?.noteFlow)
   };
 }
 
@@ -5677,16 +5825,18 @@ function normalizeNoteDoodlePoint(point: unknown): NoteDoodlePoint | null {
   const y = Number(candidate?.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   const rawAnchor = candidate?.anchor && typeof candidate.anchor === "object"
-    ? candidate.anchor as { basis?: unknown; x?: unknown; y?: unknown }
+    ? candidate.anchor as { basis?: unknown; x?: unknown; y?: unknown; line?: unknown }
     : null;
   const anchorX = Number(rawAnchor?.x);
   const anchorY = Number(rawAnchor?.y);
+  const hasAnchorLine = rawAnchor?.line !== null && rawAnchor?.line !== undefined && Number.isFinite(Number(rawAnchor.line));
   const anchor = rawAnchor?.basis === "note-content-v1" && Number.isFinite(anchorX) && Number.isFinite(anchorY)
     ? {
-      basis: "note-content-v1" as const,
-      x: clampNumber(anchorX, -1, 2, 0),
-      y: clampNumber(anchorY, 0, 1, y)
-    }
+        basis: "note-content-v1" as const,
+        x: clampNumber(anchorX, -1, 2, 0),
+        y: clampNumber(anchorY, 0, 1, y),
+        line: hasAnchorLine ? Number(rawAnchor.line) : null
+      }
     : null;
   return {
     x: clampNumber(x, 0, 1, 0),
@@ -7886,6 +8036,7 @@ function captureConnectedLivePreviewSections(
     captures.set(index, {
       fragments,
       documentLeft: rect.left - rootRect.left + scrollEl.scrollLeft,
+      documentTop: rect.top - rootRect.top + scrollEl.scrollTop,
       measuredHeight: Math.max(0, rect.height)
     });
   }
@@ -7955,13 +8106,21 @@ function appendLivePreviewSectionCaptures(
     const section = renderer.sections[index];
     const capture = captures.get(index);
     if (capture) {
+      const capturedTop = Number.isFinite(capture.documentTop)
+        ? Math.max(0, capture.documentTop)
+        : sectionTop;
       appendSurfaceCapture(
         target,
         capture.fragments,
-        sectionTop,
+        capturedTop,
         capture.documentLeft,
         seen
       );
+      sectionTop = Math.max(
+        sectionTop,
+        capturedTop + Math.max(capture.measuredHeight, getLivePreviewSectionLayoutHeight(section, capture))
+      );
+      continue;
     }
     sectionTop += getLivePreviewSectionLayoutHeight(section, capture);
   }
@@ -8122,11 +8281,15 @@ function createLiveSurfaceCaptureCache(): LiveSurfaceCaptureCache {
 function captureSurfaceFragments(
   rootEl: HTMLElement,
   linkContext: PdfLinkContext,
-  liveWindow?: LiveSurfaceCaptureWindow
+  liveWindow?: LiveSurfaceCaptureWindow,
+  nestedDepth = 0
 ): CapturedSurfaceFragments {
   return withExportableElementCache(() => {
     const boxFragments = captureBoxFragments(rootEl);
-    const textFragments = captureTextFragments(rootEl, linkContext, liveWindow);
+    const textFragments = [
+      ...captureTextFragments(rootEl, linkContext, liveWindow),
+      ...captureEmbeddedOfficeCardTextFragments(rootEl, linkContext, liveWindow)
+    ];
     const imageFragments = captureImageFragments(rootEl);
     const videoFragments = captureVideoFragments(rootEl);
     const canvasFragments = captureCanvasFragments(rootEl, liveWindow?.cache);
@@ -8146,7 +8309,7 @@ function captureSurfaceFragments(
       svgFragments,
       decorationFragments
     );
-    const capture = {
+    const capture: CapturedSurfaceFragments = {
       boxFragments,
       textFragments,
       imageFragments,
@@ -8157,8 +8320,50 @@ function captureSurfaceFragments(
       decorationFragments,
       keepBlocks
     };
+    if (nestedDepth < 2) {
+      const nested = captureEmbeddedFrameFragments(rootEl, linkContext, nestedDepth + 1);
+      if (
+        nested.boxFragments.length ||
+        nested.textFragments.length ||
+        nested.imageFragments.length ||
+        nested.videoFragments.length ||
+        nested.canvasFragments.length ||
+        nested.svgFragments.length
+      ) {
+        const nestedSeen = createSurfaceCaptureSeenState();
+        appendSurfaceCapture(capture, nested, 0, 0, nestedSeen);
+      }
+    }
     return liveWindow ? filterSurfaceCaptureToBand(capture, liveWindow) : capture;
   });
+}
+
+function captureEmbeddedFrameFragments(
+  pageEl: HTMLElement,
+  linkContext: PdfLinkContext,
+  nestedDepth: number
+): CapturedSurfaceFragments {
+  const captured = createEmptySurfaceCapture();
+  const seen = createSurfaceCaptureSeenState();
+  const pageRect = pageEl.getBoundingClientRect();
+  for (const frame of Array.from(pageEl.querySelectorAll<HTMLElement>("iframe, object"))) {
+    const contentDocument = frame instanceof HTMLIFrameElement
+      ? frame.contentDocument
+      : (frame as HTMLObjectElement).contentDocument;
+    const body = contentDocument?.body;
+    if (!body) continue;
+    const frameRect = frame.getBoundingClientRect();
+    if (frameRect.width <= 0.5 || frameRect.height <= 0.5) continue;
+    const nested = captureSurfaceFragments(body, linkContext, undefined, nestedDepth);
+    appendSurfaceCapture(
+      captured,
+      nested,
+      frameRect.top - pageRect.top,
+      frameRect.left - pageRect.left,
+      seen
+    );
+  }
+  return captured;
 }
 
 function filterSurfaceCaptureToBand(
@@ -8451,28 +8656,6 @@ async function primeLivePreviewLayout(
   const viewportHeight = Math.max(160, scrollEl.clientHeight || rootEl.getBoundingClientRect().height || 640);
   let previousHeight = 0;
 
-  const sectionElements = renderer.sections.flatMap((section) => {
-    try {
-      section.render?.();
-    } catch (error) {
-      console.warn("Mobile PDF Exporter could not render a reading-view section", error);
-    }
-    return section.el ? [section.el] : [];
-  });
-  if (renderer.sizerEl && sectionElements.length > 0) {
-    renderer.sizerEl.append(...sectionElements);
-    await nextAnimationFrame();
-    await waitForImagesInElements(sectionElements, IMAGE_WAIT_TIMEOUT_MS);
-    for (const section of renderer.sections) {
-      try {
-        renderer.measureSection?.(section);
-      } catch (error) {
-        console.warn("Mobile PDF Exporter could not measure a reading-view section", error);
-      }
-    }
-    await nextAnimationFrame();
-  }
-
   for (let pass = 0; pass < 3; pass += 1) {
     const positions = buildLiveSurfaceCaptureScrollPositions(
       Math.max(0, scrollEl.scrollHeight - viewportHeight),
@@ -8480,6 +8663,11 @@ async function primeLivePreviewLayout(
     );
     for (const position of positions) {
       await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, renderer);
+      // Let Obsidian's own virtual renderer decide which sections are mounted.
+      // Never call section.render() or append sections to the sizer here: NoteDraw
+      // wraps that sizer in its reading stage and relies on the original parent
+      // order/geometry for its canvas projection.
+      renderer.updateVirtualDisplay?.(scrollEl.scrollTop);
       const connectedSections = getUncapturedConnectedPreviewSectionElements(rootEl, renderer, new Map());
       if (await waitForImagesInElements(connectedSections, 900)) {
         await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, renderer);
@@ -8739,6 +8927,91 @@ function captureTextFragments(
   return sortTextFragmentsForDrawing(fragments);
 }
 
+function captureEmbeddedOfficeCardTextFragments(
+  pageEl: HTMLElement,
+  linkContext?: PdfLinkContext,
+  liveWindow?: LiveSurfaceCaptureWindow
+): TextFragment[] {
+  if (!linkContext) return [];
+  const pageRect = pageEl.getBoundingClientRect();
+  const seen = new Set<string>();
+  const fragments: TextFragment[] = [];
+  const elements = Array.from(pageEl.querySelectorAll<HTMLElement>(
+    ".internal-embed, .media-embed, iframe, object, embed, .obcc-inline-workbench-embed[data-cancip-inline-path]"
+  ));
+  for (const element of elements) {
+    const wrapper = element.closest<HTMLElement>(
+      ".internal-embed, .media-embed, .obcc-inline-workbench-embed[data-cancip-inline-path]"
+    ) ?? element;
+    if (wrapper !== element && element.closest<HTMLElement>(
+      ".internal-embed, .media-embed, .obcc-inline-workbench-embed[data-cancip-inline-path]"
+    ) !== wrapper) continue;
+    const rawPath = wrapper.getAttribute("data-cancip-inline-path") ?? wrapper.getAttribute("src") ?? wrapper.getAttribute("data-href") ??
+      element.getAttribute("src") ?? element.getAttribute("data") ?? "";
+    const extension = rawPath.split(/[?#]/u, 1)[0].split(".").pop()?.toLowerCase() ?? "";
+    if (!(extension === "docx" || extension === "pptx" || extension === "xlsx")) continue;
+    const rect = wrapper.getBoundingClientRect();
+    if (rect.width <= 40 || rect.height <= 68) continue;
+    const file = resolveVaultAssetFile(linkContext.app, linkContext.sourcePath, rawPath);
+    const key = `${file?.path ?? rawPath}|${Math.round(rect.top)}|${Math.round(rect.left)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const frameDocument = element instanceof HTMLIFrameElement || element instanceof HTMLObjectElement
+      ? element.contentDocument
+      : null;
+    // The file-type SVG in an Obsidian card is only an icon, not a document
+    // preview. Treat it as empty unless the card exposes real media/table data.
+    const visiblePreview = Boolean(
+      wrapper.querySelector("img, canvas, table, video, .markdown-preview-view") ||
+      frameDocument?.querySelector("img, canvas, table, video")
+    );
+    if (visiblePreview) continue;
+
+    const size = file?.stat.size ?? 0;
+    const sizeLabel = size >= 1024 * 1024
+      ? `${(size / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(size / 1024))} KB`;
+    const typeLabel = extension.toUpperCase();
+    const left = rect.left - pageRect.left + 14;
+    const cardTop = rect.top - pageRect.top;
+    const maxWidth = Math.max(80, rect.width - 28);
+    const color = rgb(0.36, 0.39, 0.45);
+    const scope = wrapper;
+    const make = (text: string, top: number, fontSizePx: number, href: string | null): TextFragment => ({
+      text,
+      left,
+      top,
+      right: left + maxWidth,
+      bottom: top + fontSizePx * 1.35,
+      fontSizePx,
+      fontFamily: '"Noto Sans SC", system-ui, sans-serif',
+      fontWeight: "400",
+      fontStyle: "normal",
+      direction: "ltr",
+      color,
+      underline: Boolean(href),
+      lineThrough: false,
+      href,
+      officeDecoration: true,
+      mergeScope: scope
+    });
+    const href = resolveInternalPdfHref(rawPath, linkContext);
+    fragments.push(make(`${typeLabel} file - ${sizeLabel} - Open original`, cardTop + 48, 13, href));
+  }
+
+  if (!liveWindow) return fragments;
+  return fragments.filter((fragment) => {
+    const documentTop = fragment.top + liveWindow.scrollTop;
+    const documentBottom = fragment.bottom + liveWindow.scrollTop;
+    return documentBottom > liveWindow.bandTop - 0.5 && documentTop < liveWindow.bandBottom + 0.5;
+  }).map((fragment) => ({
+    ...fragment,
+    top: fragment.top,
+    bottom: fragment.bottom
+  }));
+}
+
 function captureImageFragments(pageEl: HTMLElement): ImageFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
   return Array.from(pageEl.querySelectorAll("img"))
@@ -8870,6 +9143,141 @@ function measureNoteDrawTargetContentFrame(host: HTMLElement, surfaceWidth: numb
   return { left, width };
 }
 
+function measureNoteDrawDomLayout(host: HTMLElement, sourcePath: string): NoteDrawDomLayout {
+  const hostRect = host.getBoundingClientRect();
+  const toLocal = (rect: DOMRect): { left: number; top: number; right: number; bottom: number } => ({
+    left: rect.left - hostRect.left + host.scrollLeft,
+    top: rect.top - hostRect.top + host.scrollTop,
+    right: rect.right - hostRect.left + host.scrollLeft,
+    bottom: rect.bottom - hostRect.top + host.scrollTop
+  });
+  const blocks = Array.from(host.querySelectorAll<HTMLElement>(
+    "[data-note-draw-source-path][data-note-draw-line-start]"
+  )).flatMap((element) => {
+    const path = normalizePath(element.getAttribute("data-note-draw-source-path") ?? "");
+    if (path && path !== normalizePath(sourcePath)) return [];
+    const lineStart = Number(element.getAttribute("data-note-draw-line-start"));
+    const lineEnd = Number(element.getAttribute("data-note-draw-line-end") ?? lineStart);
+    if (!Number.isFinite(lineStart) || !Number.isFinite(lineEnd)) return [];
+    const rect = toLocal(element.getBoundingClientRect());
+    if (rect.right <= rect.left || rect.bottom < rect.top) return [];
+    return [{
+      path,
+      lineStart: Math.round(lineStart),
+      lineEnd: Math.max(Math.round(lineStart), Math.round(lineEnd)),
+      text: normalizeLineText(element.textContent ?? ""),
+      top: rect.top,
+      bottom: rect.bottom,
+      left: rect.left,
+      right: rect.right
+    }];
+  });
+  const flowSpacers = Array.from(host.querySelectorAll<HTMLElement>(
+    "[data-note-draw-note-flow-block-key]"
+  )).flatMap((element) => {
+    const key = element.getAttribute("data-note-draw-note-flow-block-key")?.trim() ?? "";
+    if (!key) return [];
+    const rect = toLocal(element.getBoundingClientRect());
+    return [{
+      key,
+      side: element.getAttribute("data-note-draw-note-flow-side")?.trim() ?? "after",
+      top: rect.top,
+      left: rect.left,
+      right: rect.right
+    }];
+  });
+  return { blocks, flowSpacers };
+}
+
+function mapNoteDrawLineToDomY(layout: NoteDrawDomLayout, line: number | null): number | null {
+  if (line === null || !Number.isFinite(line) || layout.blocks.length === 0) return null;
+  const blocks = [...layout.blocks].sort((left, right) => left.lineStart - right.lineStart || left.top - right.top);
+  const exact = blocks
+    .filter((block) => line >= block.lineStart - 0.5 && line <= block.lineEnd + 0.5)
+    .sort((left, right) => Math.abs(line - left.lineStart) - Math.abs(line - right.lineStart))[0];
+  if (exact) {
+    const span = Math.max(1, exact.lineEnd - exact.lineStart + 1);
+    const fraction = clampNumber((line - exact.lineStart) / span, 0, 1, 0);
+    return exact.top + (exact.bottom - exact.top) * fraction;
+  }
+
+  const before = [...blocks].reverse().find((block) => block.lineEnd < line);
+  const after = blocks.find((block) => block.lineStart > line);
+  if (before && after) {
+    const lineGap = Math.max(1, after.lineStart - before.lineEnd);
+    const fraction = clampNumber((line - before.lineEnd) / lineGap, 0, 1, 0);
+    return before.bottom + (after.top - before.bottom) * fraction;
+  }
+  if (before) {
+    const lineSpan = Math.max(1, before.lineEnd - before.lineStart + 1);
+    const lineHeight = Math.max(1, (before.bottom - before.top) / lineSpan);
+    return before.bottom + (line - before.lineEnd) * lineHeight;
+  }
+  if (after) {
+    const lineSpan = Math.max(1, after.lineEnd - after.lineStart + 1);
+    const lineHeight = Math.max(1, (after.bottom - after.top) / lineSpan);
+    return after.top - (after.lineStart - line) * lineHeight;
+  }
+  return null;
+}
+
+function normalizeNoteDrawSourceFrame(value: unknown): NoteDrawSourceFrame | null {
+  if (!value || typeof value !== "object") return null;
+  const frame = value as Record<string, unknown>;
+  const surfaceWidth = Number(frame.surfaceWidth);
+  const contentLeft = Number(frame.contentLeft);
+  const contentWidth = Number(frame.contentWidth);
+  const documentHeight = Number(frame.documentHeight);
+  if (![surfaceWidth, contentLeft, contentWidth, documentHeight].every(Number.isFinite)) return null;
+  if (surfaceWidth < 24 || contentWidth < 1 || documentHeight < 24) return null;
+  return {
+    surfaceWidth,
+    contentLeft,
+    contentWidth,
+    documentHeight
+  };
+}
+
+function normalizeNoteDrawLayoutBox(value: unknown): { x: number; y: number; width: number; height: number } | null {
+  if (!value || typeof value !== "object") return null;
+  const layout = value as Record<string, unknown>;
+  const rawBox = layout.box && typeof layout.box === "object" ? layout.box as Record<string, unknown> : null;
+  if (!rawBox) return null;
+  const values = [rawBox.x, rawBox.y, rawBox.width, rawBox.height].map(Number);
+  if (!values.every(Number.isFinite)) return null;
+  return {
+    x: values[0],
+    y: values[1],
+    width: Math.max(1, values[2]),
+    height: Math.max(1, values[3])
+  };
+}
+
+function normalizeNoteDrawFlowPlacement(value: unknown): NoteDrawFlowPlacement | null {
+  if (!value || typeof value !== "object") return null;
+  const flow = value as Record<string, unknown>;
+  if (flow.enabled === false) return null;
+  const hasBlockStart = flow.blockStart !== null && flow.blockStart !== undefined && Number.isFinite(Number(flow.blockStart));
+  const hasBlockEnd = flow.blockEnd !== null && flow.blockEnd !== undefined && Number.isFinite(Number(flow.blockEnd));
+  const blockStart = hasBlockStart ? Math.round(Number(flow.blockStart)) : null;
+  const blockEnd = hasBlockEnd
+    ? Math.max(blockStart ?? 0, Math.round(Number(flow.blockEnd)))
+    : blockStart;
+  const blockKey = typeof flow.blockKey === "string" ? flow.blockKey.trim() : "";
+  return {
+    blockKey,
+    path: typeof flow.path === "string" ? normalizePath(flow.path) : "",
+    blockStart,
+    blockEnd,
+    side: typeof flow.side === "string" ? flow.side : "after",
+    rowOffset: Number.isFinite(Number(flow.rowOffset)) ? Number(flow.rowOffset) : 0,
+    boxLeftRatio: Number.isFinite(Number(flow.boxLeftRatio)) ? Number(flow.boxLeftRatio) : 0,
+    boxWidthRatio: Math.max(0.001, Number(flow.boxWidthRatio) || 0.001),
+    boxHeightRatio: Math.max(0.001, Number(flow.boxHeightRatio) || 0.001),
+    gap: Number.isFinite(Number(flow.gap)) ? Number(flow.gap) : 0
+  };
+}
+
 function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
   const stroke = value && typeof value === "object" ? value as Record<string, unknown> : null;
   if (!stroke) return null;
@@ -8931,21 +9339,43 @@ function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
       documentHeight: frameHeight
     }
     : null;
+  const corners = layout?.corners && typeof layout.corners === "object"
+    ? layout.corners as Record<string, unknown>
+    : null;
+  const topLeft = corners?.topLeft && typeof corners.topLeft === "object"
+    ? corners.topLeft as Record<string, unknown>
+    : null;
+  const bottomLeft = corners?.bottomLeft && typeof corners.bottomLeft === "object"
+    ? corners.bottomLeft as Record<string, unknown>
+    : null;
+  const hasLayoutLineStart = topLeft?.line !== null && topLeft?.line !== undefined && Number.isFinite(Number(topLeft.line));
+  const hasLayoutLineEnd = bottomLeft?.line !== null && bottomLeft?.line !== undefined && Number.isFinite(Number(bottomLeft.line));
+  const layoutLineStart = hasLayoutLineStart ? Number(topLeft.line) : null;
+  const layoutLineEnd = hasLayoutLineEnd ? Number(bottomLeft.line) : layoutLineStart;
   const textAnchor = stroke.textAnchor && typeof stroke.textAnchor === "object"
     ? stroke.textAnchor as Record<string, unknown>
+    : null;
+  const flow = normalizeNoteDrawFlowPlacement(stroke.noteFlow);
+  const rawConnector = stroke.connector && typeof stroke.connector === "object"
+    ? stroke.connector as Record<string, unknown>
     : null;
   const render = typeof stroke.render === "string" ? stroke.render : "plain";
   const sourcePath = typeof textAnchor?.path === "string"
     ? normalizePath(textAnchor.path)
+    : flow?.path
+      ? flow.path
     : typeof stroke.sourcePath === "string" ? normalizePath(stroke.sourcePath) : "";
-  const lineStart = Number.isFinite(Number(textAnchor?.lineStart))
+  const hasLineStart = textAnchor?.lineStart !== null && textAnchor?.lineStart !== undefined && Number.isFinite(Number(textAnchor.lineStart));
+  const hasLineEnd = textAnchor?.lineEnd !== null && textAnchor?.lineEnd !== undefined && Number.isFinite(Number(textAnchor.lineEnd));
+  const lineStart = hasLineStart
     ? Math.max(0, Math.round(Number(textAnchor?.lineStart)))
-    : null;
-  const lineEnd = Number.isFinite(Number(textAnchor?.lineEnd))
+    : flow?.blockStart ?? null;
+  const lineEnd = hasLineEnd
     ? Math.max(lineStart ?? 0, Math.round(Number(textAnchor?.lineEnd)))
-    : lineStart;
+    : flow?.blockEnd ?? lineStart;
 
   return {
+    elementId: typeof stroke.elementId === "string" ? stroke.elementId : "",
     kind,
     text: typeof stroke.text === "string" ? stroke.text : "",
     color: typeof stroke.color === "string" ? stroke.color : "#e53935",
@@ -8967,6 +9397,17 @@ function normalizeNoteDrawElement(value: unknown): NoteDrawElementData | null {
     points,
     layoutBox,
     layoutFrame,
+    layoutLineStart,
+    layoutLineEnd,
+    flow,
+    connector: rawConnector
+      ? {
+        fromId: typeof rawConnector.fromId === "string" ? rawConnector.fromId : "",
+        toId: typeof rawConnector.toId === "string" ? rawConnector.toId : "",
+        style: typeof rawConnector.style === "string" ? rawConnector.style : "curve",
+        arrow: rawConnector.arrow !== false
+      }
+      : null,
     markdownFlow: Boolean(stroke.belowMarkdown || stroke.noteFlow || render === "markdown" || render === "note"),
     sourcePath,
     lineStart,
@@ -9011,7 +9452,8 @@ async function injectRenderedHtmlNoteDrawAssets(
     prepared.contentFrame,
     0,
     0,
-    1
+    1,
+    prepared.domLayout
   );
   for (const element of projectedElements) {
     if ((element.kind !== "video" && element.kind !== "file") || !element.assetPath) continue;
@@ -9095,9 +9537,10 @@ function projectNoteDrawElements(
   contentFrame: NoteDrawContentFrame,
   offsetX: number,
   offsetY: number,
-  scale: number
+  scale: number,
+  domLayout?: NoteDrawDomLayout
 ): PdfNoteDrawElement[] {
-  return elements.flatMap((element) => {
+  const projected = elements.flatMap((element) => {
     const sourceFrame = element.layoutFrame;
     const targetContentLeft = clampNumber(contentFrame.left, -widthPx, widthPx * 2, 0);
     const targetContentWidth = clampNumber(contentFrame.width, 1, widthPx * 2, widthPx);
@@ -9107,20 +9550,69 @@ function projectNoteDrawElements(
       ? targetContentLeft + (normalizedX * sourceFrame.surfaceWidth - sourceFrame.contentLeft) * frameScaleX
       : normalizedX * widthPx;
     const first = element.points[0];
-    const rawLeft = element.layoutBox
+    const flow = element.flow;
+    const flowBlock = flow && domLayout
+      ? domLayout.blocks
+        .filter((block) => (
+          (!flow.path || block.path === flow.path) &&
+          (flow.blockStart === null || block.lineEnd >= flow.blockStart) &&
+          (flow.blockEnd === null || block.lineStart <= flow.blockEnd)
+        ))
+        .sort((left, right) => left.top - right.top)[0]
+      : null;
+    const flowSpacer = flow && domLayout && flow.blockKey
+      ? domLayout.flowSpacers.find((spacer) => spacer.key === flow.blockKey)
+      : null;
+    const flowWidth = flow && flow.boxWidthRatio > 0
+      ? targetContentWidth * flow.boxWidthRatio
+      : null;
+    const flowHeight = flow ? Math.max(1, flow.boxHeightRatio * targetContentWidth) : null;
+    const flowAnchorTop = flowBlock?.bottom ?? flowSpacer?.top ?? null;
+    const nextBlockTop = flowBlock && domLayout
+      ? domLayout.blocks
+        .filter((block) => block.top > flowBlock.bottom + 0.5)
+        .sort((left, right) => left.top - right.top)[0]?.top ?? null
+      : null;
+    const flowTop = flow && flowAnchorTop !== null
+      ? (() => {
+        const candidate = flow.side === "before"
+          ? flowBlock
+            ? flowBlock.top - (flow.gap + flow.rowOffset + (flowHeight ?? 0))
+            : flowAnchorTop - flow.gap - flow.rowOffset - (flowHeight ?? 0)
+          : flowAnchorTop + flow.gap + flow.rowOffset;
+        if (flowHeight === null || nextBlockTop === null) return candidate;
+        return Math.min(candidate, Math.max(flowAnchorTop, nextBlockTop - flowHeight - 1));
+      })()
+      : null;
+    const anchoredTextTop = element.kind === "text" && element.layoutLineStart !== null
+      ? mapNoteDrawLineToDomY(domLayout ?? { blocks: [], flowSpacers: [] }, element.layoutLineStart)
+      : null;
+    const rawLeft = flow && flowWidth !== null
+      ? targetContentLeft + flow.boxLeftRatio * targetContentWidth
+      : element.layoutBox
       ? sourceFrame
         ? targetContentLeft + (element.layoutBox.x - sourceFrame.contentLeft) * frameScaleX
         : element.layoutBox.x
       : projectPointX(first.x);
-    const rawTop = element.layoutBox ? element.layoutBox.y * frameScaleY : first.y * heightPx;
+    const rawTop = flowTop !== null
+      ? flowTop
+      : anchoredTextTop !== null
+        ? anchoredTextTop
+      : element.layoutBox ? element.layoutBox.y * frameScaleY : first.y * heightPx;
     const fallbackWidth = element.kind === "text"
       ? element.textWidth ?? Math.max(28, element.text.length * element.fontSize * 0.62)
       : element.previewWidth;
     const fallbackHeight = element.kind === "text"
       ? Math.max(element.fontSize * 1.35, element.previewHeight && element.render !== "plain" ? element.previewHeight : 0)
       : element.previewHeight;
-    const rawWidth = element.layoutBox ? element.layoutBox.width * frameScaleX : fallbackWidth * frameScaleX;
-    const rawHeight = element.layoutBox ? element.layoutBox.height * frameScaleY : fallbackHeight * frameScaleY;
+    const rawWidth = flowWidth !== null
+      ? flowWidth
+      : element.layoutBox ? element.layoutBox.width * frameScaleX : fallbackWidth * frameScaleX;
+    const rawHeight = flowHeight !== null
+      ? flowHeight
+      : anchoredTextTop !== null && element.layoutLineEnd !== null
+        ? Math.max(6, (mapNoteDrawLineToDomY(domLayout ?? { blocks: [], flowSpacers: [] }, element.layoutLineEnd) ?? anchoredTextTop) - anchoredTextTop)
+        : element.layoutBox ? element.layoutBox.height * frameScaleY : fallbackHeight * frameScaleY;
     const projectedPoints = element.points.map((point) => ({
       x: offsetX + projectPointX(point.x) * scale,
       y: offsetY + point.y * heightPx * scale
@@ -9152,6 +9644,66 @@ function projectNoteDrawElements(
       bottom
     }];
   });
+  const byId = new Map(projected
+    .filter((element) => element.elementId)
+    .map((element) => [element.elementId, element] as const));
+  for (const element of projected) {
+    if (element.kind !== "connector" || !element.connector || element.points.length < 2) continue;
+    const from = byId.get(element.connector.fromId);
+    const to = byId.get(element.connector.toId);
+    if (!from || !to) continue;
+    const sourcePoint = element.points[0];
+    const targetPoint = element.points[element.points.length - 1];
+    const fromSourceCenter = {
+      x: from.left + (from.right - from.left) / 2,
+      y: from.top + (from.bottom - from.top) / 2
+    };
+    const toSourceCenter = {
+      x: to.left + (to.right - to.left) / 2,
+      y: to.top + (to.bottom - to.top) / 2
+    };
+    const firstDistanceToFrom = Math.hypot(sourcePoint.x - fromSourceCenter.x, sourcePoint.y - fromSourceCenter.y);
+    const lastDistanceToFrom = Math.hypot(targetPoint.x - fromSourceCenter.x, targetPoint.y - fromSourceCenter.y);
+    const startBox = firstDistanceToFrom <= lastDistanceToFrom ? from : to;
+    const endBox = startBox === from ? to : from;
+    const startCenter = {
+      x: startBox.left + (startBox.right - startBox.left) / 2,
+      y: startBox.top + (startBox.bottom - startBox.top) / 2
+    };
+    const endCenter = {
+      x: endBox.left + (endBox.right - endBox.left) / 2,
+      y: endBox.top + (endBox.bottom - endBox.top) / 2
+    };
+    const start = noteDrawRectEdgePoint(startBox, endCenter);
+    const end = noteDrawRectEdgePoint(endBox, startCenter);
+    const middle = element.points.length === 3
+      ? {
+        x: start.x + (end.x - start.x) * 0.5,
+        y: start.y + (end.y - start.y) * 0.5
+      }
+      : null;
+    element.points = middle ? [start, middle, end] : [start, end];
+    element.left = Math.min(...element.points.map((point) => point.x));
+    element.top = Math.min(...element.points.map((point) => point.y));
+    element.right = Math.max(...element.points.map((point) => point.x));
+    element.bottom = Math.max(...element.points.map((point) => point.y));
+  }
+  return projected;
+}
+
+function noteDrawRectEdgePoint(
+  rect: Pick<PdfNoteDrawElement, "left" | "top" | "right" | "bottom">,
+  toward: { x: number; y: number }
+): { x: number; y: number } {
+  const center = { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
+  const dx = toward.x - center.x;
+  const dy = toward.y - center.y;
+  const scale = Math.max(
+    1,
+    Math.abs(dx) / Math.max(0.5, (rect.right - rect.left) / 2),
+    Math.abs(dy) / Math.max(0.5, (rect.bottom - rect.top) / 2)
+  );
+  return { x: center.x + dx / scale, y: center.y + dy / scale };
 }
 
 function attachPreparedNoteDrawToModel(
@@ -9171,7 +9723,8 @@ function attachPreparedNoteDrawToModel(
     prepared.contentFrame,
     options.offsetX,
     options.offsetY,
-    options.scale
+    options.scale,
+    prepared.domLayout
   );
   const elements = projectNoteDrawElements(
     prepared.elements,
@@ -9180,7 +9733,8 @@ function attachPreparedNoteDrawToModel(
     prepared.contentFrame,
     options.offsetX,
     options.offsetY,
-    options.scale
+    options.scale,
+    prepared.domLayout
   );
   const sourceElements = prepared.sourceElements === prepared.elements
     ? elements
@@ -9191,11 +9745,22 @@ function attachPreparedNoteDrawToModel(
       prepared.contentFrame,
       options.offsetX,
       options.offsetY,
-      options.scale
+      options.scale,
+      prepared.domLayout
     );
   model.noteDrawInkStrokes = ink;
   model.noteDrawElements = elements;
   model.noteDrawSourceElements = sourceElements;
+
+  // Keep NoteDraw cards and their connectors intact at page boundaries. The
+  // native canvas is rasterized as a rigid surface, but a page break can still
+  // slice a card in half unless its semantic bounds participate in pagination.
+  // Recompute breaks after projection so the same rule applies to live-canvas
+  // and persisted-data fallback exports.
+  for (const element of elements) {
+    if (element.right <= element.left || element.bottom <= element.top) continue;
+    model.keepBlocks.push({ ...element, priority: 6 });
+  }
 
   for (const element of elements) {
     if (!element.assetPath || element.kind === "text" || element.kind === "connector") continue;
@@ -9209,7 +9774,6 @@ function attachPreparedNoteDrawToModel(
         bottom: element.bottom
       });
     }
-    model.keepBlocks.push({ ...element, priority: 6 });
   }
 
   // Filter out text fragments that overlap with NoteDraw elements to prevent ghosting.
@@ -9230,10 +9794,8 @@ function attachPreparedNoteDrawToModel(
   const inkBottom = Math.max(0, ...ink.flatMap((stroke) => stroke.points.map((point) => point.y + stroke.widthPx)));
   const elementBottom = Math.max(0, ...elements.map((element) => element.bottom));
   const contentHeight = Math.ceil(Math.max(model.contentHeightPx, inkBottom, elementBottom));
-  if (contentHeight !== model.contentHeightPx) {
-    model.contentHeightPx = contentHeight;
-    model.pageBreaks = computePageBreaks(contentHeight, model.bodyHeightPx, model.keepBlocks);
-  }
+  model.contentHeightPx = contentHeight;
+  model.pageBreaks = computePageBreaks(contentHeight, model.bodyHeightPx, model.keepBlocks);
   model.pageBreaks = removeEmptyTrailingPageBreaks(model);
 }
 
@@ -9286,7 +9848,11 @@ function captureCanvasFragments(
       const scaleX = rect.width / Math.max(1, canvas.width);
       const scaleY = rect.height / Math.max(1, canvas.height);
       return {
-        element: canvas,
+        // NoteDraw redraws/resizes its live canvas while the export scrolls
+        // through virtualized sections. Snapshot it at capture time so later
+        // restoration cannot replace every fragment with the final canvas
+        // position or pixels.
+        element: isNoteDrawCanvasElement(canvas) ? snapshotCanvasElement(canvas) : canvas,
         sourceLeftPx: pixelBounds.left,
         sourceTopPx: pixelBounds.top,
         sourceRightPx: pixelBounds.right,
@@ -9300,6 +9866,80 @@ function captureCanvasFragments(
     .filter((fragment): fragment is CanvasFragment => Boolean(
       fragment && fragment.right > fragment.left && fragment.bottom > fragment.top
     ));
+}
+
+function isNoteDrawCanvasElement(canvas: HTMLCanvasElement): boolean {
+  return canvas.matches(
+    ".mobile-pdf-exporter-note-doodle-canvas, .notedraw-canvas, .notedraw-static-canvas, .notedraw-underlay-canvas, .note-doodle-canvas, .notedraw-export-image-canvas"
+  ) || Boolean(
+    canvas.closest(".notedraw-shell, .note-doodle-shell, .notedraw-export-image-canvas-layer") ||
+    canvas.closest(".notedraw-reading-stage")
+  );
+}
+
+function snapshotCanvasElement(canvas: HTMLCanvasElement): HTMLCanvasElement {
+  const snapshot = createCanvas(canvas);
+  snapshot.width = Math.max(1, canvas.width);
+  snapshot.height = Math.max(1, canvas.height);
+  snapshot.className = canvas.className;
+  try {
+    const context = snapshot.getContext("2d");
+    if (context) context.drawImage(canvas, 0, 0);
+  } catch (error) {
+    console.warn("Mobile PDF Exporter could not snapshot NoteDraw canvas", error);
+  }
+  return snapshot;
+}
+
+async function waitForRestoredNoteDrawSurface(
+  rootEl: HTMLElement,
+  signal?: AbortSignal
+): Promise<void> {
+  if (!rootEl.querySelector(".notedraw-reading-stage, .notedraw-shell")) return;
+  let previousSignature = "";
+  let stableFrames = 0;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    throwIfExportCancelled(signal);
+    await nextAnimationFrame();
+    const signature = Array.from(rootEl.querySelectorAll<HTMLCanvasElement>(
+      ".notedraw-underlay-canvas, .notedraw-static-canvas, .notedraw-canvas"
+    )).map((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      return [
+        canvas.className,
+        canvas.width,
+        canvas.height,
+        Math.round(rect.left * 10),
+        Math.round(rect.top * 10),
+        Math.round(rect.width * 10),
+        Math.round(rect.height * 10)
+      ].join(":");
+    }).join(";");
+    if (signature && signature === previousSignature) {
+      stableFrames += 1;
+      if (stableFrames >= 3) return;
+    } else {
+      previousSignature = signature;
+      stableFrames = 0;
+    }
+  }
+}
+
+function snapshotRestoredNoteDrawCanvases(
+  fragments: CanvasFragment[],
+  rootEl: HTMLElement,
+  scrollEl: HTMLElement
+): CanvasFragment[] {
+  void rootEl;
+  void scrollEl;
+  return fragments.map((fragment) => {
+    const canvas = fragment.element;
+    if (!isNoteDrawCanvasElement(canvas)) return fragment;
+
+    // Geometry was captured in document space for each scroll window. Never
+    // replace it with the final restored canvas rectangle.
+    return canvas.isConnected ? { ...fragment, element: snapshotCanvasElement(canvas) } : fragment;
+  });
 }
 
 function getCanvasVisiblePixelBounds(canvas: HTMLCanvasElement): CanvasPixelBounds | null {
@@ -10556,7 +11196,8 @@ function drawTextLayer(
     const fontSize = Math.max(3.5, fragment.fontSizePx * pxToPt);
     const visualRight = clampNumber(fragment.right * pxToPt, 4, pageWidthPt, pageWidthPt);
     const baselineY = pageHeightPt - (contentTopInsetPx + localTop + fragment.fontSizePx * 0.86) * pxToPt;
-    const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt);
+    const glyphSafety = Math.min(4, Math.max(1.25, fragment.fontSizePx * 0.14)) * pxToPt;
+    const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt + glyphSafety);
     const font = selectPdfFont(fonts, fragment.text);
     const hiddenInVisualLayer = options.hiddenVisualTextFragments?.has(fragment) ?? false;
     const naturalWidth = font.widthOfTextAtSize(
@@ -11885,6 +12526,48 @@ function isNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
   );
 }
 
+function isNativeNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
+  const canvas = fragment.element;
+  if (canvas.matches(".notedraw-underlay-canvas, .notedraw-static-canvas")) return true;
+  // The interactive canvas is authoritative only when it has a real backing
+  // store. NoteDraw intentionally keeps an idle 1x1 canvas beside its static
+  // layers, which must not disable the persisted-data fallback.
+  return canvas.matches(".notedraw-canvas") && canvas.width > 1 && canvas.height > 1;
+}
+
+function preferNativeNoteDrawCanvas(
+  model: PreviewPdfModel
+): { model: PreviewPdfModel; usesNativeCanvas: boolean } {
+  const usesNativeCanvas = model.canvasFragments.some(isNativeNoteDrawCanvasFragment);
+  if (usesNativeCanvas) {
+    // NoteDraw has already projected every stroke, highlight, box, label and
+    // connector into the current reading-view geometry. Preserve those pixels
+    // as one rigid surface instead of projecting individual points again; the
+    // latter deforms strokes whenever their anchors span multiple Markdown lines.
+    // The old raster-only fallback used noteDrawInkStrokes: [], noteDrawElements: [];
+    // Keep the semantic elements suppressed here, but retain Ink strokes for
+    // the generic PDF annotation layer below.
+    return {
+      model: {
+        ...model,
+        noteDrawElements: []
+      },
+      usesNativeCanvas: true
+    };
+  }
+
+  const hasGeneratedFallbackCanvas = model.canvasFragments.some(isNoteDrawCanvasFragment);
+  return {
+    model: hasGeneratedFallbackCanvas
+      ? {
+        ...model,
+        canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment))
+      }
+      : model,
+    usesNativeCanvas: false
+  };
+}
+
 function drawCanvasDecorationLayer(
   context: CanvasRenderingContext2D,
   decorations: DecorationFragment[],
@@ -12000,7 +12683,11 @@ function drawCanvasTextLayer(
     const right = clampNumber(fragment.right, left + 1, options.sourceWidthPx - 1, left + 1);
     const x = fragment.direction === "rtl" ? right : left;
     const y = fragment.top - options.pageTopPx + fragment.fontSizePx * 0.86;
-    const measuredWidth = Math.max(1, fragment.right - fragment.left);
+    const glyphSafety = Math.min(4, Math.max(1.25, fragment.fontSizePx * 0.14));
+    const measuredWidth = Math.max(
+      1,
+      Math.min(options.sourceWidthPx - left, fragment.right - fragment.left + glyphSafety)
+    );
     const availableWidth = fragment.direction === "rtl" ? right : options.sourceWidthPx - left;
     const maxWidth = Math.max(1, Math.min(availableWidth, measuredWidth));
     context.save();
@@ -13193,6 +13880,85 @@ function hasExportableContent(container: HTMLElement): boolean {
 
 async function waitForImages(container: HTMLElement, timeoutMs: number): Promise<void> {
   await waitForImagesInElements([container], timeoutMs);
+}
+
+function getEmbeddedPreviewSignature(container: HTMLElement): string {
+  return Array.from(container.querySelectorAll<HTMLElement>(".internal-embed, .media-embed, iframe, object, embed"))
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      const frameDocument = element instanceof HTMLIFrameElement
+        ? element.contentDocument
+        : element instanceof HTMLObjectElement
+          ? element.contentDocument
+          : null;
+      return [
+        element.tagName,
+        element.className,
+        element.getAttribute("src") ?? element.getAttribute("data-href") ?? "",
+        Math.round(rect.width),
+        Math.round(rect.height),
+        element.textContent?.length ?? 0,
+        frameDocument?.body?.textContent?.length ?? 0,
+        frameDocument?.querySelectorAll("img, canvas, svg, table, object, embed").length ?? 0
+      ].join(":");
+    })
+    .join(";");
+}
+
+async function waitForEmbeddedPreviews(container: HTMLElement, timeoutMs: number): Promise<boolean> {
+  const embeds = Array.from(container.querySelectorAll<HTMLElement>(".internal-embed, .media-embed, iframe, object, embed"));
+  if (!embeds.length) return false;
+  const pendingEmbeds = embeds.filter((element) => isEmbeddedPreviewPending(element));
+  // Already-laid-out Office cards need no fixed delay on every scroll pass.
+  if (!pendingEmbeds.length) return false;
+  const started = Date.now();
+  let signature = getEmbeddedPreviewSignature(container);
+  let stableFrames = 0;
+  let changed = false;
+  const observer = new MutationObserver(() => {
+    const next = getEmbeddedPreviewSignature(container);
+    if (next !== signature) {
+      signature = next;
+      stableFrames = 0;
+      changed = true;
+    }
+  });
+  observer.observe(container, { attributes: true, childList: true, subtree: true });
+  try {
+    const loads = pendingEmbeds.flatMap((element) => {
+      if (!(element instanceof HTMLIFrameElement || element instanceof HTMLObjectElement || element instanceof HTMLEmbedElement)) return [];
+      return [new Promise<void>((resolve) => {
+        element.addEventListener("load", () => resolve(), { once: true });
+        activeWindow.setTimeout(resolve, Math.min(650, timeoutMs));
+      })];
+    });
+    if (loads.length) await waitForPromiseOrTimeout(Promise.all(loads), Math.min(timeoutMs, 700));
+    const effectiveTimeout = Math.min(timeoutMs, 700);
+    while (Date.now() - started < effectiveTimeout) {
+      await nextAnimationFrame();
+      const next = getEmbeddedPreviewSignature(container);
+      if (next !== signature) {
+        signature = next;
+        stableFrames = 0;
+        changed = true;
+      } else {
+        stableFrames += 1;
+      }
+      if (stableFrames >= 2 && (changed || pendingEmbeds.every((element) => element.getBoundingClientRect().height > 0.5))) return changed;
+    }
+  } finally {
+    observer.disconnect();
+  }
+  return changed;
+}
+
+function isEmbeddedPreviewPending(element: HTMLElement): boolean {
+  if (element instanceof HTMLIFrameElement || element instanceof HTMLObjectElement) {
+    // Cross-origin/native views expose no contentDocument; waiting cannot make
+    // them observable, so their stable outer card is captured immediately.
+    if (element.contentDocument?.readyState === "loading") return true;
+  }
+  return Array.from(element.querySelectorAll<HTMLImageElement>("img")).some((image) => !image.complete);
 }
 
 async function waitForImagesInElements(elements: Iterable<Element>, timeoutMs: number): Promise<boolean> {

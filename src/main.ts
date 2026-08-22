@@ -597,6 +597,8 @@ interface PreparedNoteDrawExportOverlay {
   widthPx: number;
   heightPx: number;
   contentFrame: NoteDrawContentFrame;
+  inkSurfaceOffsetX: number;
+  inkSurfaceOffsetY: number;
   domLayout: NoteDrawDomLayout;
 }
 
@@ -3833,8 +3835,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const rect = host.getBoundingClientRect();
     const width = Math.max(1, Math.ceil(host.scrollWidth || rect.width || 1));
     const height = Math.max(1, Math.ceil(host.scrollHeight || rect.height || 1));
-  const contentFrame = measureNoteDrawTargetContentFrame(host, width);
+    const contentFrame = measureNoteDrawTargetContentFrame(host, width);
     const domLayout = measureNoteDrawDomLayout(host, file.path);
+    // NoteDraw stores freehand points in its drawing surface coordinate space,
+    // while the export model is rooted at the Markdown host. The main static
+    // canvas can be inset inside that host (typically by the content padding),
+    // so capture that origin instead of assuming both coordinate systems match.
+    let { x: inkSurfaceOffsetX, y: inkSurfaceOffsetY } = measureNoteDrawInkSurfaceOffset(host);
     const empty = (): PreparedNoteDrawExportOverlay => ({
       cleanup: () => undefined,
       data: null,
@@ -3844,6 +3851,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       widthPx: width,
       heightPx: height,
       contentFrame,
+      inkSurfaceOffsetX,
+      inkSurfaceOffsetY,
       domLayout
     });
     const plugins = (this.app as unknown as {
@@ -3892,6 +3901,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const injectedImageLayers = Array.from(host.querySelectorAll<HTMLElement>(
       ".notedraw-export-image-canvas-layer"
     )).filter((element) => !existingImageLayers.has(element));
+    // Snapshot injection can create the native canvas after the first layout
+    // pass (especially for rendered previews), so measure again once the
+    // authoritative NoteDraw surface is present.
+    ({ x: inkSurfaceOffsetX, y: inkSurfaceOffsetY } = measureNoteDrawInkSurfaceOffset(host));
     const allSourceElements = await prepareNoteDrawElementData(this.app, host.ownerDocument, rawData);
     // NoteDraw 3.6+ represents Markdown-flow items in both drawing metadata and the
     // rendered Markdown DOM. Keep the DOM copy as the WYSIWYG source of truth.
@@ -3973,6 +3986,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
       widthPx: width,
       heightPx: height,
       contentFrame,
+      inkSurfaceOffsetX,
+      inkSurfaceOffsetY,
       domLayout
     };
   }
@@ -4008,8 +4023,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const rasterTextFragments = collectVisualRasterTextFragments(model.textFragments);
     const hiddenVisualTextFragments = new Set(rasterTextFragments);
     const noteDrawVisual = preferNativeNoteDrawCanvas(model);
+    const pdfBackgroundModel = eraseNativeNoteDrawInkFromCanvasModel(noteDrawVisual.model);
     const visualModel = {
-      ...noteDrawVisual.model,
+      ...pdfBackgroundModel,
       textFragments: rasterTextFragments
     };
 
@@ -4096,7 +4112,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
     const noteDrawVisual = preferNativeNoteDrawCanvas(model);
-    const visualModel = noteDrawVisual.model;
+    const visualModel = eraseNativeNoteDrawInkFromCanvasModel(noteDrawVisual.model);
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
@@ -5703,6 +5719,8 @@ function projectNoteDrawInkStrokes(
   widthPx: number,
   heightPx: number,
   contentFrame: NoteDrawContentFrame,
+  inkSurfaceOffsetX: number,
+  inkSurfaceOffsetY: number,
   offsetX: number,
   offsetY: number,
   scale: number,
@@ -5749,13 +5767,14 @@ function projectNoteDrawInkStrokes(
           : flowAnchorTop + flow.gap + flow.rowOffset
         : null;
       const mapPoint = (point: NoteDoodlePoint): { x: number; y: number } => {
-        const sourceX = point.anchor?.basis === "note-content-v1" && sourceFrame
-          ? targetContentLeft + (point.anchor.x * sourceFrame.surfaceWidth - sourceFrame.contentLeft) * frameScaleX
-          : noteDoodlePointToCanvas(point, widthPx, heightPx, contentFrame).x;
-        const lineY = point.anchor?.line !== null && point.anchor?.line !== undefined
-          ? mapNoteDrawLineToDomY(domLayout ?? { blocks: [], flowSpacers: [] }, point.anchor.line)
-          : null;
-        const sourceY = lineY ?? point.y * heightPx;
+        // Freehand strokes must follow the same continuous surface mapping as
+        // NoteDraw's canvas. Per-point Markdown-line projection bends a single
+        // stroke whenever it crosses more than one source line.
+        const mapped = noteDoodlePointToCanvas(point, widthPx, heightPx, contentFrame);
+        // Flow-linked insertions are laid out from their live block geometry;
+        // applying the canvas origin again would double-shift those items.
+        const sourceX = mapped.x + (flow ? 0 : inkSurfaceOffsetX);
+        const sourceY = mapped.y + (flow ? 0 : inkSurfaceOffsetY);
         if (flow && flowTop !== null && sourceBox && sourceWidth > 0 && sourceHeight > 0 && flowWidth > 0 && flowHeight > 0) {
           return {
             x: targetContentLeft + flow.boxLeftRatio * targetContentWidth + (sourceX - sourceLeft) * (flowWidth / sourceWidth),
@@ -9721,6 +9740,8 @@ function attachPreparedNoteDrawToModel(
     prepared.widthPx,
     prepared.heightPx,
     prepared.contentFrame,
+    prepared.inkSurfaceOffsetX,
+    prepared.inkSurfaceOffsetY,
     options.offsetX,
     options.offsetY,
     options.scale,
@@ -12535,6 +12556,33 @@ function isNativeNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
   return canvas.matches(".notedraw-canvas") && canvas.width > 1 && canvas.height > 1;
 }
 
+function measureNoteDrawInkSurfaceOffset(host: HTMLElement): { x: number; y: number } {
+  const hostRect = host.getBoundingClientRect();
+  if (hostRect.width <= 0 || hostRect.height <= 0) return { x: 0, y: 0 };
+
+  const nativeCanvas = Array.from(host.querySelectorAll<HTMLCanvasElement>(
+    ".notedraw-underlay-canvas, .notedraw-static-canvas"
+  ))
+    .filter((canvas) => canvas.closest(".notedraw-shell") === host)
+    .filter((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    })
+    .sort((left, right) => (
+      Number(right.matches(".notedraw-static-canvas")) - Number(left.matches(".notedraw-static-canvas"))
+    ))[0];
+  const canvasRect = nativeCanvas?.getBoundingClientRect();
+  if (!canvasRect) return { x: 0, y: 0 };
+
+  const x = canvasRect.left - hostRect.left + host.scrollLeft;
+  const rawY = canvasRect.top - hostRect.top + host.scrollTop;
+  // The reading view virtualizes NoteDraw's canvas vertically. A canvas that
+  // is hundreds of pixels away is a captured segment origin, not a document
+  // origin; only retain a small stable inset such as the host padding.
+  const y = Math.abs(rawY) <= 64 ? rawY : 0;
+  return { x, y };
+}
+
 function preferNativeNoteDrawCanvas(
   model: PreviewPdfModel
 ): { model: PreviewPdfModel; usesNativeCanvas: boolean } {
@@ -12566,6 +12614,63 @@ function preferNativeNoteDrawCanvas(
       : model,
     usesNativeCanvas: false
   };
+}
+
+function eraseNativeNoteDrawInkFromCanvasModel(model: PreviewPdfModel): PreviewPdfModel {
+  const strokes = model.noteDrawInkStrokes ?? [];
+  if (!strokes.length || !model.canvasFragments.some(isNativeNoteDrawCanvasFragment)) return model;
+
+  let changed = false;
+  const canvasFragments = model.canvasFragments.map((fragment) => {
+    if (!isNativeNoteDrawCanvasFragment(fragment)) return fragment;
+
+    const cssWidth = Math.max(1, fragment.right - fragment.left);
+    const cssHeight = Math.max(1, fragment.bottom - fragment.top);
+    const sourceWidth = Math.max(1, fragment.sourceRightPx - fragment.sourceLeftPx);
+    const sourceHeight = Math.max(1, fragment.sourceBottomPx - fragment.sourceTopPx);
+    const ratioX = sourceWidth / cssWidth;
+    const ratioY = sourceHeight / cssHeight;
+    const canvas = snapshotCanvasElement(fragment.element);
+    const context = canvas.getContext("2d");
+    if (!context) return fragment;
+
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.globalCompositeOperation = "destination-out";
+    context.globalAlpha = 1;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.strokeStyle = "#000";
+
+    for (const stroke of strokes) {
+      if (!stroke.points.length) continue;
+      const strokeWidth = Math.max(0.5, stroke.widthPx);
+      const offsets = stroke.brush === "watercolor"
+        ? getNoteDoodlePenOffsets(Math.max(2, stroke.count + 1), strokeWidth * 0.85)
+        : getNoteDoodlePenOffsets(stroke.count, strokeWidth);
+      const visualWidth = stroke.brush === "watercolor" ? strokeWidth * 2.15 : strokeWidth;
+      // Two CSS pixels on either side remove antialiasing without touching
+      // unrelated NoteDraw elements beyond the original freehand path.
+      context.lineWidth = (visualWidth + 4) * Math.max(ratioX, ratioY);
+
+      for (const offset of offsets) {
+        context.beginPath();
+        stroke.points.forEach((point, index) => {
+          const x = fragment.sourceLeftPx + (point.x + offset.x - fragment.left) * ratioX;
+          const y = fragment.sourceTopPx + (point.y + offset.y - fragment.top) * ratioY;
+          if (index === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+      }
+    }
+
+    context.restore();
+    changed = true;
+    return { ...fragment, element: canvas };
+  });
+
+  return changed ? { ...model, canvasFragments } : model;
 }
 
 function drawCanvasDecorationLayer(

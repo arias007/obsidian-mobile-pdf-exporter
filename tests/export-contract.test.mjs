@@ -321,6 +321,28 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /Subtype: "Form"/);
 });
 
+test("PDF NoteDraw ink uses continuous canvas coordinates without a burned duplicate", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const projectionStart = source.indexOf("function projectNoteDrawInkStrokes(");
+  const projectionEnd = source.indexOf("function normalizeNoteDoodleStroke(", projectionStart);
+  const projection = source.slice(projectionStart, projectionEnd);
+
+  assert.match(projection, /const mapped = noteDoodlePointToCanvas\(point, widthPx, heightPx, contentFrame\)/);
+  assert.match(source, /inkSurfaceOffsetX: number/);
+  assert.match(source, /inkSurfaceOffsetY: number/);
+  assert.match(source, /canvasRect\.left - hostRect\.left \+ host\.scrollLeft/);
+  assert.match(source, /function measureNoteDrawInkSurfaceOffset\(host: HTMLElement\)/);
+  assert.match(source, /const y = Math\.abs\(rawY\) <= 64 \? rawY : 0/);
+  assert.match(source, /const sourceX = mapped\.x \+ \(flow \? 0 : inkSurfaceOffsetX\)/);
+  assert.match(source, /const sourceY = mapped\.y \+ \(flow \? 0 : inkSurfaceOffsetY\)/);
+  assert.doesNotMatch(projection, /mapNoteDrawLineToDomY\(/);
+  assert.match(source, /function eraseNativeNoteDrawInkFromCanvasModel\(model: PreviewPdfModel\)/);
+  assert.match(source, /if \(!isNativeNoteDrawCanvasFragment\(fragment\)\) return fragment/);
+  assert.match(source, /context\.globalCompositeOperation = "destination-out"/);
+  assert.match(source, /const pdfBackgroundModel = eraseNativeNoteDrawInkFromCanvasModel\(noteDrawVisual\.model\)/);
+  assert.match(source, /const visualModel = eraseNativeNoteDrawInkFromCanvasModel\(noteDrawVisual\.model\)/);
+});
+
 test("Cancip Office cards keep stable layout and expose a usable file fallback", async () => {
   const source = await readFile(sourceUrl, "utf8");
 

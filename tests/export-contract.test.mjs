@@ -166,7 +166,7 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /wrap:\s*false/);
   assert.match(source, /function buildWordFlowTextParagraphsXml\([\s\S]*?model: PreviewPdfModel,[\s\S]*?pageIndex: number,[\s\S]*?hyperlinkIds: ReadonlyMap<string, string>/);
   assert.match(source, /const paragraphs = `\$\{floatingParagraph\}\$\{buildWordFlowTextParagraphsXml\(model, pageIndex, hyperlinkIds\)\}`/);
-  assert.match(source, /if \(format === "png"\) \{\s*const visualModel = preferNativeNoteDrawCanvas\(model\)\.model/);
+  assert.match(source, /if \(format === "png"\) \{\s*const noteDrawVisual = preferNativeNoteDrawCanvas\(model\)/);
   assert.match(source, /const needsExplicitNoteDraw = format === "docx" \|\| format === "pptx"/);
   assert.match(source, /function preferNativeNoteDrawCanvas\(\s*model: PreviewPdfModel\s*\): \{ model: PreviewPdfModel; usesNativeCanvas: boolean \}/);
   assert.match(source, /const usesNativeCanvas = model\.canvasFragments\.some\(isNativeNoteDrawCanvasFragment\)/);
@@ -222,7 +222,7 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /<w:ind w:left="\$\{leftTwips\}"\/>/);
   assert.match(source, /decoration\.checked \? "☑" : "☐"/);
   assert.match(source, /decoration\.kind === "bullet"[\s\S]*?"•"/);
-  assert.match(source, /includeText,\s*includeDecorations,\s*includeNoteDraw: true/);
+  assert.match(source, /includeNoteDraw(?:\s*:\s*true|\s*\n)/);
   assert.match(source, /if \(options\.includeDecorations !== false\)/);
   assert.match(source, /if \(options\.includeNoteDraw === true\)/);
   assert.match(source, /function drawCanvasNoteDrawInkLayer\(/);
@@ -339,8 +339,26 @@ test("PDF NoteDraw ink uses continuous canvas coordinates without a burned dupli
   assert.match(source, /function eraseNativeNoteDrawInkFromCanvasModel\(model: PreviewPdfModel\)/);
   assert.match(source, /if \(!isNativeNoteDrawCanvasFragment\(fragment\)\) return fragment/);
   assert.match(source, /context\.globalCompositeOperation = "destination-out"/);
-  assert.match(source, /const pdfBackgroundModel = eraseNativeNoteDrawInkFromCanvasModel\(noteDrawVisual\.model\)/);
-  assert.match(source, /const visualModel = eraseNativeNoteDrawInkFromCanvasModel\(noteDrawVisual\.model\)/);
+  assert.match(source, /const pdfBackgroundModel = noteDrawVisual\.usesNativeCanvas\s*\?\s*noteDrawVisual\.model\s*:\s*eraseNativeNoteDrawInkFromCanvasModel\(noteDrawVisual\.model\)/);
+  assert.match(source, /const visualModel = noteDrawVisual\.usesNativeCanvas\s*\?\s*noteDrawVisual\.model\s*:\s*eraseNativeNoteDrawInkFromCanvasModel\(noteDrawVisual\.model\)/);
+});
+
+test("generated NoteDraw fallback canvases do not get mistaken for native ink layers", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /function isGeneratedNoteDrawCanvasFragment\(fragment: CanvasFragment\)/);
+  assert.match(source, /function getCanvasVisualSignature\(canvas: HTMLCanvasElement\)/);
+  assert.match(source, /native \? getCanvasVisualSignature\(fragment\.element\) : fragment\.element\.className/);
+  assert.match(source, /!noteDrawVisual\.usesNativeCanvas/);
+  assert.match(source, /includeNoteDraw = true/);
+});
+
+test("native NoteDraw raster surfaces do not receive a duplicate PDF Ink layer", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  assert.match(source, /const pdfInkStrokes = noteDrawVisual\.usesNativeCanvas\s*\?\s*\[\]\s*:\s*\(model\.noteDrawInkStrokes \?\? \[\]\)/);
+  assert.match(source, /const pdfBackgroundModel = noteDrawVisual\.usesNativeCanvas\s*\?\s*noteDrawVisual\.model\s*:\s*eraseNativeNoteDrawInkFromCanvasModel/);
+  assert.match(source, /const visualModel = noteDrawVisual\.usesNativeCanvas\s*\?\s*noteDrawVisual\.model\s*:\s*eraseNativeNoteDrawInkFromCanvasModel/);
+  assert.match(source, /drawNoteDrawInkAnnotationLayer\(pdfPage, pdfInkStrokes/);
 });
 
 test("Cancip Office cards keep stable layout and expose a usable file fallback", async () => {

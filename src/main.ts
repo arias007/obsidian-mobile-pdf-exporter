@@ -4023,7 +4023,17 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const rasterTextFragments = collectVisualRasterTextFragments(model.textFragments);
     const hiddenVisualTextFragments = new Set(rasterTextFragments);
     const noteDrawVisual = preferNativeNoteDrawCanvas(model);
-    const pdfBackgroundModel = eraseNativeNoteDrawInkFromCanvasModel(noteDrawVisual.model);
+    const pdfBackgroundModel = noteDrawVisual.usesNativeCanvas
+      ? noteDrawVisual.model
+      : eraseNativeNoteDrawInkFromCanvasModel(noteDrawVisual.model);
+    // A native NoteDraw surface already contains the authoritative rasterized
+    // strokes. Keep the PDF annotation layer only for the persisted-data
+    // fallback, where the generated canvas was removed before rendering. If we
+    // emit /Ink on top of a native surface, any small coordinate mismatch in
+    // the erase pass produces the same stroke twice (one correct, one warped).
+    const pdfInkStrokes = noteDrawVisual.usesNativeCanvas
+      ? []
+      : (model.noteDrawInkStrokes ?? []);
     const visualModel = {
       ...pdfBackgroundModel,
       textFragments: rasterTextFragments
@@ -4070,7 +4080,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pxToPt: model.pxToPt,
         contentTopInsetPx: model.bodyTopInsetPx
       });
-      drawNoteDrawInkAnnotationLayer(pdfPage, model.noteDrawInkStrokes ?? [], {
+      drawNoteDrawInkAnnotationLayer(pdfPage, pdfInkStrokes, {
         pageTopPx,
         pageBottomPx,
         pageHeightPt: model.pageHeightPt,
@@ -4112,7 +4122,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
     const noteDrawVisual = preferNativeNoteDrawCanvas(model);
-    const visualModel = eraseNativeNoteDrawInkFromCanvasModel(noteDrawVisual.model);
+    const visualModel = noteDrawVisual.usesNativeCanvas
+      ? noteDrawVisual.model
+      : eraseNativeNoteDrawInkFromCanvasModel(noteDrawVisual.model);
+    const pdfInkStrokes = noteDrawVisual.usesNativeCanvas
+      ? []
+      : (model.noteDrawInkStrokes ?? []);
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
@@ -4138,7 +4153,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         pxToPt: model.pxToPt,
         contentTopInsetPx: model.bodyTopInsetPx
       });
-      drawNoteDrawInkAnnotationLayer(pdfPage, model.noteDrawInkStrokes ?? [], {
+      drawNoteDrawInkAnnotationLayer(pdfPage, pdfInkStrokes, {
         pageTopPx: model.pageBreaks[index],
         pageBottomPx: model.pageBreaks[index + 1],
         pageHeightPt: model.pageHeightPt,
@@ -4169,8 +4184,19 @@ export default class MobilePdfExporterPlugin extends Plugin {
         : this.renderPreviewToSelectablePdf(file, model, signal);
     }
     if (format === "png") {
-      const visualModel = preferNativeNoteDrawCanvas(model).model;
-      const pages = await this.renderModelPagesToPng(visualModel, signal, true, true);
+      const noteDrawVisual = preferNativeNoteDrawCanvas(model);
+      // A live NoteDraw canvas already contains the authoritative ink. Drawing
+      // the persisted strokes on top would create the same two-layer ghosting
+      // that the PDF path avoids. Generated fallback canvases are stripped by
+      // preferNativeNoteDrawCanvas(), so those still receive one explicit ink
+      // raster pass.
+      const pages = await this.renderModelPagesToPng(
+        noteDrawVisual.model,
+        signal,
+        true,
+        true,
+        !noteDrawVisual.usesNativeCanvas
+      );
       return combinePngPages(pages);
     }
     const needsExplicitNoteDraw = format === "docx" || format === "pptx";
@@ -4204,7 +4230,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     model: PreviewPdfModel,
     signal?: AbortSignal,
     includeText = true,
-    includeDecorations = true
+    includeDecorations = true,
+    includeNoteDraw = true
   ): Promise<Uint8Array[]> {
     const pages: Uint8Array[] = [];
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
@@ -4214,7 +4241,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         rasterScale: this.settings.imageRasterScale,
         includeText,
         includeDecorations,
-        includeNoteDraw: true
+        includeNoteDraw
       }));
       await nextAnimationFrame();
     }
@@ -8478,16 +8505,26 @@ function appendSurfaceCapture(
   ].join("|"));
 
   const canvases = snapshot.canvasFragments.map(offsetRect);
-  appendUnique(target.canvasFragments, canvases, seen.canvases, (fragment) => [
-    geometryKey(fragment),
-    fragment.element.className,
-    fragment.element.width,
-    fragment.element.height,
-    fragment.sourceLeftPx,
-    fragment.sourceTopPx,
-    fragment.sourceRightPx,
-    fragment.sourceBottomPx
-  ].join("|"));
+  appendUnique(target.canvasFragments, canvases, seen.canvases, (fragment) => {
+    // NoteDraw renders below-Markdown strokes on an underlay canvas and the
+    // remaining drawing on a static canvas. They intentionally share the same
+    // geometry, so the class name cannot be part of the identity when a
+    // renderer accidentally exposes the same pixels in both layers. Keep
+    // genuinely different layers (their sampled pixels differ), but collapse
+    // an exact visual duplicate before it reaches the raster/PDF pipeline.
+    const native = isNativeNoteDrawCanvasFragment(fragment);
+    return [
+      native ? "native-notedraw" : "canvas",
+      geometryKey(fragment),
+      fragment.element.width,
+      fragment.element.height,
+      fragment.sourceLeftPx,
+      fragment.sourceTopPx,
+      fragment.sourceRightPx,
+      fragment.sourceBottomPx,
+      native ? getCanvasVisualSignature(fragment.element) : fragment.element.className
+    ].join("|");
+  });
 
   const links = snapshot.linkFragments.map(offsetRect);
   appendUnique(target.linkFragments, links, seen.links, (fragment) => `${geometryKey(fragment)}|${fragment.href}`);
@@ -12549,11 +12586,50 @@ function isNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
 
 function isNativeNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
   const canvas = fragment.element;
+  // These canvases are generated by MPE when NoteDraw's live surface is not
+  // available. They deliberately carry the NoteDraw class so the normal
+  // capture/exclusion rules see them, but they are already populated from the
+  // persisted strokes and must never be treated as a second native layer.
+  if (isGeneratedNoteDrawCanvasFragment(fragment)) {
+    return false;
+  }
   if (canvas.matches(".notedraw-underlay-canvas, .notedraw-static-canvas")) return true;
   // The interactive canvas is authoritative only when it has a real backing
   // store. NoteDraw intentionally keeps an idle 1x1 canvas beside its static
   // layers, which must not disable the persisted-data fallback.
   return canvas.matches(".notedraw-canvas") && canvas.width > 1 && canvas.height > 1;
+}
+
+function getCanvasVisualSignature(canvas: HTMLCanvasElement): string {
+  const width = Math.max(1, canvas.width);
+  const height = Math.max(1, canvas.height);
+  const sampleWidth = Math.min(32, width);
+  const sampleHeight = Math.min(32, height);
+  try {
+    const sample = createCanvas(canvas.ownerDocument);
+    sample.width = sampleWidth;
+    sample.height = sampleHeight;
+    const context = sample.getContext("2d", { willReadFrequently: true });
+    if (!context) return `${width}x${height}:no-context`;
+    context.drawImage(canvas, 0, 0, sampleWidth, sampleHeight);
+    const data = context.getImageData(0, 0, sampleWidth, sampleHeight).data;
+    // FNV-1a over quantized RGBA keeps this cheap while distinguishing the
+    // usual underlay/static cases; exact pixel identity is not required here.
+    let hash = 2166136261;
+    for (let index = 0; index < data.length; index += 4) {
+      hash ^= data[index] >> 4;
+      hash = Math.imul(hash, 16777619);
+      hash ^= data[index + 1] >> 4;
+      hash = Math.imul(hash, 16777619);
+      hash ^= data[index + 2] >> 4;
+      hash = Math.imul(hash, 16777619);
+      hash ^= data[index + 3] >> 4;
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${width}x${height}:${(hash >>> 0).toString(16)}`;
+  } catch {
+    return `${width}x${height}:unavailable`;
+  }
 }
 
 function measureNoteDrawInkSurfaceOffset(host: HTMLElement): { x: number; y: number } {
@@ -12598,6 +12674,9 @@ function preferNativeNoteDrawCanvas(
     return {
       model: {
         ...model,
+        canvasFragments: model.canvasFragments.filter((fragment) => (
+          isNativeNoteDrawCanvasFragment(fragment) || !isGeneratedNoteDrawCanvasFragment(fragment)
+        )),
         noteDrawElements: []
       },
       usesNativeCanvas: true
@@ -12614,6 +12693,12 @@ function preferNativeNoteDrawCanvas(
       : model,
     usesNativeCanvas: false
   };
+}
+
+function isGeneratedNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
+  return fragment.element.matches(
+    ".mobile-pdf-exporter-note-doodle-canvas, .mobile-pdf-exporter-live-drawing-canvas, .notedraw-export-image-canvas"
+  );
 }
 
 function eraseNativeNoteDrawInkFromCanvasModel(model: PreviewPdfModel): PreviewPdfModel {

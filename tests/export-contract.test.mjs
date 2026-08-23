@@ -170,7 +170,7 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /const needsExplicitNoteDraw = format === "docx" \|\| format === "pptx"/);
   assert.match(source, /function preferNativeNoteDrawCanvas\(\s*model: PreviewPdfModel\s*\): \{ model: PreviewPdfModel; usesNativeCanvas: boolean \}/);
   assert.match(source, /const usesNativeCanvas = model\.canvasFragments\.some\(isNativeNoteDrawCanvasFragment\)/);
-  assert.match(source, /noteDrawInkStrokes: \[\],\s*noteDrawElements: \[\]/);
+  assert.match(source, /canvasFragments: model\.canvasFragments\.filter\(\(fragment\) => !isNoteDrawCanvasFragment\(fragment\)\)/);
   assert.match(source, /return buildEditablePptx\(file, pageModel, \{/);
   assert.match(source, /return buildEditableDocx\(file, pageModel, \{/);
   assert.doesNotMatch(source, /\(format === "docx" \|\| format === "pptx"\)[\s\S]{0,160}?renderMarkdownPreview/);
@@ -336,11 +336,11 @@ test("PDF NoteDraw ink uses continuous canvas coordinates without a burned dupli
   assert.match(source, /const sourceX = mapped\.x \+ \(flow \? 0 : inkSurfaceOffsetX\)/);
   assert.match(source, /const sourceY = mapped\.y \+ \(flow \? 0 : inkSurfaceOffsetY\)/);
   assert.doesNotMatch(projection, /mapNoteDrawLineToDomY\(/);
-  assert.match(source, /function eraseNativeNoteDrawInkFromCanvasModel\(model: PreviewPdfModel\)/);
-  assert.match(source, /if \(!isNativeNoteDrawCanvasFragment\(fragment\)\) return fragment/);
-  assert.match(source, /context\.globalCompositeOperation = "destination-out"/);
-  assert.match(source, /const pdfBackgroundModel = noteDrawVisual\.usesNativeCanvas\s*\?\s*noteDrawVisual\.model\s*:\s*eraseNativeNoteDrawInkFromCanvasModel\(noteDrawVisual\.model\)/);
-  assert.match(source, /const visualModel = noteDrawVisual\.usesNativeCanvas\s*\?\s*noteDrawVisual\.model\s*:\s*eraseNativeNoteDrawInkFromCanvasModel\(noteDrawVisual\.model\)/);
+  assert.doesNotMatch(source, /function eraseNativeNoteDrawInkFromCanvasModel\(/);
+  assert.doesNotMatch(source, /globalCompositeOperation = "destination-out"/);
+  assert.match(source, /const pdfBackgroundModel = noteDrawVisual\.model/);
+  assert.match(source, /const visualModel = noteDrawVisual\.model/);
+  assert.match(source, /const pdfInkStrokes = model\.noteDrawInkStrokes \?\? \[\]/);
 });
 
 test("generated NoteDraw fallback canvases do not get mistaken for native ink layers", async () => {
@@ -349,15 +349,17 @@ test("generated NoteDraw fallback canvases do not get mistaken for native ink la
   assert.match(source, /function isGeneratedNoteDrawCanvasFragment\(fragment: CanvasFragment\)/);
   assert.match(source, /function getCanvasVisualSignature\(canvas: HTMLCanvasElement\)/);
   assert.match(source, /native \? getCanvasVisualSignature\(fragment\.element\) : fragment\.element\.className/);
-  assert.match(source, /!noteDrawVisual\.usesNativeCanvas/);
+  assert.match(source, /canvasFragments: model\.canvasFragments\.filter\(\(fragment\) => !isNoteDrawCanvasFragment\(fragment\)\)/);
   assert.match(source, /includeNoteDraw = true/);
 });
 
-test("native NoteDraw raster surfaces do not receive a duplicate PDF Ink layer", async () => {
+test("native NoteDraw surfaces are raster-free and emit one semantic PDF Ink layer", async () => {
   const source = await readFile(sourceUrl, "utf8");
-  assert.match(source, /const pdfInkStrokes = noteDrawVisual\.usesNativeCanvas\s*\?\s*\[\]\s*:\s*\(model\.noteDrawInkStrokes \?\? \[\]\)/);
-  assert.match(source, /const pdfBackgroundModel = noteDrawVisual\.usesNativeCanvas\s*\?\s*noteDrawVisual\.model\s*:\s*eraseNativeNoteDrawInkFromCanvasModel/);
-  assert.match(source, /const visualModel = noteDrawVisual\.usesNativeCanvas\s*\?\s*noteDrawVisual\.model\s*:\s*eraseNativeNoteDrawInkFromCanvasModel/);
+  assert.match(source, /const pdfInkStrokes = model\.noteDrawInkStrokes \?\? \[\]/);
+  assert.match(source, /canvasFragments: model\.canvasFragments\.filter\(\(fragment\) => !isNoteDrawCanvasFragment\(fragment\)\)/);
+  assert.match(source, /noteDrawElements/);
+  assert.doesNotMatch(source, /function eraseNativeNoteDrawInkFromCanvasModel\(/);
+  assert.doesNotMatch(source, /NoteDraw export stopped:/);
   assert.match(source, /drawNoteDrawInkAnnotationLayer\(pdfPage, pdfInkStrokes/);
 });
 

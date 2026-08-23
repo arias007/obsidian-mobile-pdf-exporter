@@ -4023,17 +4023,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const rasterTextFragments = collectVisualRasterTextFragments(model.textFragments);
     const hiddenVisualTextFragments = new Set(rasterTextFragments);
     const noteDrawVisual = preferNativeNoteDrawCanvas(model);
-    const pdfBackgroundModel = noteDrawVisual.usesNativeCanvas
-      ? noteDrawVisual.model
-      : eraseNativeNoteDrawInkFromCanvasModel(noteDrawVisual.model);
-    // A native NoteDraw surface already contains the authoritative rasterized
-    // strokes. Keep the PDF annotation layer only for the persisted-data
-    // fallback, where the generated canvas was removed before rendering. If we
-    // emit /Ink on top of a native surface, any small coordinate mismatch in
-    // the erase pass produces the same stroke twice (one correct, one warped).
-    const pdfInkStrokes = noteDrawVisual.usesNativeCanvas
-      ? []
-      : (model.noteDrawInkStrokes ?? []);
+    const pdfBackgroundModel = noteDrawVisual.model;
+    // The persisted NoteDraw model supplies semantic elements and continuous
+    // freehand paths. The live raster canvas is intentionally excluded so the
+    // PDF contains one editable Ink layer and no burned duplicate.
+    const pdfInkStrokes = model.noteDrawInkStrokes ?? [];
     const visualModel = {
       ...pdfBackgroundModel,
       textFragments: rasterTextFragments
@@ -4122,12 +4116,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
     pdfDoc.setTitle(file.basename);
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
     const noteDrawVisual = preferNativeNoteDrawCanvas(model);
-    const visualModel = noteDrawVisual.usesNativeCanvas
-      ? noteDrawVisual.model
-      : eraseNativeNoteDrawInkFromCanvasModel(noteDrawVisual.model);
-    const pdfInkStrokes = noteDrawVisual.usesNativeCanvas
-      ? []
-      : (model.noteDrawInkStrokes ?? []);
+    const visualModel = noteDrawVisual.model;
+    const pdfInkStrokes = model.noteDrawInkStrokes ?? [];
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
@@ -4185,17 +4175,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
     if (format === "png") {
       const noteDrawVisual = preferNativeNoteDrawCanvas(model);
-      // A live NoteDraw canvas already contains the authoritative ink. Drawing
-      // the persisted strokes on top would create the same two-layer ghosting
-      // that the PDF path avoids. Generated fallback canvases are stripped by
-      // preferNativeNoteDrawCanvas(), so those still receive one explicit ink
-      // raster pass.
       const pages = await this.renderModelPagesToPng(
         noteDrawVisual.model,
         signal,
         true,
         true,
-        !noteDrawVisual.usesNativeCanvas
+        true
       );
       return combinePngPages(pages);
     }
@@ -12664,20 +12649,14 @@ function preferNativeNoteDrawCanvas(
 ): { model: PreviewPdfModel; usesNativeCanvas: boolean } {
   const usesNativeCanvas = model.canvasFragments.some(isNativeNoteDrawCanvasFragment);
   if (usesNativeCanvas) {
-    // NoteDraw has already projected every stroke, highlight, box, label and
-    // connector into the current reading-view geometry. Preserve those pixels
-    // as one rigid surface instead of projecting individual points again; the
-    // latter deforms strokes whenever their anchors span multiple Markdown lines.
-    // The old raster-only fallback used noteDrawInkStrokes: [], noteDrawElements: [];
-    // Keep the semantic elements suppressed here, but retain Ink strokes for
-    // the generic PDF annotation layer below.
+    // The live surface is a raster copy of data that is already available in
+    // the persisted NoteDraw model. Remove every NoteDraw canvas so freehand
+    // paths can be emitted as editable PDF Ink and boxes/text/connectors use
+    // the semantic element renderer exactly once.
     return {
       model: {
         ...model,
-        canvasFragments: model.canvasFragments.filter((fragment) => (
-          isNativeNoteDrawCanvasFragment(fragment) || !isGeneratedNoteDrawCanvasFragment(fragment)
-        )),
-        noteDrawElements: []
+        canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment))
       },
       usesNativeCanvas: true
     };
@@ -12699,63 +12678,6 @@ function isGeneratedNoteDrawCanvasFragment(fragment: CanvasFragment): boolean {
   return fragment.element.matches(
     ".mobile-pdf-exporter-note-doodle-canvas, .mobile-pdf-exporter-live-drawing-canvas, .notedraw-export-image-canvas"
   );
-}
-
-function eraseNativeNoteDrawInkFromCanvasModel(model: PreviewPdfModel): PreviewPdfModel {
-  const strokes = model.noteDrawInkStrokes ?? [];
-  if (!strokes.length || !model.canvasFragments.some(isNativeNoteDrawCanvasFragment)) return model;
-
-  let changed = false;
-  const canvasFragments = model.canvasFragments.map((fragment) => {
-    if (!isNativeNoteDrawCanvasFragment(fragment)) return fragment;
-
-    const cssWidth = Math.max(1, fragment.right - fragment.left);
-    const cssHeight = Math.max(1, fragment.bottom - fragment.top);
-    const sourceWidth = Math.max(1, fragment.sourceRightPx - fragment.sourceLeftPx);
-    const sourceHeight = Math.max(1, fragment.sourceBottomPx - fragment.sourceTopPx);
-    const ratioX = sourceWidth / cssWidth;
-    const ratioY = sourceHeight / cssHeight;
-    const canvas = snapshotCanvasElement(fragment.element);
-    const context = canvas.getContext("2d");
-    if (!context) return fragment;
-
-    context.save();
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.globalCompositeOperation = "destination-out";
-    context.globalAlpha = 1;
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    context.strokeStyle = "#000";
-
-    for (const stroke of strokes) {
-      if (!stroke.points.length) continue;
-      const strokeWidth = Math.max(0.5, stroke.widthPx);
-      const offsets = stroke.brush === "watercolor"
-        ? getNoteDoodlePenOffsets(Math.max(2, stroke.count + 1), strokeWidth * 0.85)
-        : getNoteDoodlePenOffsets(stroke.count, strokeWidth);
-      const visualWidth = stroke.brush === "watercolor" ? strokeWidth * 2.15 : strokeWidth;
-      // Two CSS pixels on either side remove antialiasing without touching
-      // unrelated NoteDraw elements beyond the original freehand path.
-      context.lineWidth = (visualWidth + 4) * Math.max(ratioX, ratioY);
-
-      for (const offset of offsets) {
-        context.beginPath();
-        stroke.points.forEach((point, index) => {
-          const x = fragment.sourceLeftPx + (point.x + offset.x - fragment.left) * ratioX;
-          const y = fragment.sourceTopPx + (point.y + offset.y - fragment.top) * ratioY;
-          if (index === 0) context.moveTo(x, y);
-          else context.lineTo(x, y);
-        });
-        context.stroke();
-      }
-    }
-
-    context.restore();
-    changed = true;
-    return { ...fragment, element: canvas };
-  });
-
-  return changed ? { ...model, canvasFragments } : model;
 }
 
 function drawCanvasDecorationLayer(

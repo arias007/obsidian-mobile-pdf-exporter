@@ -504,7 +504,9 @@ test("PptxGenJS is bundled in browser mode for the Electron renderer", async () 
   assert.match(config, /name: "pptxgen-browser-runtime"/);
   assert.match(config, /const isNode = false;/);
   assert.match(config, /if \(replacements !== 2\)/);
-  assert.match(config, /plugins: \[pptxGenBrowserRuntime, safeZipSchedulers\]/);
+  assert.match(config, /plugins: \[pptxGenBrowserRuntime, safeZipSchedulers, safePdfjsRuntime\]/);
+  assert.match(config, /name: "safe-pdfjs-runtime"/);
+  assert.match(config, /pdfjs-dist.*legacy.*build/s);
 });
 
 test("the release bundle contains no dynamic code or script injection", async () => {

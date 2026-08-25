@@ -94,6 +94,65 @@ const safeZipSchedulers = {
   }
 };
 
+const safePdfjsRuntime = {
+  name: "safe-pdfjs-runtime",
+  setup(build) {
+    build.onLoad(
+      { filter: /[\\/]node_modules[\\/]pdfjs-dist[\\/]legacy[\\/]build[\\/]pdf(?:\.worker)?\.mjs$/ },
+      async (args) => {
+        const source = await readFile(args.path, "utf8");
+        const isWorker = args.path.endsWith("pdf.worker.mjs");
+        if (!isWorker) {
+          const matches = source.match(/new\s+Function\(\s*""\s*\)/gu) ?? [];
+          if (matches.length !== 1) {
+            throw new Error(`Expected one PDF.js eval probe, found ${matches.length}.`);
+          }
+          return {
+            contents: source.replace(/new\s+Function\(\s*""\s*\)/u, "(() => {})"),
+            loader: "js"
+          };
+        }
+
+        let contents = replaceExactly(
+          source,
+          /return\s+Function\('return require\("'\s*\+\s*name\s*\+\s*'"\)'\)\(\);/u,
+          () => "return undefined;",
+          1,
+          "PDF.js Node require fallback"
+        );
+        contents = replaceExactly(
+          contents,
+          /Function\('return this'\)\(\)/u,
+          () => "undefined",
+          1,
+          "PDF.js global object fallback"
+        );
+        contents = replaceExactly(
+          contents,
+          /function isEvalSupported\(\) \{\s*try \{\s*new Function\(""\);\s*return true;\s*\} catch \{\s*return false;\s*\}\s*\}/u,
+          () => "function isEvalSupported() { return false; }",
+          1,
+          "PDF.js eval capability probe"
+        );
+        contents = replaceExactly(
+          contents,
+          /return new Function\("src", "srcOffset", "dest", "destOffset", compiled\);/u,
+          () => "throw new Error(\"Dynamic PDF function compilation is disabled.\");",
+          1,
+          "PDF.js PostScript compiler"
+        );
+        if (/\b(?:eval|Function)\s*\(/u.test(contents)) {
+          throw new Error("PDF.js worker still contains dynamic code execution.");
+        }
+        return {
+          contents,
+          loader: "js"
+        };
+      }
+    );
+  }
+};
+
 const context = await esbuild.context({
   banner: {
     js: "/* Mobile PDF Exporter for Obsidian */"
@@ -127,7 +186,7 @@ const context = await esbuild.context({
   minify: prod,
   outfile: "main.js",
   platform: "browser",
-  plugins: [pptxGenBrowserRuntime, safeZipSchedulers],
+  plugins: [pptxGenBrowserRuntime, safeZipSchedulers, safePdfjsRuntime],
   sourcemap: prod ? false : "inline",
   target: "es2021",
   treeShaking: true

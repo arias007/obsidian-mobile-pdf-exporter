@@ -22,6 +22,10 @@ import {
 } from "pdf-lib";
 import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+// pdfjs-dist does not publish a declaration for its worker entry. The build
+// sanitizes and bundles this worker so community installs need only main.js.
+// @ts-expect-error pdfjs-dist worker entry has no published TypeScript declaration.
+import * as pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import embeddedCjkFontGzipBase64 from "../fonts/NotoSansSC-Regular.gb2312-subset.ttf.gz";
 import embeddedLatinFontGzipBase64 from "../fonts/NotoSans-Regular.ttf.gz";
 import embeddedArabicFontGzipBase64 from "../fonts/NotoSansArabic-Regular.ttf.gz";
@@ -2394,6 +2398,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
   async onload(): Promise<void> {
     this.settings = normalizeSettings(await this.loadData());
+    const workerGlobal = globalThis as typeof globalThis & { pdfjsWorker?: unknown };
+    workerGlobal.pdfjsWorker ??= pdfjsWorker;
 
     this.ribbonIconEl = this.addRibbonIcon("file-output", this.t("ribbonTitle"), () => {
       void this.exportCurrentFile();

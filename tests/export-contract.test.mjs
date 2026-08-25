@@ -40,7 +40,7 @@ test("external and internal links produce PDF URI annotations", async () => {
   assert.match(source, /captureLinkFragments\(rootEl, linkContext\)/);
   assert.match(source, /S:\s*"URI"/);
   assert.match(source, /URI:\s*getPdfStringRuntime\(\)\.of\(target\)/);
-  assert.match(source, /const maxWidth = Math\.max\(1, Math\.min\(availableWidth, measuredWidth\)\)/);
+  assert.match(source, /const maxWidth = measuredWidth/);
   assert.match(source, /context\.rect\([\s\S]*?left,[\s\S]*?measuredWidth,[\s\S]*?fragment\.bottom - fragment\.top/);
   assert.match(source, /context\.clip\(\)/);
 });
@@ -447,6 +447,45 @@ test("scaled live surfaces stay horizontally centered at every content scale", a
   assert.match(source, /computeCenteredSurfaceOffset\(\s*usableWidthPx,\s*scaledContentWidthPx,\s*horizontalInsetPx\s*\)/);
   assert.match(source, /transformSurfaceCapture\(captured, centeredOffsetPx, surfaceScale\)/);
   assert.match(source, /offsetX: centeredOffsetPx/);
+});
+
+test("PDF text keeps line endings visible and normalizes Arabic copy mappings", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const text = await import("../src/pdf-text.ts");
+
+  assert.equal(text.getTextFragmentPaintWidth(100, 180, 16, 800), 87.2);
+  assert.equal(text.getTextFragmentPaintWidth(780, 800, 16, 800), 20);
+  const cmap = [
+    "beginbfchar",
+    "<0001> <FEA2>",
+    "<0002> <FEE0>",
+    "<0003> <0041>",
+    "endbfchar"
+  ].join("\n");
+  const normalized = text.normalizePdfToUnicodeCMap(cmap);
+  assert.match(normalized, /<0001> <062D>/);
+  assert.match(normalized, /<0002> <0644>/);
+  assert.match(normalized, /<0003> <0041>/);
+  assert.match(source, /normalizePdfToUnicodeMaps\(pdfDoc, \{ PDFName, decodePDFRawStream \}\)/);
+  assert.match(source, /getTextFragmentPaintWidth\(/);
+  assert.match(source, /const clipLeft = fragment\.direction === "rtl"/);
+  assert.match(source, /!\/\^var\\\(/iu);
+});
+
+test("mobile preview uses in-panel PNG pages and never opens a share sheet", async () => {
+  const [source, styles] = await Promise.all([
+    readFile(sourceUrl, "utf8"),
+    readFile(stylesUrl, "utf8")
+  ]);
+
+  assert.match(source, /async renderPreviewPngBlobs\(/);
+  assert.match(source, /const blobs = await this\.plugin\.renderPreviewPngBlobs\(/);
+  assert.match(source, /cls: "mobile-pdf-exporter-preview-page"/);
+  assert.match(styles, /\.mobile-pdf-exporter-preview-page\s*\{/);
+  assert.doesNotMatch(source, /navigator\.share/);
+  assert.doesNotMatch(source, /shareAfterExport/);
+  assert.doesNotMatch(source, /shareFileIfAvailable/);
+  assert.doesNotMatch(source, /cls: "mobile-pdf-exporter-preview-frame"/);
 });
 
 test("PptxGenJS is bundled in browser mode for the Electron renderer", async () => {

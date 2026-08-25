@@ -23,6 +23,7 @@ import embeddedThaiFontGzipBase64 from "../fonts/NotoSansThai-Regular.ttf.gz";
 import supportCode1Base64 from "./generated/support-code-1.jpg";
 import supportCode2Base64 from "./generated/support-code-2.png";
 import { computeCenteredSurfaceOffset } from "./surface-layout";
+import { getTextFragmentPaintWidth, normalizePdfToUnicodeCMap } from "./pdf-text";
 
 const UI_LANGUAGES = [
   "auto",
@@ -228,7 +229,6 @@ interface MobilePdfExporterSettings {
   headerText: string;
   footerText: string;
   rememberLastExportOptions: boolean;
-  shareAfterExport: boolean;
   openAfterExport: boolean;
   noteExportMode: NotePdfExportMode;
   pagePreset: PdfPagePreset;
@@ -729,7 +729,6 @@ const UI_TEXT = {
     footerTextDesc: "留空关闭；支持 {title}、{page}、{pages}、{date}。",
     openAfterExportName: "导出后打开",
     openAfterExportDesc: "导出完成后自动打开生成的文件。",
-    shareAfterExportName: "导出后分享",
     rememberLastExportOptionsName: "使用上次导出选项",
     rememberLastExportOptionsDesc: "默认开启。每次成功开始导出时保存本次选项，供下次直接使用。",
     outputLocationName: "导出位置",
@@ -761,7 +760,6 @@ const UI_TEXT = {
     pageSizeDesc: "手机长页适合手机阅读；A4/A5/Letter 适合打印和归档。",
     orientationDesc: "横向会交换页面宽高。",
     colorDesc: "灰度适合打印、减小颜色干扰；彩色会保留主题色、链接色和图片颜色。",
-    settingsSaveAndShareHeading: "保存和分享",
     languageName: "界面语言",
     languageDesc: "Auto 会跟随 Obsidian 语言；导出按钮、菜单、命令、选项面板和提示会使用所选语言。",
     languageAuto: "Auto / 跟随 Obsidian",
@@ -770,7 +768,6 @@ const UI_TEXT = {
     formatPngLabel: "PNG 图片",
     codesTitle: "给我买咖啡",
     codesSubtitle: "如果这个插件帮到你，可以扫码打赏支持继续维护。",
-    shareFailedNotice: "PDF 已保存，但系统分享面板没有打开。",
     fontMissingError: "缺少 PDF 中文字体，且无法从 GitHub 下载字体。请联网后重试，或把 NotoSansSC-Regular.gb2312-subset.ttf 放入插件目录的 fonts 文件夹。",
     uniqueFileNameError: "无法生成唯一 PDF 文件名。",
     excalidrawApiMissingError: "没有找到 Excalidraw 导出接口，请确认 Excalidraw 插件已启用。",
@@ -819,7 +816,6 @@ const UI_TEXT = {
     footerTextDesc: "Leave blank to disable. Supports {title}, {page}, {pages}, and {date}.",
     openAfterExportName: "Open after export",
     openAfterExportDesc: "Open the generated file when export finishes.",
-    shareAfterExportName: "Show mobile share sheet",
     rememberLastExportOptionsName: "Use last export options",
     rememberLastExportOptionsDesc: "Enabled by default. Saves the options used for this export for next time.",
     outputLocationName: "Export location",
@@ -851,7 +847,6 @@ const UI_TEXT = {
     pageSizeDesc: "Mobile long page is good for phone reading. A4/A5/Letter are useful for printing and archiving.",
     orientationDesc: "Landscape swaps the page width and height.",
     colorDesc: "Grayscale is useful for printing; color keeps theme colors, link colors, and image colors.",
-    settingsSaveAndShareHeading: "Save and share",
     languageName: "Interface language",
     languageDesc: "Auto follows Obsidian's language. Export buttons, menus, commands, options, and prompts use the selected language.",
     languageAuto: "Auto / follow Obsidian",
@@ -860,7 +855,6 @@ const UI_TEXT = {
     formatPngLabel: "PNG image",
     codesTitle: "Buy me a coffee",
     codesSubtitle: "If this tool helps, tips are appreciated and support ongoing maintenance.",
-    shareFailedNotice: "The PDF was saved, but the system share sheet did not open.",
     fontMissingError: "Missing PDF font, and the plugin could not download it from GitHub. Try again online, or place NotoSansSC-Regular.gb2312-subset.ttf in the plugin fonts folder.",
     uniqueFileNameError: "Could not generate a unique PDF filename.",
     excalidrawApiMissingError: "Excalidraw export API was not found. Make sure the Excalidraw plugin is enabled.",
@@ -909,7 +903,6 @@ const UI_TEXT = {
     footerTextDesc: "空欄で無効。{title}、{page}、{pages}、{date} を使用できます。",
     openAfterExportName: "書き出し後に開く",
     openAfterExportDesc: "書き出し完了後に生成ファイルを開きます。",
-    shareAfterExportName: "書き出し後に共有",
     rememberLastExportOptionsName: "前回の書き出し設定を使用",
     rememberLastExportOptionsDesc: "既定で有効。今回の設定を次回用に保存します。",
     outputLocationName: "保存先",
@@ -941,7 +934,6 @@ const UI_TEXT = {
     pageSizeDesc: "モバイル長ページはスマートフォン向け、A4/A5/Letterは印刷と保管向けです。",
     orientationDesc: "横向きではページの幅と高さを入れ替えます。",
     colorDesc: "グレースケールは印刷向け、カラーはテーマ・リンク・画像の色を保持します。",
-    settingsSaveAndShareHeading: "保存と共有",
     languageName: "表示言語",
     languageDesc: "自動ではObsidianの言語に従います。ボタン、メニュー、コマンド、オプション、通知に選択言語を使います。",
     languageAuto: "自動 / Obsidianに従う",
@@ -950,7 +942,6 @@ const UI_TEXT = {
     formatPngLabel: "PNG画像",
     codesTitle: "コーヒーをおごる",
     codesSubtitle: "このツールが役立った場合、継続的なメンテナンスへの支援を歓迎します。",
-    shareFailedNotice: "PDFは保存されましたが、システムの共有画面を開けませんでした。",
     fontMissingError: "PDFフォントがなく、GitHubからも取得できませんでした。オンラインで再試行するか、NotoSansSC-Regular.gb2312-subset.ttf をプラグインのfontsフォルダーに置いてください。",
     uniqueFileNameError: "一意のPDFファイル名を生成できませんでした。",
     excalidrawApiMissingError: "Excalidrawの書き出しAPIが見つかりません。Excalidrawプラグインが有効か確認してください。",
@@ -999,7 +990,6 @@ const UI_TEXT = {
     footerTextDesc: "비워 두면 꺼집니다. {title}, {page}, {pages}, {date}를 지원합니다.",
     openAfterExportName: "내보낸 뒤 열기",
     openAfterExportDesc: "내보내기가 끝나면 생성된 파일을 엽니다.",
-    shareAfterExportName: "내보낸 뒤 공유",
     rememberLastExportOptionsName: "마지막 내보내기 옵션 사용",
     rememberLastExportOptionsDesc: "기본적으로 켜집니다. 이번 옵션을 다음 내보내기에 사용하도록 저장합니다.",
     outputLocationName: "저장 위치",
@@ -1031,7 +1021,6 @@ const UI_TEXT = {
     pageSizeDesc: "모바일 긴 페이지는 휴대폰 읽기에, A4/A5/Letter는 인쇄와 보관에 적합합니다.",
     orientationDesc: "가로 방향은 페이지 너비와 높이를 바꿉니다.",
     colorDesc: "회색조는 인쇄에 적합하고 컬러는 테마, 링크, 이미지 색상을 유지합니다.",
-    settingsSaveAndShareHeading: "저장 및 공유",
     languageName: "인터페이스 언어",
     languageDesc: "자동은 Obsidian 언어를 따릅니다. 버튼, 메뉴, 명령, 옵션, 알림에 선택한 언어를 사용합니다.",
     languageAuto: "자동 / Obsidian 언어 따르기",
@@ -1040,7 +1029,6 @@ const UI_TEXT = {
     formatPngLabel: "PNG 이미지",
     codesTitle: "커피 한 잔 후원",
     codesSubtitle: "이 도구가 유용했다면 지속적인 유지 관리를 위한 후원을 환영합니다.",
-    shareFailedNotice: "PDF는 저장되었지만 시스템 공유 창을 열지 못했습니다.",
     fontMissingError: "PDF 글꼴이 없고 GitHub에서도 내려받지 못했습니다. 온라인에서 다시 시도하거나 NotoSansSC-Regular.gb2312-subset.ttf를 플러그인의 fonts 폴더에 넣으세요.",
     uniqueFileNameError: "고유한 PDF 파일 이름을 만들 수 없습니다.",
     excalidrawApiMissingError: "Excalidraw 내보내기 API를 찾지 못했습니다. Excalidraw 플러그인이 켜져 있는지 확인하세요.",
@@ -1089,7 +1077,6 @@ const UI_TEXT = {
     footerTextDesc: "Déjalo vacío para desactivarlo. Admite {title}, {page}, {pages} y {date}.",
     openAfterExportName: "Abrir después de exportar",
     openAfterExportDesc: "Abre el archivo generado cuando termina la exportación.",
-    shareAfterExportName: "Compartir después de exportar",
     rememberLastExportOptionsName: "Usar las últimas opciones",
     rememberLastExportOptionsDesc: "Activado de forma predeterminada. Guarda estas opciones para la próxima exportación.",
     outputLocationName: "Ubicación de exportación",
@@ -1121,7 +1108,6 @@ const UI_TEXT = {
     pageSizeDesc: "La página móvil larga es adecuada para teléfonos; A4/A5/Letter sirven para imprimir y archivar.",
     orientationDesc: "La orientación horizontal intercambia el ancho y el alto.",
     colorDesc: "La escala de grises es útil para imprimir; el color conserva los colores del tema, enlaces e imágenes.",
-    settingsSaveAndShareHeading: "Guardar y compartir",
     languageName: "Idioma de la interfaz",
     languageDesc: "Automático sigue el idioma de Obsidian. Los botones, menús, comandos, opciones y avisos usan el idioma elegido.",
     languageAuto: "Automático / seguir Obsidian",
@@ -1130,7 +1116,6 @@ const UI_TEXT = {
     formatPngLabel: "Imagen PNG",
     codesTitle: "Invítame a un café",
     codesSubtitle: "Si esta herramienta te ayuda, puedes apoyar su mantenimiento continuo.",
-    shareFailedNotice: "El PDF se guardó, pero no se abrió el panel de compartir del sistema.",
     fontMissingError: "Falta la fuente PDF y no pudo descargarse de GitHub. Reinténtalo con conexión o coloca NotoSansSC-Regular.gb2312-subset.ttf en la carpeta fonts del complemento.",
     uniqueFileNameError: "No se pudo generar un nombre de PDF único.",
     excalidrawApiMissingError: "No se encontró la API de exportación de Excalidraw. Comprueba que el complemento Excalidraw esté activado.",
@@ -1179,7 +1164,6 @@ const UI_TEXT = {
     footerTextDesc: "Laissez vide pour désactiver. Accepte {title}, {page}, {pages} et {date}.",
     openAfterExportName: "Ouvrir après l’export",
     openAfterExportDesc: "Ouvre le fichier généré à la fin de l’export.",
-    shareAfterExportName: "Partager après l’export",
     rememberLastExportOptionsName: "Utiliser les dernières options",
     rememberLastExportOptionsDesc: "Activé par défaut. Enregistre ces options pour le prochain export.",
     outputLocationName: "Emplacement d’export",
@@ -1211,7 +1195,6 @@ const UI_TEXT = {
     pageSizeDesc: "La page mobile longue convient au téléphone ; A4/A5/Letter conviennent à l’impression et à l’archivage.",
     orientationDesc: "Le mode paysage inverse la largeur et la hauteur.",
     colorDesc: "Les niveaux de gris conviennent à l’impression ; la couleur conserve les couleurs du thème, des liens et des images.",
-    settingsSaveAndShareHeading: "Enregistrer et partager",
     languageName: "Langue de l’interface",
     languageDesc: "Automatique suit la langue d’Obsidian. Les boutons, menus, commandes, options et messages utilisent la langue choisie.",
     languageAuto: "Automatique / suivre Obsidian",
@@ -1220,7 +1203,6 @@ const UI_TEXT = {
     formatPngLabel: "Image PNG",
     codesTitle: "Offrez-moi un café",
     codesSubtitle: "Si cet outil vous aide, vous pouvez soutenir sa maintenance continue.",
-    shareFailedNotice: "Le PDF a été enregistré, mais le panneau de partage du système ne s’est pas ouvert.",
     fontMissingError: "La police PDF manque et n’a pas pu être téléchargée depuis GitHub. Réessayez en ligne ou placez NotoSansSC-Regular.gb2312-subset.ttf dans le dossier fonts du module.",
     uniqueFileNameError: "Impossible de générer un nom de fichier PDF unique.",
     excalidrawApiMissingError: "L’API d’export Excalidraw est introuvable. Vérifiez que le module Excalidraw est activé.",
@@ -1269,7 +1251,6 @@ const UI_TEXT = {
     footerTextDesc: "Leer lassen zum Deaktivieren. Unterstützt {title}, {page}, {pages} und {date}.",
     openAfterExportName: "Nach dem Export öffnen",
     openAfterExportDesc: "Öffnet die erzeugte Datei nach Abschluss des Exports.",
-    shareAfterExportName: "Nach dem Export teilen",
     rememberLastExportOptionsName: "Letzte Exportoptionen verwenden",
     rememberLastExportOptionsDesc: "Standardmäßig aktiviert. Speichert diese Optionen für den nächsten Export.",
     outputLocationName: "Exportziel",
@@ -1301,7 +1282,6 @@ const UI_TEXT = {
     pageSizeDesc: "Die lange Mobilseite eignet sich fürs Smartphone; A4/A5/Letter für Druck und Archivierung.",
     orientationDesc: "Querformat vertauscht Seitenbreite und -höhe.",
     colorDesc: "Graustufen eignen sich zum Drucken; Farbe erhält Theme-, Link- und Bildfarben.",
-    settingsSaveAndShareHeading: "Speichern und teilen",
     languageName: "Oberflächensprache",
     languageDesc: "Automatisch folgt der Obsidian-Sprache. Schaltflächen, Menüs, Befehle, Optionen und Hinweise verwenden die gewählte Sprache.",
     languageAuto: "Automatisch / Obsidian folgen",
@@ -1310,7 +1290,6 @@ const UI_TEXT = {
     formatPngLabel: "PNG-Bild",
     codesTitle: "Spendieren Sie mir einen Kaffee",
     codesSubtitle: "Wenn dieses Werkzeug hilft, können Sie die weitere Pflege unterstützen.",
-    shareFailedNotice: "Das PDF wurde gespeichert, aber die Systemfreigabe konnte nicht geöffnet werden.",
     fontMissingError: "Die PDF-Schrift fehlt und konnte nicht von GitHub geladen werden. Versuchen Sie es online erneut oder legen Sie NotoSansSC-Regular.gb2312-subset.ttf im fonts-Ordner des Plugins ab.",
     uniqueFileNameError: "Es konnte kein eindeutiger PDF-Dateiname erzeugt werden.",
     excalidrawApiMissingError: "Die Excalidraw-Export-API wurde nicht gefunden. Prüfen Sie, ob das Excalidraw-Plugin aktiviert ist.",
@@ -1359,7 +1338,6 @@ const UI_TEXT = {
     footerTextDesc: "Оставьте пустым для отключения. Поддерживаются {title}, {page}, {pages} и {date}.",
     openAfterExportName: "Открыть после экспорта",
     openAfterExportDesc: "Открывает созданный файл после завершения экспорта.",
-    shareAfterExportName: "Поделиться после экспорта",
     rememberLastExportOptionsName: "Использовать последние параметры",
     rememberLastExportOptionsDesc: "Включено по умолчанию. Сохраняет эти параметры для следующего экспорта.",
     outputLocationName: "Папка экспорта",
@@ -1391,7 +1369,6 @@ const UI_TEXT = {
     pageSizeDesc: "Длинная мобильная страница удобна для телефона; A4/A5/Letter подходят для печати и архива.",
     orientationDesc: "Альбомная ориентация меняет местами ширину и высоту.",
     colorDesc: "Оттенки серого удобны для печати; цветной режим сохраняет цвета темы, ссылок и изображений.",
-    settingsSaveAndShareHeading: "Сохранение и публикация",
     languageName: "Язык интерфейса",
     languageDesc: "Автоматически следует языку Obsidian. Кнопки, меню, команды, параметры и сообщения используют выбранный язык.",
     languageAuto: "Автоматически / как в Obsidian",
@@ -1400,7 +1377,6 @@ const UI_TEXT = {
     formatPngLabel: "Изображение PNG",
     codesTitle: "Угостить кофе",
     codesSubtitle: "Если инструмент полезен, вы можете поддержать его дальнейшее развитие.",
-    shareFailedNotice: "PDF сохранён, но системное окно публикации не открылось.",
     fontMissingError: "Шрифт PDF отсутствует и не был загружен с GitHub. Повторите попытку с сетью или поместите NotoSansSC-Regular.gb2312-subset.ttf в папку fonts плагина.",
     uniqueFileNameError: "Не удалось создать уникальное имя PDF-файла.",
     excalidrawApiMissingError: "API экспорта Excalidraw не найден. Убедитесь, что плагин Excalidraw включён.",
@@ -1449,7 +1425,6 @@ const UI_TEXT = {
     footerTextDesc: "Deixe em branco para desativar. Suporta {title}, {page}, {pages} e {date}.",
     openAfterExportName: "Abrir após exportar",
     openAfterExportDesc: "Abrir o ficheiro gerado quando a exportação terminar.",
-    shareAfterExportName: "Mostrar painel de partilha do telemóvel",
     rememberLastExportOptionsName: "Usar as últimas opções de exportação",
     rememberLastExportOptionsDesc: "Ativado por predefinição. Guarda estas opções para a próxima exportação.",
     outputLocationName: "Local de exportação",
@@ -1481,7 +1456,6 @@ const UI_TEXT = {
     pageSizeDesc: "A página longa é adequada para leitura no telemóvel. A4/A5/Letter são úteis para impressão e arquivo.",
     orientationDesc: "A orientação horizontal troca a largura e a altura da página.",
     colorDesc: "A escala de cinzentos é útil para impressão; a opção a cores preserva as cores do tema, ligações e imagens.",
-    settingsSaveAndShareHeading: "Guardar e partilhar",
     languageName: "Idioma da interface",
     languageDesc: "Automático segue o idioma do Obsidian. Botões, menus, comandos, opções e avisos usam o idioma selecionado.",
     languageAuto: "Automático / seguir Obsidian",
@@ -1490,7 +1464,6 @@ const UI_TEXT = {
     formatPngLabel: "Imagem PNG",
     codesTitle: "Pague-me um café",
     codesSubtitle: "Se esta ferramenta for útil, os donativos ajudam a manter o desenvolvimento.",
-    shareFailedNotice: "O PDF foi guardado, mas o painel de partilha do sistema não abriu.",
     fontMissingError: "A fonte do PDF está em falta e o plugin não conseguiu transferi-la do GitHub. Tente novamente com ligação à Internet ou coloque NotoSansSC-Regular.gb2312-subset.ttf na pasta fonts do plugin.",
     uniqueFileNameError: "Não foi possível gerar um nome de ficheiro PDF exclusivo.",
     excalidrawApiMissingError: "A API de exportação do Excalidraw não foi encontrada. Confirme que o plugin Excalidraw está ativado.",
@@ -1539,7 +1512,6 @@ const UI_TEXT = {
     footerTextDesc: "Lascia vuoto per disattivare. Supporta {title}, {page}, {pages} e {date}.",
     openAfterExportName: "Apri dopo l'esportazione",
     openAfterExportDesc: "Apri il file generato al termine dell'esportazione.",
-    shareAfterExportName: "Mostra pannello di condivisione mobile",
     rememberLastExportOptionsName: "Usa le ultime opzioni di esportazione",
     rememberLastExportOptionsDesc: "Attivo per impostazione predefinita. Salva queste opzioni per la prossima esportazione.",
     outputLocationName: "Posizione di esportazione",
@@ -1571,7 +1543,6 @@ const UI_TEXT = {
     pageSizeDesc: "La pagina lunga è adatta alla lettura su telefono. A4/A5/Letter sono utili per stampa e archiviazione.",
     orientationDesc: "L'orientamento orizzontale scambia larghezza e altezza della pagina.",
     colorDesc: "La scala di grigi è utile per la stampa; il colore conserva i colori del tema, dei collegamenti e delle immagini.",
-    settingsSaveAndShareHeading: "Salvataggio e condivisione",
     languageName: "Lingua dell'interfaccia",
     languageDesc: "Automatico segue la lingua di Obsidian. Pulsanti, menu, comandi, opzioni e messaggi usano la lingua selezionata.",
     languageAuto: "Automatico / segui Obsidian",
@@ -1580,7 +1551,6 @@ const UI_TEXT = {
     formatPngLabel: "Immagine PNG",
     codesTitle: "Offrimi un caffè",
     codesSubtitle: "Se questo strumento ti è utile, le donazioni sostengono la manutenzione continua.",
-    shareFailedNotice: "Il PDF è stato salvato, ma il pannello di condivisione del sistema non si è aperto.",
     fontMissingError: "Il carattere PDF manca e il plugin non è riuscito a scaricarlo da GitHub. Riprova online oppure inserisci NotoSansSC-Regular.gb2312-subset.ttf nella cartella fonts del plugin.",
     uniqueFileNameError: "Impossibile generare un nome file PDF univoco.",
     excalidrawApiMissingError: "L'API di esportazione di Excalidraw non è stata trovata. Verifica che il plugin Excalidraw sia attivo.",
@@ -1629,7 +1599,6 @@ const UI_TEXT = {
     footerTextDesc: "اتركه فارغاً للتعطيل. يدعم {title} و{page} و{pages} و{date}.",
     openAfterExportName: "فتح بعد التصدير",
     openAfterExportDesc: "افتح الملف الناتج عند اكتمال التصدير.",
-    shareAfterExportName: "إظهار لوحة المشاركة على الهاتف",
     rememberLastExportOptionsName: "استخدام آخر خيارات التصدير",
     rememberLastExportOptionsDesc: "مفعّل افتراضياً. يحفظ خيارات هذا التصدير للاستخدام في المرة القادمة.",
     outputLocationName: "موقع التصدير",
@@ -1661,7 +1630,6 @@ const UI_TEXT = {
     pageSizeDesc: "الصفحة الطويلة مناسبة للقراءة على الهاتف. أحجام A4/A5/Letter مناسبة للطباعة والأرشفة.",
     orientationDesc: "يبدّل الاتجاه الأفقي عرض الصفحة وارتفاعها.",
     colorDesc: "التدرج الرمادي مناسب للطباعة، بينما يحافظ الوضع الملون على ألوان السمة والروابط والصور.",
-    settingsSaveAndShareHeading: "الحفظ والمشاركة",
     languageName: "لغة الواجهة",
     languageDesc: "يتبع الوضع التلقائي لغة Obsidian. تستخدم الأزرار والقوائم والأوامر والخيارات والتنبيهات اللغة المحددة.",
     languageAuto: "تلقائي / اتباع Obsidian",
@@ -1670,7 +1638,6 @@ const UI_TEXT = {
     formatPngLabel: "صورة PNG",
     codesTitle: "اشترِ لي قهوة",
     codesSubtitle: "إذا كانت هذه الأداة مفيدة، فالتبرعات تدعم استمرار صيانتها.",
-    shareFailedNotice: "تم حفظ ملف PDF، لكن لوحة مشاركة النظام لم تفتح.",
     fontMissingError: "خط PDF مفقود وتعذر على الإضافة تنزيله من GitHub. أعد المحاولة مع الاتصال بالإنترنت أو ضع NotoSansSC-Regular.gb2312-subset.ttf في مجلد fonts الخاص بالإضافة.",
     uniqueFileNameError: "تعذر إنشاء اسم فريد لملف PDF.",
     excalidrawApiMissingError: "لم يتم العثور على واجهة تصدير Excalidraw. تأكد من تفعيل إضافة Excalidraw.",
@@ -1719,7 +1686,6 @@ const UI_TEXT = {
     footerTextDesc: "अक्षम करने के लिए खाली छोड़ें। {title}, {page}, {pages} और {date} समर्थित हैं।",
     openAfterExportName: "निर्यात के बाद खोलें",
     openAfterExportDesc: "निर्यात पूरा होने पर बनी फ़ाइल खोलें।",
-    shareAfterExportName: "मोबाइल शेयर पैनल दिखाएँ",
     rememberLastExportOptionsName: "पिछले निर्यात विकल्प उपयोग करें",
     rememberLastExportOptionsDesc: "डिफ़ॉल्ट रूप से चालू। अगली बार के लिए इस निर्यात के विकल्प सहेजता है।",
     outputLocationName: "निर्यात स्थान",
@@ -1751,7 +1717,6 @@ const UI_TEXT = {
     pageSizeDesc: "लंबा मोबाइल पृष्ठ फ़ोन पर पढ़ने के लिए उपयुक्त है। A4/A5/Letter मुद्रण और संग्रह के लिए उपयोगी हैं।",
     orientationDesc: "क्षैतिज अभिमुखता पृष्ठ की चौड़ाई और ऊँचाई बदल देती है।",
     colorDesc: "ग्रेस्केल मुद्रण के लिए उपयोगी है; रंगीन मोड थीम, लिंक और चित्रों के रंग बनाए रखता है।",
-    settingsSaveAndShareHeading: "सहेजना और साझा करना",
     languageName: "इंटरफ़ेस भाषा",
     languageDesc: "स्वचालित विकल्प Obsidian की भाषा का अनुसरण करता है। बटन, मेनू, कमांड, विकल्प और संदेश चुनी हुई भाषा उपयोग करते हैं।",
     languageAuto: "स्वचालित / Obsidian का अनुसरण करें",
@@ -1760,7 +1725,6 @@ const UI_TEXT = {
     formatPngLabel: "PNG चित्र",
     codesTitle: "मुझे एक कॉफ़ी दिलाएँ",
     codesSubtitle: "यदि यह उपकरण उपयोगी है, तो सहयोग इसके निरंतर रखरखाव में मदद करता है।",
-    shareFailedNotice: "PDF सहेजा गया, लेकिन सिस्टम शेयर पैनल नहीं खुला।",
     fontMissingError: "PDF फ़ॉन्ट उपलब्ध नहीं है और प्लगइन उसे GitHub से डाउनलोड नहीं कर सका। इंटरनेट के साथ फिर प्रयास करें या NotoSansSC-Regular.gb2312-subset.ttf को प्लगइन के fonts फ़ोल्डर में रखें।",
     uniqueFileNameError: "एक अद्वितीय PDF फ़ाइल नाम नहीं बनाया जा सका।",
     excalidrawApiMissingError: "Excalidraw निर्यात API नहीं मिला। सुनिश्चित करें कि Excalidraw प्लगइन चालू है।",
@@ -1809,7 +1773,6 @@ const UI_TEXT = {
     footerTextDesc: "Kosongkan untuk menonaktifkan. Mendukung {title}, {page}, {pages}, dan {date}.",
     openAfterExportName: "Buka setelah ekspor",
     openAfterExportDesc: "Buka file yang dihasilkan setelah ekspor selesai.",
-    shareAfterExportName: "Tampilkan panel berbagi seluler",
     rememberLastExportOptionsName: "Gunakan opsi ekspor terakhir",
     rememberLastExportOptionsDesc: "Aktif secara bawaan. Menyimpan opsi ekspor ini untuk penggunaan berikutnya.",
     outputLocationName: "Lokasi ekspor",
@@ -1841,7 +1804,6 @@ const UI_TEXT = {
     pageSizeDesc: "Halaman panjang cocok untuk membaca di ponsel. A4/A5/Letter berguna untuk mencetak dan mengarsipkan.",
     orientationDesc: "Orientasi lanskap menukar lebar dan tinggi halaman.",
     colorDesc: "Skala abu-abu cocok untuk mencetak; warna mempertahankan warna tema, tautan, dan gambar.",
-    settingsSaveAndShareHeading: "Simpan dan bagikan",
     languageName: "Bahasa antarmuka",
     languageDesc: "Otomatis mengikuti bahasa Obsidian. Tombol, menu, perintah, opsi, dan pesan menggunakan bahasa yang dipilih.",
     languageAuto: "Otomatis / ikuti Obsidian",
@@ -1850,7 +1812,6 @@ const UI_TEXT = {
     formatPngLabel: "Gambar PNG",
     codesTitle: "Traktir saya kopi",
     codesSubtitle: "Jika alat ini membantu, dukungan Anda membantu pemeliharaan berkelanjutan.",
-    shareFailedNotice: "PDF telah disimpan, tetapi panel berbagi sistem tidak terbuka.",
     fontMissingError: "Font PDF tidak tersedia dan plugin tidak dapat mengunduhnya dari GitHub. Coba lagi saat tersambung ke internet atau letakkan NotoSansSC-Regular.gb2312-subset.ttf di folder fonts plugin.",
     uniqueFileNameError: "Tidak dapat membuat nama file PDF yang unik.",
     excalidrawApiMissingError: "API ekspor Excalidraw tidak ditemukan. Pastikan plugin Excalidraw aktif.",
@@ -1899,7 +1860,6 @@ const UI_TEXT = {
     footerTextDesc: "Devre dışı bırakmak için boş bırakın. {title}, {page}, {pages} ve {date} desteklenir.",
     openAfterExportName: "Dışa aktarmadan sonra aç",
     openAfterExportDesc: "Dışa aktarma tamamlandığında oluşturulan dosyayı açın.",
-    shareAfterExportName: "Mobil paylaşım panelini göster",
     rememberLastExportOptionsName: "Son dışa aktarma seçeneklerini kullan",
     rememberLastExportOptionsDesc: "Varsayılan olarak etkin. Bu dışa aktarmanın seçeneklerini sonraki kullanım için kaydeder.",
     outputLocationName: "Dışa aktarma konumu",
@@ -1931,7 +1891,6 @@ const UI_TEXT = {
     pageSizeDesc: "Mobil uzun sayfa telefonda okumaya uygundur. A4/A5/Letter yazdırma ve arşivleme için kullanışlıdır.",
     orientationDesc: "Yatay yönlendirme sayfa genişliği ile yüksekliğini değiştirir.",
     colorDesc: "Gri tonlama yazdırma için kullanışlıdır; renkli mod tema, bağlantı ve görüntü renklerini korur.",
-    settingsSaveAndShareHeading: "Kaydetme ve paylaşma",
     languageName: "Arayüz dili",
     languageDesc: "Otomatik seçenek Obsidian dilini izler. Düğmeler, menüler, komutlar, seçenekler ve iletiler seçilen dili kullanır.",
     languageAuto: "Otomatik / Obsidian'ı izle",
@@ -1940,7 +1899,6 @@ const UI_TEXT = {
     formatPngLabel: "PNG görüntüsü",
     codesTitle: "Bana bir kahve ısmarla",
     codesSubtitle: "Bu araç işinize yarıyorsa desteğiniz bakımın sürmesine yardımcı olur.",
-    shareFailedNotice: "PDF kaydedildi, ancak sistem paylaşım paneli açılmadı.",
     fontMissingError: "PDF yazı tipi eksik ve eklenti bunu GitHub'dan indiremedi. Çevrimiçi olarak yeniden deneyin veya NotoSansSC-Regular.gb2312-subset.ttf dosyasını eklentinin fonts klasörüne yerleştirin.",
     uniqueFileNameError: "Benzersiz bir PDF dosya adı oluşturulamadı.",
     excalidrawApiMissingError: "Excalidraw dışa aktarma API'si bulunamadı. Excalidraw eklentisinin etkin olduğundan emin olun.",
@@ -1989,7 +1947,6 @@ const UI_TEXT = {
     footerTextDesc: "Để trống để tắt. Hỗ trợ {title}, {page}, {pages} và {date}.",
     openAfterExportName: "Mở sau khi xuất",
     openAfterExportDesc: "Mở tệp đã tạo khi quá trình xuất hoàn tất.",
-    shareAfterExportName: "Hiện bảng chia sẻ trên di động",
     rememberLastExportOptionsName: "Dùng tùy chọn xuất gần nhất",
     rememberLastExportOptionsDesc: "Bật theo mặc định. Lưu các tùy chọn của lần xuất này để dùng lần sau.",
     outputLocationName: "Vị trí xuất",
@@ -2021,7 +1978,6 @@ const UI_TEXT = {
     pageSizeDesc: "Trang dài phù hợp để đọc trên điện thoại. A4/A5/Letter hữu ích cho in và lưu trữ.",
     orientationDesc: "Hướng ngang hoán đổi chiều rộng và chiều cao của trang.",
     colorDesc: "Thang xám phù hợp để in; chế độ màu giữ màu chủ đề, liên kết và hình ảnh.",
-    settingsSaveAndShareHeading: "Lưu và chia sẻ",
     languageName: "Ngôn ngữ giao diện",
     languageDesc: "Tự động sẽ theo ngôn ngữ của Obsidian. Nút, menu, lệnh, tùy chọn và thông báo dùng ngôn ngữ đã chọn.",
     languageAuto: "Tự động / theo Obsidian",
@@ -2030,7 +1986,6 @@ const UI_TEXT = {
     formatPngLabel: "Ảnh PNG",
     codesTitle: "Mời tôi một ly cà phê",
     codesSubtitle: "Nếu công cụ này hữu ích, sự ủng hộ của bạn giúp duy trì việc phát triển.",
-    shareFailedNotice: "PDF đã được lưu nhưng bảng chia sẻ của hệ thống không mở.",
     fontMissingError: "Thiếu phông chữ PDF và plugin không thể tải xuống từ GitHub. Hãy thử lại khi có mạng hoặc đặt NotoSansSC-Regular.gb2312-subset.ttf vào thư mục fonts của plugin.",
     uniqueFileNameError: "Không thể tạo tên tệp PDF duy nhất.",
     excalidrawApiMissingError: "Không tìm thấy API xuất của Excalidraw. Hãy chắc chắn plugin Excalidraw đã được bật.",
@@ -2079,7 +2034,6 @@ const UI_TEXT = {
     footerTextDesc: "เว้นว่างเพื่อปิดใช้งาน รองรับ {title}, {page}, {pages} และ {date}",
     openAfterExportName: "เปิดหลังส่งออก",
     openAfterExportDesc: "เปิดไฟล์ที่สร้างขึ้นเมื่อส่งออกเสร็จ",
-    shareAfterExportName: "แสดงแผงแชร์บนมือถือ",
     rememberLastExportOptionsName: "ใช้ตัวเลือกการส่งออกครั้งล่าสุด",
     rememberLastExportOptionsDesc: "เปิดตามค่าเริ่มต้น บันทึกตัวเลือกของการส่งออกนี้ไว้ใช้ครั้งถัดไป",
     outputLocationName: "ตำแหน่งส่งออก",
@@ -2111,7 +2065,6 @@ const UI_TEXT = {
     pageSizeDesc: "หน้ายาวเหมาะสำหรับอ่านบนโทรศัพท์ ส่วน A4/A5/Letter เหมาะสำหรับพิมพ์และเก็บถาวร",
     orientationDesc: "แนวนอนจะสลับความกว้างและความสูงของหน้า",
     colorDesc: "ระดับสีเทาเหมาะสำหรับพิมพ์ ส่วนโหมดสีจะคงสีธีม ลิงก์ และรูปภาพไว้",
-    settingsSaveAndShareHeading: "บันทึกและแชร์",
     languageName: "ภาษาของส่วนติดต่อ",
     languageDesc: "อัตโนมัติจะใช้ภาษาของ Obsidian ปุ่ม เมนู คำสั่ง ตัวเลือก และข้อความจะใช้ภาษาที่เลือก",
     languageAuto: "อัตโนมัติ / ตาม Obsidian",
@@ -2120,7 +2073,6 @@ const UI_TEXT = {
     formatPngLabel: "ภาพ PNG",
     codesTitle: "เลี้ยงกาแฟฉัน",
     codesSubtitle: "หากเครื่องมือนี้มีประโยชน์ การสนับสนุนของคุณช่วยให้ดูแลต่อไปได้",
-    shareFailedNotice: "บันทึก PDF แล้ว แต่แผงแชร์ของระบบไม่เปิด",
     fontMissingError: "ไม่พบแบบอักษร PDF และปลั๊กอินดาวน์โหลดจาก GitHub ไม่ได้ โปรดลองอีกครั้งเมื่อออนไลน์ หรือวาง NotoSansSC-Regular.gb2312-subset.ttf ไว้ในโฟลเดอร์ fonts ของปลั๊กอิน",
     uniqueFileNameError: "ไม่สามารถสร้างชื่อไฟล์ PDF ที่ไม่ซ้ำได้",
     excalidrawApiMissingError: "ไม่พบ API ส่งออกของ Excalidraw โปรดตรวจสอบว่าเปิดใช้ปลั๊กอิน Excalidraw แล้ว",
@@ -2149,7 +2101,6 @@ const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   headerText: "",
   footerText: "",
   rememberLastExportOptions: true,
-  shareAfterExport: true,
   openAfterExport: true,
   noteExportMode: "selectable",
   pagePreset: "current",
@@ -2187,7 +2138,7 @@ const EXCALIDRAW_PREFERRED_MAX_PNG_BYTES = 24 * 1024 * 1024;
 const EXCALIDRAW_MAX_SLICE_WIDTH_PX = 4096;
 const EXCALIDRAW_MAX_SLICE_HEIGHT_PX = 8192;
 const EXCALIDRAW_MAX_SLICE_PIXELS = 16_000_000;
-const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 12_000_000;
+const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 24_000_000;
 const FRAME_WAIT_TIMEOUT_MS = 120;
 const BUSY_PROMPT_PAINT_WAIT_MS = 80;
 const PAGE_BREAK_PADDING_PX = 8;
@@ -2293,6 +2244,8 @@ type PdfFontkitRuntime = typeof import("@pdf-lib/fontkit");
 interface PdfRuntime {
   PDFDocument: PdfLibRuntime["PDFDocument"];
   PDFString: PdfLibRuntime["PDFString"];
+  PDFName: PdfLibRuntime["PDFName"];
+  decodePDFRawStream: PdfLibRuntime["decodePDFRawStream"];
   StandardFonts: PdfLibRuntime["StandardFonts"];
   rgb: PdfLibRuntime["rgb"];
   fontkitModule: PdfFontkitRuntime;
@@ -2329,6 +2282,8 @@ async function loadPdfRuntime(): Promise<PdfRuntime> {
       const runtime: PdfRuntime = {
         PDFDocument: pdfLib.PDFDocument,
         PDFString: pdfLib.PDFString,
+        PDFName: pdfLib.PDFName,
+        decodePDFRawStream: pdfLib.decodePDFRawStream,
         StandardFonts: pdfLib.StandardFonts,
         rgb: pdfLib.rgb,
         fontkitModule: fontkit
@@ -2346,6 +2301,45 @@ function getPdfStringRuntime(): PdfLibRuntime["PDFString"] {
     throw new Error(translate(runtimeUiLanguage, "pdfRuntimeMissingError"));
   }
   return pdfStringRuntime;
+}
+
+function normalizePdfToUnicodeMaps(
+  pdfDoc: PDFDocument,
+  runtime: Pick<PdfRuntime, "PDFName" | "decodePDFRawStream">
+): void {
+  const context = pdfDoc.context as unknown as {
+    enumerateIndirectObjects(): Iterable<readonly [unknown, unknown]>;
+    lookup(value: unknown): unknown;
+    register(value: unknown): unknown;
+    flateStream(contents: string): unknown;
+  };
+  const pdfName = runtime.PDFName.of("ToUnicode");
+  const decoder = new TextDecoder();
+
+  for (const [, object] of context.enumerateIndirectObjects()) {
+    const dictionary = object as {
+      get?: (key: unknown) => unknown;
+      set?: (key: unknown, value: unknown) => void;
+    };
+    if (typeof dictionary.get !== "function" || typeof dictionary.set !== "function") continue;
+
+    const toUnicodeRef = dictionary.get(pdfName);
+    if (toUnicodeRef === undefined || toUnicodeRef === null) continue;
+    const stream = context.lookup(toUnicodeRef);
+    if (!stream || typeof stream !== "object") continue;
+
+    try {
+      const encoded = runtime.decodePDFRawStream(
+        stream as Parameters<PdfRuntime["decodePDFRawStream"]>[0]
+      ).decode();
+      const cmap = decoder.decode(encoded);
+      const normalized = normalizePdfToUnicodeCMap(cmap);
+      if (normalized === cmap) continue;
+      dictionary.set(pdfName, context.register(context.flateStream(normalized)));
+    } catch (error) {
+      console.warn("Mobile PDF Exporter could not normalize a PDF ToUnicode map.", error);
+    }
+  }
 }
 
 export default class MobilePdfExporterPlugin extends Plugin {
@@ -2487,6 +2481,64 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
   }
 
+  /** Render mobile-safe preview pages without relying on a WebView PDF plugin. */
+  async renderPreviewPngBlobs(
+    file: TFile,
+    exportSettings?: MobilePdfExporterSettings,
+    signal?: AbortSignal
+  ): Promise<Blob[]> {
+    const previousSettings = this.settings;
+    if (exportSettings) this.settings = cloneSettings(exportSettings);
+    let rendered: RenderedPreview | null = null;
+    try {
+      throwIfExportCancelled(signal);
+      cleanupRenderRoots();
+      const isMarkdown = file.extension.toLowerCase() === "md";
+      const markdown = isMarkdown ? await this.app.vault.cachedRead(file) : "";
+      if (isMarkdown && isExcalidrawMarkdownFile(file, markdown)) {
+        return [await this.renderExcalidrawToPreviewPng(file, signal)];
+      }
+
+      let model: PreviewPdfModel | null = null;
+      const liveSurface = this.getActiveExportSurface(file);
+      if (liveSurface) {
+        model = await this.captureLiveViewPdfModel(file, liveSurface, signal);
+      } else if (isMarkdown) {
+        rendered = await this.renderMarkdownPreview(file, markdown);
+        throwIfExportCancelled(signal);
+        const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
+        const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, noteDrawHost);
+        try {
+          await nextAnimationFrame();
+          model = this.capturePreviewPdfModel(file, rendered.pageEl);
+          const pageRect = rendered.pageEl.getBoundingClientRect();
+          const hostRect = noteDrawHost.getBoundingClientRect();
+          attachPreparedNoteDrawToModel(model, preparedNoteDraw, {
+            offsetX: hostRect.left - pageRect.left,
+            offsetY: hostRect.top - pageRect.top,
+            scale: 1,
+            linkContext: createPdfLinkContext(this.app, file)
+          });
+        } finally {
+          preparedNoteDraw.cleanup();
+        }
+      } else {
+        throw new Error(this.t("previewNoContentError"));
+      }
+      if (!model) throw new Error(this.t("previewNoContentError"));
+
+      const visualModel = preferNativeNoteDrawCanvas(model).model;
+      const pages = await this.renderModelPagesToPng(visualModel, signal, true, true, true);
+      return pages.map((bytes) => bytesToImageBlob(bytes));
+    } finally {
+      if (rendered) {
+        rendered.renderComponent.unload();
+        rendered.rootEl.remove();
+      }
+      this.settings = previousSettings;
+    }
+  }
+
   openExportOptionsModal(file: TFile): void {
     this.refreshCurrentPageSizeFromActiveSurface(file);
     new MobilePdfExportOptionsModal(this.app, this, file).open();
@@ -2604,10 +2656,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
         await this.app.workspace.openLinkText(outputPath, file.path, true);
       }
 
-      throwIfExportCancelled(signal);
-      if (this.settings.shareAfterExport) {
-        await this.shareFileIfAvailable(outputBlob, outputPath);
-      }
       exportingPrompt.done();
     } catch (error) {
       if (isExportCancelledError(error)) {
@@ -2942,7 +2990,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i]) i++;
     const up = fromParts.length - i;
     const down = toParts.slice(i);
-    return [...Array(up).fill(".."), ...down].join("/");
+    return [...Array<string>(up).fill(".."), ...down].join("/");
   }
 
   private fixMarkdownLinksForZip(
@@ -3070,6 +3118,55 @@ export default class MobilePdfExporterPlugin extends Plugin {
       if (resolved instanceof TFile) return resolved;
     }
     return null;
+  }
+
+  private async renderExcalidrawToPreviewPng(file: TFile, signal?: AbortSignal): Promise<Blob> {
+    throwIfExportCancelled(signal);
+    const lease = this.getExcalidrawAutomateLease();
+    if (!lease) throw new Error(this.t("excalidrawApiMissingError"));
+
+    try {
+      const exportSettings = lease.api.getExportSettings?.(true, true, false);
+      const loader = lease.api.getEmbeddedFilesLoader?.(false);
+      const preferredScale = Math.min(2, Math.max(1.25, activeWindow.devicePixelRatio || 1.5));
+      const scales = getExcalidrawPngFallbackScaleCandidates(false);
+
+      if (lease.api.createPNG) {
+        for (const scale of scales) {
+          try {
+            throwIfExportCancelled(signal);
+            lease.api.reset?.();
+            const pngBlob = await waitForPromiseOrTimeout(
+              lease.api.createPNG(file.path, Math.max(scale, preferredScale), exportSettings, loader, "light", 12),
+              EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS
+            );
+            throwIfExportCancelled(signal);
+            if (pngBlob && pngBlob.size > 0) return pngBlob;
+          } catch (error) {
+            if (isExportCancelledError(error)) throw error;
+            console.warn(`Mobile PDF Exporter Excalidraw preview PNG ${scale}x failed`, error);
+          }
+        }
+      }
+
+      if (lease.api.createSVG) {
+        throwIfExportCancelled(signal);
+        lease.api.reset?.();
+        const svg = await waitForPromiseOrTimeout(
+          lease.api.createSVG(file.path, false, exportSettings, loader, "light", 12, true, true),
+          EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS
+        );
+        throwIfExportCancelled(signal);
+        if (svg instanceof SVGSVGElement) {
+          const bytes = await svgElementToPngBytes(svg, preferredScale, EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS, this.settings.colorMode);
+          if (bytes && bytes.byteLength > 0) return bytesToImageBlob(bytes);
+        }
+      }
+
+      throw new Error(this.t("excalidrawExportFailedError"));
+    } finally {
+      if (lease.destroyAfterUse) lease.api.destroy?.();
+    }
   }
 
   private async renderExcalidrawToImagePdf(file: TFile, signal?: AbortSignal): Promise<Blob> {
@@ -4005,7 +4102,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     signal?: AbortSignal
   ): Promise<Blob> {
     throwIfExportCancelled(signal);
-    const { PDFDocument: PDFDocumentRuntime, StandardFonts, fontkitModule } = await loadPdfRuntime();
+    const { PDFDocument: PDFDocumentRuntime, StandardFonts, fontkitModule, PDFName, decodePDFRawStream } = await loadPdfRuntime();
 
     if (
       model.textFragments.length === 0 &&
@@ -4093,6 +4190,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     throwIfExportCancelled(signal);
     await attachEmbeddedAssetsToPdf(pdfDoc, this.app, file.path, model);
     throwIfExportCancelled(signal);
+    normalizePdfToUnicodeMaps(pdfDoc, { PDFName, decodePDFRawStream });
     const pdfBytes = await pdfDoc.save({ useObjectStreams: true });
     throwIfExportCancelled(signal);
     const pdfBuffer = new ArrayBuffer(pdfBytes.byteLength);
@@ -4507,28 +4605,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
   }
 
-  private async shareFileIfAvailable(blob: Blob, outputPath: string): Promise<void> {
-    const share = navigator.share?.bind(navigator);
-    const canShare = navigator.canShare?.bind(navigator);
-    if (!share || !canShare || typeof File === "undefined") return;
-
-    const fileName = outputPath.split("/").pop() ?? "export";
-    const file = new File([blob], fileName, { type: blob.type || "application/octet-stream" });
-    const shareData: ShareData = {
-      files: [file],
-      title: fileName
-    };
-
-    if (!canShare(shareData)) return;
-
-    try {
-      await share(shareData);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      console.warn("Mobile PDF Exporter share failed", error);
-      new Notice(this.t("shareFailedNotice"), 5000);
-    }
-  }
 }
 
 class MobilePdfExportOptionsModal extends Modal {
@@ -4537,7 +4613,7 @@ class MobilePdfExportOptionsModal extends Modal {
   private outputBaseName: string;
   private previewHostEl: HTMLElement | null = null;
   private previewButtonEl: HTMLButtonElement | null = null;
-  private previewObjectUrl: string | null = null;
+  private previewObjectUrls: string[] = [];
   private previewAbortController: AbortController | null = null;
 
   constructor(
@@ -4656,9 +4732,10 @@ class MobilePdfExportOptionsModal extends Modal {
           .addOption("1.5", this.plugin.t("imageQualityClear"))
           .addOption("2", this.plugin.t("imageQualityHigh"))
           .addOption("3", this.plugin.t("imageQualityUltra"))
+          .addOption("4", this.plugin.t("imageQualityUltra"))
           .setValue(String(this.draft.imageRasterScale))
           .onChange((value) => {
-            this.draft.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 3, DEFAULT_SETTINGS.imageRasterScale);
+            this.draft.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 4, DEFAULT_SETTINGS.imageRasterScale);
           });
       });
 
@@ -4683,16 +4760,6 @@ class MobilePdfExportOptionsModal extends Modal {
           .setValue(this.draft.openAfterExport)
           .onChange((value) => {
             this.draft.openAfterExport = value;
-          });
-      });
-
-    new Setting(contentEl)
-      .setName(this.plugin.t("shareAfterExportName"))
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.draft.shareAfterExport)
-          .onChange((value) => {
-            this.draft.shareAfterExport = value;
           });
       });
 
@@ -4761,10 +4828,14 @@ class MobilePdfExportOptionsModal extends Modal {
   onClose(): void {
     this.previewAbortController?.abort();
     this.previewAbortController = null;
-    if (this.previewObjectUrl) URL.revokeObjectURL(this.previewObjectUrl);
-    this.previewObjectUrl = null;
+    this.revokePreviewObjectUrls();
     this.previewHostEl = null;
     this.contentEl.empty();
+  }
+
+  private revokePreviewObjectUrls(): void {
+    for (const url of this.previewObjectUrls) URL.revokeObjectURL(url);
+    this.previewObjectUrls = [];
   }
 
   private async togglePreview(): Promise<void> {
@@ -4778,8 +4849,7 @@ class MobilePdfExportOptionsModal extends Modal {
     if (!this.draft.previewEnabled) {
       this.previewAbortController?.abort();
       this.previewHostEl?.empty();
-      if (this.previewObjectUrl) URL.revokeObjectURL(this.previewObjectUrl);
-      this.previewObjectUrl = null;
+      this.revokePreviewObjectUrls();
       if (this.previewHostEl) this.previewHostEl.hidden = true;
       return;
     }
@@ -4793,29 +4863,31 @@ class MobilePdfExportOptionsModal extends Modal {
     this.previewAbortController?.abort();
     const controller = new AbortController();
     this.previewAbortController = controller;
-    if (this.previewObjectUrl) URL.revokeObjectURL(this.previewObjectUrl);
-    this.previewObjectUrl = null;
+    this.revokePreviewObjectUrls();
     host.empty();
     appendElement(host, "div", {
       cls: "mobile-pdf-exporter-preview-status",
       text: this.plugin.t("previewLoading")
     });
     try {
-      const blob = await this.plugin.renderPreviewPdfBlob(this.file, cloneSettings(this.draft), controller.signal);
+      const blobs = await this.plugin.renderPreviewPngBlobs(this.file, cloneSettings(this.draft), controller.signal);
       if (controller.signal.aborted || this.previewHostEl !== host || !this.draft.previewEnabled) return;
-      const url = URL.createObjectURL(blob);
-      this.previewObjectUrl = url;
+      const urls = blobs.map((blob) => URL.createObjectURL(blob));
+      this.previewObjectUrls = urls;
       host.empty();
       const frameWrap = appendElement(host, "div", {
         cls: "mobile-pdf-exporter-preview-frame-wrap"
       });
-      const frame = appendElement(frameWrap, "iframe", {
-        cls: "mobile-pdf-exporter-preview-frame"
-      });
-      frame.title = `${this.file.basename} PDF preview`;
-      frame.src = url;
-      frame.setAttribute("loading", "lazy");
-      frame.setAttribute("allow", "fullscreen");
+      for (const [index, url] of urls.entries()) {
+        const page = appendElement(frameWrap, "img", {
+          cls: "mobile-pdf-exporter-preview-page"
+        });
+        page.src = url;
+        page.alt = `${this.file.basename} page ${index + 1}`;
+        page.decoding = "async";
+        page.loading = index === 0 ? "eager" : "lazy";
+        page.draggable = false;
+      }
     } catch (error) {
       if (controller.signal.aborted) return;
       host.empty();
@@ -5234,9 +5306,10 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
           .addOption("1.5", this.plugin.t("imageQualityClear"))
           .addOption("2", this.plugin.t("imageQualityHigh"))
           .addOption("3", this.plugin.t("imageQualityUltra"))
+          .addOption("4", this.plugin.t("imageQualityUltra"))
           .setValue(String(this.plugin.settings.imageRasterScale))
           .onChange(async (value) => {
-            this.plugin.settings.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 3, DEFAULT_SETTINGS.imageRasterScale);
+            this.plugin.settings.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 4, DEFAULT_SETTINGS.imageRasterScale);
             await this.plugin.saveSettings();
           });
       });
@@ -5253,8 +5326,6 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
       });
 
     this.addHeaderFooterSettings(containerEl);
-
-    new Setting(containerEl).setName(this.plugin.t("settingsSaveAndShareHeading")).setHeading();
 
     this.addOutputLocationSetting(containerEl);
 
@@ -5278,17 +5349,6 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.openAfterExport)
           .onChange(async (value) => {
             this.plugin.settings.openAfterExport = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName(this.plugin.t("shareAfterExportName"))
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.shareAfterExport)
-          .onChange(async (value) => {
-            this.plugin.settings.shareAfterExport = value;
             await this.plugin.saveSettings();
           });
       });
@@ -5413,9 +5473,6 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     rememberLastExportOptions: typeof saved.rememberLastExportOptions === "boolean"
       ? saved.rememberLastExportOptions
       : DEFAULT_SETTINGS.rememberLastExportOptions,
-    shareAfterExport: typeof saved.shareAfterExport === "boolean"
-      ? saved.shareAfterExport
-      : DEFAULT_SETTINGS.shareAfterExport,
     openAfterExport: typeof saved.openAfterExport === "boolean"
       ? saved.openAfterExport
       : DEFAULT_SETTINGS.openAfterExport,
@@ -5424,7 +5481,7 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     pageOrientation: normalizeChoice(saved.pageOrientation, PDF_ORIENTATIONS, DEFAULT_SETTINGS.pageOrientation),
     colorMode: normalizeChoice(saved.colorMode, PDF_COLOR_MODES, DEFAULT_SETTINGS.colorMode),
     contentScalePercent: clampNumber(saved.contentScalePercent, 80, 125, DEFAULT_SETTINGS.contentScalePercent),
-    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale),
+    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 4, DEFAULT_SETTINGS.imageRasterScale),
     currentPageWidthPx: clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx),
     currentPageHeightPx: clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx),
     previewEnabled: typeof saved.previewEnabled === "boolean" ? saved.previewEnabled : DEFAULT_SETTINGS.previewEnabled,
@@ -5448,7 +5505,6 @@ function cloneSettings(settings: MobilePdfExporterSettings): MobilePdfExporterSe
     headerText: normalizeHeaderFooterTemplate(settings.headerText),
     footerText: normalizeHeaderFooterTemplate(settings.footerText),
     rememberLastExportOptions: settings.rememberLastExportOptions,
-    shareAfterExport: settings.shareAfterExport,
     openAfterExport: settings.openAfterExport,
     noteExportMode: settings.noteExportMode,
     pagePreset: settings.pagePreset,
@@ -6485,7 +6541,7 @@ async function getOfficeNoteDrawFragments(
     if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) return;
     const widthPx = clippedRight - clippedLeft;
     const heightPx = clippedBottom - clippedTop;
-    const requestedScale = clampNumber(renderOptions.rasterScale, 1, 3, 1.5);
+    const requestedScale = clampNumber(renderOptions.rasterScale, 1, 4, 1.5);
     const safeScale = Math.min(
       requestedScale,
       Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, widthPx * heightPx))
@@ -11246,7 +11302,7 @@ function drawTextLayer(
     const fontSize = Math.max(3.5, fragment.fontSizePx * pxToPt);
     const visualRight = clampNumber(fragment.right * pxToPt, 4, pageWidthPt, pageWidthPt);
     const baselineY = pageHeightPt - (contentTopInsetPx + localTop + fragment.fontSizePx * 0.86) * pxToPt;
-    const glyphSafety = Math.min(4, Math.max(1.25, fragment.fontSizePx * 0.14)) * pxToPt;
+    const glyphSafety = Math.max(6, Math.min(18, fragment.fontSizePx * 0.45)) * pxToPt;
     const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt + glyphSafety);
     const font = selectPdfFont(fonts, fragment.text);
     const hiddenInVisualLayer = options.hiddenVisualTextFragments?.has(fragment) ?? false;
@@ -11258,7 +11314,7 @@ function drawTextLayer(
     const x = isRtl
       ? clampNumber(visualRight - Math.min(measuredWidth, Math.max(1, naturalWidth)), 0, pageWidthPt - 4, 0)
       : clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
-    const maxWidth = Math.max(8, Math.min(isRtl ? visualRight - x : pageWidthPt - x - 2, measuredWidth + 2));
+    const maxWidth = Math.max(8, Math.min(isRtl ? visualRight - x : pageWidthPt - x, measuredWidth));
 
     const drawn = drawSafeText(page, fragment.text, {
       x,
@@ -11879,7 +11935,7 @@ function formatHeaderFooterText(
 }
 
 function getSafePreviewImageScale(widthPx: number, heightPx: number, requestedScale: number): number {
-  const safeRequested = clampNumber(requestedScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale);
+  const safeRequested = clampNumber(requestedScale, 1, 4, DEFAULT_SETTINGS.imageRasterScale);
   const maxPixelScale = Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, widthPx * heightPx));
   return Math.max(0.75, Math.min(safeRequested, maxPixelScale));
 }
@@ -12799,20 +12855,21 @@ function drawCanvasTextLayer(
 
     const fontSize = Math.max(5, fragment.fontSizePx);
     const left = clampNumber(fragment.left, 0, options.sourceWidthPx - 4, 0);
-    const right = clampNumber(fragment.right, left + 1, options.sourceWidthPx - 1, left + 1);
+    const right = clampNumber(fragment.right, left + 1, options.sourceWidthPx, left + 1);
     const x = fragment.direction === "rtl" ? right : left;
     const y = fragment.top - options.pageTopPx + fragment.fontSizePx * 0.86;
-    const glyphSafety = Math.min(4, Math.max(1.25, fragment.fontSizePx * 0.14));
-    const measuredWidth = Math.max(
-      1,
-      Math.min(options.sourceWidthPx - left, fragment.right - fragment.left + glyphSafety)
+    const measuredWidth = getTextFragmentPaintWidth(
+      left,
+      right,
+      fragment.fontSizePx,
+      options.sourceWidthPx
     );
-    const availableWidth = fragment.direction === "rtl" ? right : options.sourceWidthPx - left;
-    const maxWidth = Math.max(1, Math.min(availableWidth, measuredWidth));
+    const clipLeft = fragment.direction === "rtl" ? Math.max(0, right - measuredWidth) : left;
+    const maxWidth = measuredWidth;
     context.save();
     context.beginPath();
     context.rect(
-      left,
+      clipLeft,
       fragment.top - options.pageTopPx - fragment.fontSizePx * 0.2,
       measuredWidth,
       Math.max(1, fragment.bottom - fragment.top + fragment.fontSizePx * 0.4)
@@ -12998,7 +13055,12 @@ function getCanvasFontFamily(fontFamily?: string): string {
   const fallback = `"Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif`;
   const clean = (fontFamily ?? "").trim();
   if (!clean) return fallback;
-  return `${clean}, ${fallback}`;
+  const usable = clean
+    .split(",")
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => candidate && !/^var\(/iu.test(candidate) && !/^(?:inherit|initial|unset|revert)$/iu.test(candidate))
+    .join(", ");
+  return usable ? `${usable}, ${fallback}` : fallback;
 }
 
 function normalizeCanvasFontPart(value: string | undefined, fallback: string): string {
@@ -13760,6 +13822,12 @@ async function loadImage(
 
 async function blobToUint8Array(blob: Blob): Promise<Uint8Array> {
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+function bytesToImageBlob(bytes: Uint8Array): Blob {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return new Blob([buffer], { type: "image/png" });
 }
 
 function dataUrlToUint8Array(dataUrl: string): Uint8Array {

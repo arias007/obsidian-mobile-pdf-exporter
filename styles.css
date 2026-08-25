@@ -371,14 +371,16 @@
   background: #525659;
 }
 
-.mobile-pdf-exporter-preview-frame {
+.mobile-pdf-exporter-preview-page {
   display: block;
   width: 100%;
-  min-width: 320px;
-  height: 100%;
-  min-height: 640px;
-  border: 0;
-  background: #525659;
+  min-width: 280px;
+  height: auto;
+  margin: 0 auto 12px;
+  background: var(--background-primary);
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .mobile-pdf-exporter-zip-box {

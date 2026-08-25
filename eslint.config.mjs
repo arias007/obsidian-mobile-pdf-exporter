@@ -6,6 +6,9 @@ export default defineConfig(
   globalIgnores([
     "node_modules",
     "output",
+    "release-packages",
+    "reports",
+    "tmp",
     ".playwright-cli",
     "esbuild.config.mjs",
     "versions.json",

@@ -22,6 +22,7 @@ import embeddedDevanagariFontGzipBase64 from "../fonts/NotoSansDevanagari-Regula
 import embeddedThaiFontGzipBase64 from "../fonts/NotoSansThai-Regular.ttf.gz";
 import supportCode1Base64 from "./generated/support-code-1.jpg";
 import supportCode2Base64 from "./generated/support-code-2.png";
+import { computeCenteredSurfaceOffset } from "./surface-layout";
 
 const UI_LANGUAGES = [
   "auto",
@@ -3585,7 +3586,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const horizontalInsetPx = mmToPx(this.settings.marginMm);
     const usableWidthPx = Math.max(24, sourceWidthPx - horizontalInsetPx * 2);
     const surfaceScale = (usableWidthPx / liveWidthPx) * (this.settings.contentScalePercent / 100);
-    const transformed = transformSurfaceCapture(captured, horizontalInsetPx, surfaceScale);
+    const scaledContentWidthPx = liveWidthPx * surfaceScale;
+    const centeredOffsetPx = computeCenteredSurfaceOffset(
+      usableWidthPx,
+      scaledContentWidthPx,
+      horizontalInsetPx
+    );
+    const transformed = transformSurfaceCapture(captured, centeredOffsetPx, surfaceScale);
     const capturedBottomPx = measureVisibleCapturedSurfaceBottom(transformed);
     const transformedContentHeight = Math.max(1, capturedBottomPx);
     const pageBreaks = computePageBreaks(transformedContentHeight, bodyHeightPx, transformed.keepBlocks);
@@ -3617,7 +3624,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     // capture pass; persisted NoteDraw data is the fallback that guarantees
     // inserted ink and labels remain present in the exported document.
     attachPreparedNoteDrawToModel(model, preparedNoteDraw, {
-      offsetX: horizontalInsetPx,
+      offsetX: centeredOffsetPx,
       offsetY: 0,
       scale: surfaceScale,
       linkContext

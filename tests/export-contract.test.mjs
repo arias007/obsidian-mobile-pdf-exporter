@@ -435,6 +435,20 @@ test("plugin UI follows Obsidian window and settings conventions", async () => {
   assert.doesNotMatch(source, /appendElement\(containerEl, "h[23]"/);
 });
 
+test("scaled live surfaces stay horizontally centered at every content scale", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const layout = await import("../src/surface-layout.ts");
+
+  assert.equal(layout.computeCenteredSurfaceOffset(800, 800, 24), 24);
+  assert.equal(layout.computeCenteredSurfaceOffset(800, 1000, 24), -76);
+  assert.equal(layout.computeCenteredSurfaceOffset(800, 600, 24), 124);
+  assert.equal(layout.computeCenteredSurfaceOffset(Number.NaN, 600, 24), -276);
+  assert.match(source, /const scaledContentWidthPx = liveWidthPx \* surfaceScale/);
+  assert.match(source, /computeCenteredSurfaceOffset\(\s*usableWidthPx,\s*scaledContentWidthPx,\s*horizontalInsetPx\s*\)/);
+  assert.match(source, /transformSurfaceCapture\(captured, centeredOffsetPx, surfaceScale\)/);
+  assert.match(source, /offsetX: centeredOffsetPx/);
+});
+
 test("PptxGenJS is bundled in browser mode for the Electron renderer", async () => {
   const config = await readFile(buildConfigUrl, "utf8");
 

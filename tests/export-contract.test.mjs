@@ -472,16 +472,26 @@ test("PDF text keeps line endings visible and normalizes Arabic copy mappings", 
   assert.match(source, /!\/\^var\\\(/iu);
 });
 
-test("mobile preview uses in-panel PNG pages and never opens a share sheet", async () => {
+test("mobile preview renders the real PDF with selectable text and never opens a share sheet", async () => {
   const [source, styles] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(stylesUrl, "utf8")
   ]);
 
-  assert.match(source, /async renderPreviewPngBlobs\(/);
-  assert.match(source, /const blobs = await this\.plugin\.renderPreviewPngBlobs\(/);
-  assert.match(source, /cls: "mobile-pdf-exporter-preview-page"/);
-  assert.match(styles, /\.mobile-pdf-exporter-preview-page\s*\{/);
+  assert.match(source, /renderPreviewPdfBlob\(/);
+  assert.match(source, /const pdfBlob = await this\.plugin\.renderPreviewPdfBlob\(/);
+  assert.match(source, /pdfjsLib\.getDocument\(/);
+  assert.match(source, /new pdfjsLib\.TextLayer\(/);
+  assert.match(source, /mobile-pdf-exporter-preview-pdf-text-layer/);
+  assert.match(source, /previewCollapsed: true/);
+  assert.match(source, /previewCollapsed/);
+  assert.doesNotMatch(source, /renderPreviewPngBlobs/);
+  assert.doesNotMatch(source, /renderExcalidrawToPreviewPng/);
+  assert.match(styles, /\.mobile-pdf-exporter-preview-frame-wrap\s*\{/);
+  assert.match(styles, /overflow:\s*auto/);
+  assert.match(styles, /touch-action:\s*pan-x pan-y/);
+  assert.match(styles, /mobile-pdf-exporter-preview-pdf-text-layer/);
+  assert.doesNotMatch(styles, /\.mobile-pdf-exporter-preview-page\s*\{/);
   assert.doesNotMatch(source, /navigator\.share/);
   assert.doesNotMatch(source, /shareAfterExport/);
   assert.doesNotMatch(source, /shareFileIfAvailable/);

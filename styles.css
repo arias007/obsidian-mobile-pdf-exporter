@@ -350,9 +350,31 @@
 .mobile-pdf-exporter-preview-host {
   flex-basis: 100%;
   width: 100%;
+  max-width: 100%;
   margin-top: 8px;
   border-top: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
+}
+
+.mobile-pdf-exporter-preview-host.is-collapsed .mobile-pdf-exporter-preview-frame-wrap {
+  display: none;
+}
+
+.mobile-pdf-exporter-preview-collapse-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-normal);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mobile-pdf-exporter-preview-collapse-button:hover {
+  background: var(--interactive-hover);
 }
 
 .mobile-pdf-exporter-preview-status {
@@ -362,25 +384,61 @@
 }
 
 .mobile-pdf-exporter-preview-frame-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   width: 100%;
-  height: min(68vh, 720px);
+  max-width: 100%;
+  height: min(72vh, 760px);
   min-height: 320px;
+  padding: 12px;
   overflow: auto;
   overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
   -webkit-overflow-scrolling: touch;
   background: #525659;
 }
 
-.mobile-pdf-exporter-preview-page {
-  display: block;
-  width: 100%;
-  min-width: 280px;
-  height: auto;
+.mobile-pdf-exporter-preview-pdf-page {
+  position: relative;
+  flex: 0 0 auto;
   margin: 0 auto 12px;
-  background: var(--background-primary);
-  object-fit: contain;
+  background: #fff;
+  box-shadow: 0 2px 8px #0004;
+}
+
+.mobile-pdf-exporter-preview-pdf-canvas {
+  display: block;
+  max-width: none;
   user-select: none;
   -webkit-user-drag: none;
+}
+
+.mobile-pdf-exporter-preview-pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 1;
+  opacity: 1;
+}
+
+.mobile-pdf-exporter-preview-pdf-text-layer span,
+.mobile-pdf-exporter-preview-pdf-text-layer br {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+
+.mobile-pdf-exporter-preview-pdf-text-layer ::selection {
+  background: rgba(80, 130, 220, 0.35);
 }
 
 .mobile-pdf-exporter-zip-box {

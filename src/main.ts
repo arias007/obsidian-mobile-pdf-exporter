@@ -13,7 +13,15 @@ import {
   requestUrl,
   setIcon
 } from "obsidian";
+import {
+  PDFDict,
+  PDFHexString,
+  PDFName,
+  PDFOperator,
+  PDFOperatorNames
+} from "pdf-lib";
 import type { Color, PDFDocument, PDFFont, PDFPage } from "pdf-lib";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import embeddedCjkFontGzipBase64 from "../fonts/NotoSansSC-Regular.gb2312-subset.ttf.gz";
 import embeddedLatinFontGzipBase64 from "../fonts/NotoSans-Regular.ttf.gz";
 import embeddedArabicFontGzipBase64 from "../fonts/NotoSansArabic-Regular.ttf.gz";
@@ -240,6 +248,7 @@ interface MobilePdfExporterSettings {
   currentPageHeightPx: number;
   zipEmbedDepth: number;
   previewEnabled: boolean;
+  previewCollapsed: boolean;
 }
 
 interface RenderedPreview {
@@ -2111,7 +2120,8 @@ const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   currentPageWidthPx: 794,
   currentPageHeightPx: 1123,
   zipEmbedDepth: 0,
-  previewEnabled: false
+  previewEnabled: false,
+  previewCollapsed: true
 };
 
 const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
@@ -2146,6 +2156,7 @@ const PAGE_BREAK_MIN_ADVANCE_PX = 72;
 const HEADER_FOOTER_MIN_BAND_MM = 8;
 const HEADER_FOOTER_FONT_SIZE_PX = 10;
 const SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE = 2;
+const SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE = 3;
 const SELECTABLE_TEXT_LAYER_OPACITY = 1;
 const NOTE_DOODLE_MAX_PEN_COUNT = 5;
 const NOTE_DOODLE_DEFAULT_OPACITY = 1;
@@ -2157,6 +2168,38 @@ const EMBEDDED_SCRIPT_FONT_BASE64: Record<Exclude<PdfScriptFont, "default">, str
   hebrew: embeddedHebrewFontGzipBase64,
   devanagari: embeddedDevanagariFontGzipBase64,
   thai: embeddedThaiFontGzipBase64
+};
+// Keep Arabic text geometrically copyable. Fontkit's default Arabic shaping
+// maps joining glyphs to private CIDs, which some mobile PDF readers expose as
+// control characters during copy. Arabic is already rasterized in the visual
+// PDF layer; the unshaped font is therefore used only for its transparent text
+// layer and preserves the original logical Unicode string.
+const PDF_TEXT_NO_SHAPING_FEATURES: Record<string, false> = {
+  liga: false,
+  rlig: false,
+  calt: false,
+  rvrn: false,
+  rtla: false,
+  rtlm: false,
+  frac: false,
+  numr: false,
+  dnom: false,
+  ccmp: false,
+  locl: false,
+  isol: false,
+  fina: false,
+  fin2: false,
+  fin3: false,
+  medi: false,
+  med2: false,
+  init: false,
+  mset: false,
+  mark: false,
+  mkmk: false,
+  clig: false,
+  rclt: false,
+  curs: false,
+  kern: false
 };
 const CJK_FONT_RAW_ASSET_URL_BASE = "https://raw.githubusercontent.com/arias007/obsidian-mobile-pdf-exporter";
 const CJK_FONT_JSDELIVR_URL_BASE = "https://cdn.jsdelivr.net/gh/arias007/obsidian-mobile-pdf-exporter";
@@ -2472,64 +2515,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       }
       if (!model) throw new Error(this.t("previewNoContentError"));
       return await this.renderModelToFormat(file, model, "pdf", signal);
-    } finally {
-      if (rendered) {
-        rendered.renderComponent.unload();
-        rendered.rootEl.remove();
-      }
-      this.settings = previousSettings;
-    }
-  }
-
-  /** Render mobile-safe preview pages without relying on a WebView PDF plugin. */
-  async renderPreviewPngBlobs(
-    file: TFile,
-    exportSettings?: MobilePdfExporterSettings,
-    signal?: AbortSignal
-  ): Promise<Blob[]> {
-    const previousSettings = this.settings;
-    if (exportSettings) this.settings = cloneSettings(exportSettings);
-    let rendered: RenderedPreview | null = null;
-    try {
-      throwIfExportCancelled(signal);
-      cleanupRenderRoots();
-      const isMarkdown = file.extension.toLowerCase() === "md";
-      const markdown = isMarkdown ? await this.app.vault.cachedRead(file) : "";
-      if (isMarkdown && isExcalidrawMarkdownFile(file, markdown)) {
-        return [await this.renderExcalidrawToPreviewPng(file, signal)];
-      }
-
-      let model: PreviewPdfModel | null = null;
-      const liveSurface = this.getActiveExportSurface(file);
-      if (liveSurface) {
-        model = await this.captureLiveViewPdfModel(file, liveSurface, signal);
-      } else if (isMarkdown) {
-        rendered = await this.renderMarkdownPreview(file, markdown);
-        throwIfExportCancelled(signal);
-        const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
-        const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, noteDrawHost);
-        try {
-          await nextAnimationFrame();
-          model = this.capturePreviewPdfModel(file, rendered.pageEl);
-          const pageRect = rendered.pageEl.getBoundingClientRect();
-          const hostRect = noteDrawHost.getBoundingClientRect();
-          attachPreparedNoteDrawToModel(model, preparedNoteDraw, {
-            offsetX: hostRect.left - pageRect.left,
-            offsetY: hostRect.top - pageRect.top,
-            scale: 1,
-            linkContext: createPdfLinkContext(this.app, file)
-          });
-        } finally {
-          preparedNoteDraw.cleanup();
-        }
-      } else {
-        throw new Error(this.t("previewNoContentError"));
-      }
-      if (!model) throw new Error(this.t("previewNoContentError"));
-
-      const visualModel = preferNativeNoteDrawCanvas(model).model;
-      const pages = await this.renderModelPagesToPng(visualModel, signal, true, true, true);
-      return pages.map((bytes) => bytesToImageBlob(bytes));
     } finally {
       if (rendered) {
         rendered.renderComponent.unload();
@@ -3118,55 +3103,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       if (resolved instanceof TFile) return resolved;
     }
     return null;
-  }
-
-  private async renderExcalidrawToPreviewPng(file: TFile, signal?: AbortSignal): Promise<Blob> {
-    throwIfExportCancelled(signal);
-    const lease = this.getExcalidrawAutomateLease();
-    if (!lease) throw new Error(this.t("excalidrawApiMissingError"));
-
-    try {
-      const exportSettings = lease.api.getExportSettings?.(true, true, false);
-      const loader = lease.api.getEmbeddedFilesLoader?.(false);
-      const preferredScale = Math.min(2, Math.max(1.25, activeWindow.devicePixelRatio || 1.5));
-      const scales = getExcalidrawPngFallbackScaleCandidates(false);
-
-      if (lease.api.createPNG) {
-        for (const scale of scales) {
-          try {
-            throwIfExportCancelled(signal);
-            lease.api.reset?.();
-            const pngBlob = await waitForPromiseOrTimeout(
-              lease.api.createPNG(file.path, Math.max(scale, preferredScale), exportSettings, loader, "light", 12),
-              EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS
-            );
-            throwIfExportCancelled(signal);
-            if (pngBlob && pngBlob.size > 0) return pngBlob;
-          } catch (error) {
-            if (isExportCancelledError(error)) throw error;
-            console.warn(`Mobile PDF Exporter Excalidraw preview PNG ${scale}x failed`, error);
-          }
-        }
-      }
-
-      if (lease.api.createSVG) {
-        throwIfExportCancelled(signal);
-        lease.api.reset?.();
-        const svg = await waitForPromiseOrTimeout(
-          lease.api.createSVG(file.path, false, exportSettings, loader, "light", 12, true, true),
-          EXCALIDRAW_IMAGE_RENDER_TIMEOUT_MS
-        );
-        throwIfExportCancelled(signal);
-        if (svg instanceof SVGSVGElement) {
-          const bytes = await svgElementToPngBytes(svg, preferredScale, EXCALIDRAW_IMAGE_LOAD_TIMEOUT_MS, this.settings.colorMode);
-          if (bytes && bytes.byteLength > 0) return bytesToImageBlob(bytes);
-        }
-      }
-
-      throw new Error(this.t("excalidrawExportFailedError"));
-    } finally {
-      if (lease.destroyAfterUse) lease.api.destroy?.();
-    }
   }
 
   private async renderExcalidrawToImagePdf(file: TFile, signal?: AbortSignal): Promise<Blob> {
@@ -4144,7 +4080,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const pdfPage = pdfDoc.addPage([model.pageWidthPt, model.pageHeightPt]);
       const pngBytes = await renderPreviewPageToPngBytes(visualModel, index, {
         colorMode: this.settings.colorMode,
-        rasterScale: Math.max(this.settings.imageRasterScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE),
+        rasterScale: Math.min(
+          SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE,
+          Math.max(this.settings.imageRasterScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE)
+        ),
         includeText: rasterTextFragments.length > 0
       });
       throwIfExportCancelled(signal);
@@ -4545,7 +4484,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await Promise.all(required.map(async (script) => {
         try {
           const bytes = await decompressEmbeddedFont(EMBEDDED_SCRIPT_FONT_BASE64[script], script);
-          fallbacks[script] = await pdfDoc.embedFont(bytes, { subset: false });
+          fallbacks[script] = await pdfDoc.embedFont(bytes, {
+            subset: false,
+            features: script === "arabic" ? PDF_TEXT_NO_SHAPING_FEATURES : undefined
+          });
         } catch (error) {
           console.warn(`Mobile PDF Exporter ${script} PDF font unavailable`, error);
         }
@@ -4613,7 +4555,10 @@ class MobilePdfExportOptionsModal extends Modal {
   private outputBaseName: string;
   private previewHostEl: HTMLElement | null = null;
   private previewButtonEl: HTMLButtonElement | null = null;
-  private previewObjectUrls: string[] = [];
+  private previewCollapseButtonEl: HTMLButtonElement | null = null;
+  private previewContentEl: HTMLElement | null = null;
+  private previewPdfBlob: Blob | null = null;
+  private previewRenderCleanup: (() => void) | null = null;
   private previewAbortController: AbortController | null = null;
 
   constructor(
@@ -4638,6 +4583,7 @@ class MobilePdfExportOptionsModal extends Modal {
       cls: "mobile-pdf-exporter-preview-host"
     });
     this.previewHostEl.hidden = !this.draft.previewEnabled;
+    this.previewHostEl.toggleClass("is-collapsed", this.draft.previewCollapsed);
 
     appendElement(contentEl, "h2", { text: this.plugin.t("optionsTitle") });
     appendElement(contentEl, "p", {
@@ -4774,6 +4720,33 @@ class MobilePdfExportOptionsModal extends Modal {
           });
       });
 
+    new Setting(contentEl)
+      .setName(this.plugin.t("previewName"))
+      .setDesc(this.plugin.t("previewDesc"))
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.draft.previewCollapsed)
+          .onChange((value) => {
+            this.draft.previewCollapsed = value;
+            this.plugin.settings.previewCollapsed = value;
+            void this.plugin.saveSettings();
+            this.previewHostEl?.toggleClass("is-collapsed", value);
+            if (this.previewCollapseButtonEl) {
+              this.previewCollapseButtonEl.setAttribute("aria-expanded", String(!value));
+              const icon = this.previewCollapseButtonEl.querySelector<HTMLElement>(".mobile-pdf-exporter-format-icon");
+              if (icon) setIcon(icon, value ? "chevron-right" : "chevron-down");
+            }
+            if (this.previewContentEl) this.previewContentEl.hidden = value;
+            if (value) {
+              this.previewRenderCleanup?.();
+              this.previewRenderCleanup = null;
+              this.previewContentEl?.empty();
+            } else {
+              void this.ensurePreviewRendered();
+            }
+          });
+      });
+
     if (this.draft.previewEnabled) void this.refreshPdfPreview();
 
   }
@@ -4828,14 +4801,13 @@ class MobilePdfExportOptionsModal extends Modal {
   onClose(): void {
     this.previewAbortController?.abort();
     this.previewAbortController = null;
-    this.revokePreviewObjectUrls();
+    this.previewRenderCleanup?.();
+    this.previewRenderCleanup = null;
+    this.previewPdfBlob = null;
+    this.previewCollapseButtonEl = null;
+    this.previewContentEl = null;
     this.previewHostEl = null;
     this.contentEl.empty();
-  }
-
-  private revokePreviewObjectUrls(): void {
-    for (const url of this.previewObjectUrls) URL.revokeObjectURL(url);
-    this.previewObjectUrls = [];
   }
 
   private async togglePreview(): Promise<void> {
@@ -4845,11 +4817,15 @@ class MobilePdfExportOptionsModal extends Modal {
       this.previewButtonEl.setAttribute("aria-pressed", String(this.draft.previewEnabled));
     }
     this.plugin.settings.previewEnabled = this.draft.previewEnabled;
+    this.plugin.settings.previewCollapsed = this.draft.previewCollapsed;
     await this.plugin.saveSettings();
     if (!this.draft.previewEnabled) {
       this.previewAbortController?.abort();
+      this.previewRenderCleanup?.();
+      this.previewRenderCleanup = null;
+      this.previewPdfBlob = null;
+      this.previewContentEl = null;
       this.previewHostEl?.empty();
-      this.revokePreviewObjectUrls();
       if (this.previewHostEl) this.previewHostEl.hidden = true;
       return;
     }
@@ -4863,30 +4839,54 @@ class MobilePdfExportOptionsModal extends Modal {
     this.previewAbortController?.abort();
     const controller = new AbortController();
     this.previewAbortController = controller;
-    this.revokePreviewObjectUrls();
+    this.previewRenderCleanup?.();
+    this.previewRenderCleanup = null;
     host.empty();
     appendElement(host, "div", {
       cls: "mobile-pdf-exporter-preview-status",
       text: this.plugin.t("previewLoading")
     });
     try {
-      const blobs = await this.plugin.renderPreviewPngBlobs(this.file, cloneSettings(this.draft), controller.signal);
+      const pdfBlob = await this.plugin.renderPreviewPdfBlob(this.file, cloneSettings(this.draft), controller.signal);
       if (controller.signal.aborted || this.previewHostEl !== host || !this.draft.previewEnabled) return;
-      const urls = blobs.map((blob) => URL.createObjectURL(blob));
-      this.previewObjectUrls = urls;
+      this.previewPdfBlob = pdfBlob;
       host.empty();
+      const heading = appendElement(host, "button", {
+        cls: "mobile-pdf-exporter-preview-collapse-button"
+      });
+      heading.type = "button";
+      heading.setAttribute("aria-expanded", String(!this.draft.previewCollapsed));
+      heading.title = this.plugin.t("previewDesc");
+      const headingIcon = appendElement(heading, "span", { cls: "mobile-pdf-exporter-format-icon" });
+      setIcon(headingIcon, this.draft.previewCollapsed ? "chevron-right" : "chevron-down");
+      appendElement(heading, "span", { text: this.plugin.t("previewName") });
+      this.previewCollapseButtonEl = heading;
+      heading.addEventListener("click", () => {
+        this.draft.previewCollapsed = !this.draft.previewCollapsed;
+        this.plugin.settings.previewCollapsed = this.draft.previewCollapsed;
+        void this.plugin.saveSettings();
+        host.toggleClass("is-collapsed", this.draft.previewCollapsed);
+        heading.setAttribute("aria-expanded", String(!this.draft.previewCollapsed));
+        setIcon(headingIcon, this.draft.previewCollapsed ? "chevron-right" : "chevron-down");
+        if (this.draft.previewCollapsed) {
+          this.previewRenderCleanup?.();
+          this.previewRenderCleanup = null;
+          if (this.previewContentEl) {
+            this.previewContentEl.empty();
+            this.previewContentEl.hidden = true;
+          }
+        } else {
+          if (this.previewContentEl) this.previewContentEl.hidden = false;
+          void this.ensurePreviewRendered();
+        }
+      });
       const frameWrap = appendElement(host, "div", {
         cls: "mobile-pdf-exporter-preview-frame-wrap"
       });
-      for (const [index, url] of urls.entries()) {
-        const page = appendElement(frameWrap, "img", {
-          cls: "mobile-pdf-exporter-preview-page"
-        });
-        page.src = url;
-        page.alt = `${this.file.basename} page ${index + 1}`;
-        page.decoding = "async";
-        page.loading = index === 0 ? "eager" : "lazy";
-        page.draggable = false;
+      this.previewContentEl = frameWrap;
+      frameWrap.hidden = this.draft.previewCollapsed;
+      if (!this.draft.previewCollapsed) {
+        await this.ensurePreviewRendered(controller);
       }
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -4899,6 +4899,45 @@ class MobilePdfExportOptionsModal extends Modal {
       });
     } finally {
       if (this.previewAbortController === controller) this.previewAbortController = null;
+    }
+  }
+
+  private async ensurePreviewRendered(controller?: AbortController): Promise<void> {
+    const host = this.previewContentEl;
+    const blob = this.previewPdfBlob;
+    if (!host || !blob || this.draft.previewCollapsed || this.previewRenderCleanup) return;
+
+    const activeController = controller ?? new AbortController();
+    if (!controller) this.previewAbortController?.abort();
+    this.previewAbortController = activeController;
+    host.empty();
+    appendElement(host, "div", {
+      cls: "mobile-pdf-exporter-preview-status",
+      text: this.plugin.t("previewLoading")
+    });
+    try {
+      const cleanup = await renderPdfBlobIntoPreview(host, blob, activeController.signal);
+      if (
+        activeController.signal.aborted ||
+        this.previewContentEl !== host ||
+        !this.draft.previewEnabled ||
+        this.draft.previewCollapsed
+      ) {
+        cleanup();
+        return;
+      }
+      this.previewRenderCleanup = cleanup;
+    } catch (error) {
+      if (activeController.signal.aborted) return;
+      host.empty();
+      appendElement(host, "div", {
+        cls: "mobile-pdf-exporter-preview-status mod-warning",
+        text: formatTranslation(this.plugin.getResolvedLanguage(), "previewFailed", {
+          error: error instanceof Error ? error.message : String(error)
+        })
+      });
+    } finally {
+      if (this.previewAbortController === activeController) this.previewAbortController = null;
     }
   }
 
@@ -5485,6 +5524,7 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     currentPageWidthPx: clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx),
     currentPageHeightPx: clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx),
     previewEnabled: typeof saved.previewEnabled === "boolean" ? saved.previewEnabled : DEFAULT_SETTINGS.previewEnabled,
+    previewCollapsed: typeof saved.previewCollapsed === "boolean" ? saved.previewCollapsed : DEFAULT_SETTINGS.previewCollapsed,
     // Accept the legacy "zipLinkDepth" key so settings written by other builds carry over.
     zipEmbedDepth: clampNumber(
       saved.zipEmbedDepth ?? (saved as { zipLinkDepth?: number }).zipLinkDepth,
@@ -5515,7 +5555,8 @@ function cloneSettings(settings: MobilePdfExporterSettings): MobilePdfExporterSe
     currentPageWidthPx: settings.currentPageWidthPx,
     currentPageHeightPx: settings.currentPageHeightPx,
     zipEmbedDepth: settings.zipEmbedDepth,
-    previewEnabled: settings.previewEnabled
+    previewEnabled: settings.previewEnabled,
+    previewCollapsed: settings.previewCollapsed
   };
 }
 
@@ -11316,15 +11357,29 @@ function drawTextLayer(
       : clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
     const maxWidth = Math.max(8, Math.min(isRtl ? visualRight - x : pageWidthPt - x, measuredWidth));
 
-    const drawn = drawSafeText(page, fragment.text, {
-      x,
-      y: baselineY,
-      size: fontSize,
-      font,
-      color: outputColor(fragment.color, options.colorMode),
-      maxWidth,
-      opacity: hiddenInVisualLayer ? 0 : opacity
-    });
+    const useActualText = getPdfScriptFont(fragment.text) === "arabic";
+    if (useActualText) {
+      const markedProps = PDFDict.withContext(page.doc.context);
+      markedProps.set(PDFName.of("ActualText"), PDFHexString.fromText(fragment.text));
+      page.pushOperators(PDFOperator.of(
+        PDFOperatorNames.BeginMarkedContentSequence,
+        [PDFName.of("Span"), markedProps] as unknown as never[]
+      ));
+    }
+    let drawn: { text: string; size: number; width: number };
+    try {
+      drawn = drawSafeText(page, fragment.text, {
+        x,
+        y: baselineY,
+        size: fontSize,
+        font,
+        color: outputColor(fragment.color, options.colorMode),
+        maxWidth,
+        opacity: hiddenInVisualLayer ? 0 : opacity
+      });
+    } finally {
+      if (useActualText) page.pushOperators(PDFOperator.of(PDFOperatorNames.EndMarkedContent));
+    }
 
     const inkWidth = Math.min(maxWidth, Math.max(1, drawn.width));
     if (drawUnderlines && !hiddenInVisualLayer && fragment.underline && inkWidth > 1) {
@@ -13824,10 +13879,84 @@ async function blobToUint8Array(blob: Blob): Promise<Uint8Array> {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-function bytesToImageBlob(bytes: Uint8Array): Blob {
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
-  return new Blob([buffer], { type: "image/png" });
+/**
+ * Render the actual exported PDF in the plugin panel. Canvas is only the
+ * display surface; PDF.js also creates a text layer so mobile users can
+ * select and copy text from the same PDF bytes that will be exported.
+ */
+async function renderPdfBlobIntoPreview(
+  host: HTMLElement,
+  blob: Blob,
+  signal?: AbortSignal
+): Promise<() => void> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  if (signal?.aborted) throw new DOMException("Preview rendering cancelled", "AbortError");
+  const loadingTask = pdfjsLib.getDocument({
+    data: bytes,
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    verbosity: 0
+  });
+  const pdf = await loadingTask.promise;
+  const textLayers: Array<InstanceType<typeof pdfjsLib.TextLayer>> = [];
+  const canvases: HTMLCanvasElement[] = [];
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      if (signal?.aborted) throw new DOMException("Preview rendering cancelled", "AbortError");
+      const page = await pdf.getPage(pageNumber);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const availableWidth = Math.max(280, host.clientWidth - 24);
+      const cssScale = Math.min(1.45, Math.max(0.55, availableWidth / Math.max(1, baseViewport.width)));
+      const viewport = page.getViewport({ scale: cssScale });
+      const pageWrap = activeDocument.createElement("div");
+      pageWrap.className = "mobile-pdf-exporter-preview-pdf-page";
+      pageWrap.style.width = `${viewport.width}px`;
+      pageWrap.style.height = `${viewport.height}px`;
+
+      const canvas = activeDocument.createElement("canvas");
+      canvas.className = "mobile-pdf-exporter-preview-pdf-canvas";
+      const outputScale = Math.min(2.5, Math.max(1, activeWindow.devicePixelRatio || 1));
+      canvas.width = Math.ceil(viewport.width * outputScale);
+      canvas.height = Math.ceil(viewport.height * outputScale);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+      pageWrap.appendChild(canvas);
+      host.appendChild(pageWrap);
+      canvases.push(canvas);
+
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("PDF preview canvas is unavailable.");
+      await page.render({
+        canvasContext: context,
+        viewport,
+        transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0]
+      }).promise;
+
+      const textLayerEl = activeDocument.createElement("div");
+      textLayerEl.className = "textLayer mobile-pdf-exporter-preview-pdf-text-layer";
+      pageWrap.appendChild(textLayerEl);
+      const textLayer = new pdfjsLib.TextLayer({
+        textContentSource: await page.getTextContent(),
+        container: textLayerEl,
+        viewport
+      });
+      textLayers.push(textLayer);
+      await textLayer.render();
+    }
+  } catch (error) {
+    for (const textLayer of textLayers) textLayer.cancel();
+    for (const canvas of canvases) canvas.width = canvas.height = 0;
+    host.empty();
+    await pdf.destroy();
+    throw error;
+  }
+
+  return () => {
+    for (const textLayer of textLayers) textLayer.cancel();
+    for (const canvas of canvases) canvas.width = canvas.height = 0;
+    host.empty();
+    void pdf.destroy();
+  };
 }
 
 function dataUrlToUint8Array(dataUrl: string): Uint8Array {

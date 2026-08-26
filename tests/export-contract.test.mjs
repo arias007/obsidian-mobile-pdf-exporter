@@ -481,7 +481,10 @@ test("mobile preview renders the real PDF with selectable text and never opens a
   assert.match(source, /renderPreviewPdfBlob\(/);
   assert.match(source, /const pdfBlob = await this\.plugin\.renderPreviewPdfBlob\(/);
   assert.match(source, /pdfjsLib\.getDocument\(/);
+  assert.match(source, /disableWorker:\s*true/);
   assert.match(source, /new pdfjsLib\.TextLayer\(/);
+  assert.doesNotMatch(source, /pdfjsWorker/);
+  assert.doesNotMatch(source, /globalThis\.pdfjsWorker/);
   assert.match(source, /mobile-pdf-exporter-preview-pdf-text-layer/);
   assert.match(source, /previewCollapsed: true/);
   assert.match(source, /previewCollapsed/);

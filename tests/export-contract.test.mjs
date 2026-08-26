@@ -508,6 +508,26 @@ test("mobile preview renders the real PDF with selectable text and never opens a
   assert.doesNotMatch(source, /cls: "mobile-pdf-exporter-preview-frame"/);
 });
 
+/* quality choices and preview refresh contract */
+test("quality choices are unique and enabled previews refresh after export-setting changes", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.equal((source.match(/\.addOption\("4", this\.(?:plugin\.)?t\("imageQualityUltra"\)\)/g) ?? []).length, 0);
+  assert.equal((source.match(/\.addOption\("3", this\.(?:plugin\.)?t\("imageQualityUltra"\)\)/g) ?? []).length, 2);
+  assert.match(source, /imageRasterScale: clampNumber\(saved\.imageRasterScale, 1, 3/);
+  assert.match(source, /private previewRefreshTimer = 0/);
+  assert.match(source, /private schedulePreviewRefresh\(\): void/);
+  assert.match(source, /activeWindow\.setTimeout/);
+  assert.match(source, /this\.previewRefreshTimer = 0;/);
+  assert.match(source, /void this\.refreshPdfPreview\(\)/);
+  assert.match(source, /this\.previewRefreshTimer/);
+  assert.match(source, /this\.draft\.noteExportMode/);
+  assert.match(source, /this\.draft\.pagePreset/);
+  assert.match(source, /this\.draft\.imageRasterScale/);
+  assert.match(source, /context\.imageSmoothingQuality = "high"/);
+  assert.match(source, /const SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE = 4/);
+});
+
 test("PptxGenJS is bundled in browser mode for the Electron renderer", async () => {
   const config = await readFile(buildConfigUrl, "utf8");
 

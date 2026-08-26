@@ -2153,7 +2153,9 @@ const EXCALIDRAW_PREFERRED_MAX_PNG_BYTES = 24 * 1024 * 1024;
 const EXCALIDRAW_MAX_SLICE_WIDTH_PX = 4096;
 const EXCALIDRAW_MAX_SLICE_HEIGHT_PX = 8192;
 const EXCALIDRAW_MAX_SLICE_PIXELS = 16_000_000;
-const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 24_000_000;
+// Keep the ultra preset genuinely high resolution while leaving a bounded
+// canvas budget for mobile WebViews.
+const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 32_000_000;
 const FRAME_WAIT_TIMEOUT_MS = 120;
 const BUSY_PROMPT_PAINT_WAIT_MS = 80;
 const PAGE_BREAK_PADDING_PX = 8;
@@ -2161,7 +2163,7 @@ const PAGE_BREAK_MIN_ADVANCE_PX = 72;
 const HEADER_FOOTER_MIN_BAND_MM = 8;
 const HEADER_FOOTER_FONT_SIZE_PX = 10;
 const SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE = 2;
-const SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE = 3;
+const SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE = 4;
 const SELECTABLE_TEXT_LAYER_OPACITY = 1;
 const NOTE_DOODLE_MAX_PEN_COUNT = 5;
 const NOTE_DOODLE_DEFAULT_OPACITY = 1;
@@ -4564,6 +4566,7 @@ class MobilePdfExportOptionsModal extends Modal {
   private previewPdfBlob: Blob | null = null;
   private previewRenderCleanup: (() => void) | null = null;
   private previewAbortController: AbortController | null = null;
+  private previewRefreshTimer = 0;
 
   constructor(
     app: App,
@@ -4609,6 +4612,7 @@ class MobilePdfExportOptionsModal extends Modal {
           .setValue(this.draft.noteExportMode)
           .onChange((value) => {
             this.draft.noteExportMode = normalizeChoice(value, NOTE_PDF_EXPORT_MODES, DEFAULT_SETTINGS.noteExportMode);
+            this.schedulePreviewRefresh();
           });
       });
 
@@ -4620,6 +4624,7 @@ class MobilePdfExportOptionsModal extends Modal {
           .setValue(this.draft.pagePreset)
           .onChange((value) => {
             this.draft.pagePreset = normalizeChoice(value, PDF_PAGE_PRESETS, DEFAULT_SETTINGS.pagePreset);
+            this.schedulePreviewRefresh();
           });
       });
 
@@ -4632,6 +4637,7 @@ class MobilePdfExportOptionsModal extends Modal {
           .setValue(this.draft.pageOrientation)
           .onChange((value) => {
             this.draft.pageOrientation = normalizeChoice(value, PDF_ORIENTATIONS, DEFAULT_SETTINGS.pageOrientation);
+            this.schedulePreviewRefresh();
           });
       });
 
@@ -4644,6 +4650,7 @@ class MobilePdfExportOptionsModal extends Modal {
           .setValue(this.draft.colorMode)
           .onChange((value) => {
             this.draft.colorMode = normalizeChoice(value, PDF_COLOR_MODES, DEFAULT_SETTINGS.colorMode);
+            this.schedulePreviewRefresh();
           });
       });
 
@@ -4658,6 +4665,7 @@ class MobilePdfExportOptionsModal extends Modal {
         .onChange((value) => {
           this.draft.marginMm = value;
           marginSetting.setDesc(`${value} mm`);
+          this.schedulePreviewRefresh();
         });
     });
 
@@ -4672,6 +4680,7 @@ class MobilePdfExportOptionsModal extends Modal {
         .onChange((value) => {
           this.draft.contentScalePercent = value;
           scaleSetting.setDesc(`${value}%`);
+          this.schedulePreviewRefresh();
         });
     });
 
@@ -4684,10 +4693,10 @@ class MobilePdfExportOptionsModal extends Modal {
           .addOption("1.5", this.plugin.t("imageQualityClear"))
           .addOption("2", this.plugin.t("imageQualityHigh"))
           .addOption("3", this.plugin.t("imageQualityUltra"))
-          .addOption("4", this.plugin.t("imageQualityUltra"))
           .setValue(String(this.draft.imageRasterScale))
           .onChange((value) => {
-            this.draft.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 4, DEFAULT_SETTINGS.imageRasterScale);
+            this.draft.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 3, DEFAULT_SETTINGS.imageRasterScale);
+            this.schedulePreviewRefresh();
           });
       });
 
@@ -4698,6 +4707,7 @@ class MobilePdfExportOptionsModal extends Modal {
           .setValue(this.draft.includeTitle)
           .onChange((value) => {
             this.draft.includeTitle = value;
+            this.schedulePreviewRefresh();
           });
       });
 
@@ -4772,12 +4782,17 @@ class MobilePdfExportOptionsModal extends Modal {
           .setValue(this.draft[field])
           .onChange((value) => {
             this.draft[field] = value;
+            this.schedulePreviewRefresh();
           });
         text.inputEl.maxLength = 240;
       });
   }
 
   onClose(): void {
+    if (this.previewRefreshTimer) {
+      activeWindow.clearTimeout(this.previewRefreshTimer);
+      this.previewRefreshTimer = 0;
+    }
     this.previewAbortController?.abort();
     this.previewAbortController = null;
     this.previewRenderCleanup?.();
@@ -4819,6 +4834,15 @@ class MobilePdfExportOptionsModal extends Modal {
     } else {
       await this.refreshPdfPreview();
     }
+  }
+
+  private schedulePreviewRefresh(): void {
+    if (!this.draft.previewEnabled || this.draft.previewCollapsed) return;
+    if (this.previewRefreshTimer) activeWindow.clearTimeout(this.previewRefreshTimer);
+    this.previewRefreshTimer = activeWindow.setTimeout(() => {
+      this.previewRefreshTimer = 0;
+      void this.refreshPdfPreview();
+    }, 180);
   }
 
   private updatePreviewButtonState(): void {
@@ -5318,10 +5342,9 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
           .addOption("1.5", this.plugin.t("imageQualityClear"))
           .addOption("2", this.plugin.t("imageQualityHigh"))
           .addOption("3", this.plugin.t("imageQualityUltra"))
-          .addOption("4", this.plugin.t("imageQualityUltra"))
           .setValue(String(this.plugin.settings.imageRasterScale))
           .onChange(async (value) => {
-            this.plugin.settings.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 4, DEFAULT_SETTINGS.imageRasterScale);
+            this.plugin.settings.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 3, DEFAULT_SETTINGS.imageRasterScale);
             await this.plugin.saveSettings();
           });
       });
@@ -5493,7 +5516,9 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     pageOrientation: normalizeChoice(saved.pageOrientation, PDF_ORIENTATIONS, DEFAULT_SETTINGS.pageOrientation),
     colorMode: normalizeChoice(saved.colorMode, PDF_COLOR_MODES, DEFAULT_SETTINGS.colorMode),
     contentScalePercent: clampNumber(saved.contentScalePercent, 80, 125, DEFAULT_SETTINGS.contentScalePercent),
-    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 4, DEFAULT_SETTINGS.imageRasterScale),
+    // 0.6.1 exposed two labels for the same Ultra quality. Normalize legacy
+    // 4x values to the single supported 3x choice shown in the UI.
+    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale),
     currentPageWidthPx: clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx),
     currentPageHeightPx: clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx),
     previewEnabled: typeof saved.previewEnabled === "boolean" ? saved.previewEnabled : DEFAULT_SETTINGS.previewEnabled,
@@ -11775,6 +11800,11 @@ async function renderPreviewPageToPngBytes(
 
   canvas.width = Math.max(1, Math.ceil(model.sourceWidthPx * scale));
   canvas.height = Math.max(1, Math.ceil(model.pageHeightPx * scale));
+  // Text and diagonal strokes are painted into a supersampled backing store.
+  // Keep the WebView's resampling path on its highest-quality mode when this
+  // page is later displayed or embedded into the PDF.
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
   context.setTransform(scale, 0, 0, scale, 0, 0);
   context.fillStyle = colorToCss(model.background, "color");
   context.fillRect(0, 0, model.sourceWidthPx, model.pageHeightPx);

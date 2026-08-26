@@ -343,6 +343,22 @@ test("PDF NoteDraw ink uses continuous canvas coordinates without a burned dupli
   assert.match(source, /const pdfInkStrokes = model\.noteDrawInkStrokes \?\? \[\]/);
 });
 
+test("NoteDraw watercolor ink preserves source width and text-line anchoring", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /variant: string;/);
+  assert.match(source, /textAnchor: \{[\s\S]*?baseline: number;[\s\S]*?\} \| null;/);
+  assert.match(source, /variant: typeof candidate\?\.variant === "string"/);
+  assert.match(source, /textAnchor: normalizeNoteDrawTextAnchor\(candidate\?\.textAnchor\)/);
+  assert.match(source, /const anchoredTextY = stroke\.variant === "text-highlight"/);
+  assert.match(source, /mapNoteDrawLineAnchorY\(/);
+  assert.match(source, /const positionedY = anchoredTextY \?\? sourceY/);
+  assert.match(source, /const widthPt = Math\.max\(0\.5, stroke\.widthPx \* options\.pxToPt\)/);
+  assert.doesNotMatch(source, /stroke\.widthPx \* options\.pxToPt \* \(stroke\.brush === "watercolor" \? 2\.15 : 1\)/);
+  assert.match(source, /context\.lineWidth = strokeWidth;/);
+  assert.doesNotMatch(source, /strokeWidth \* \(layerIndex === 0 \? 2\.15 : 1\.55\)/);
+});
+
 test("generated NoteDraw fallback canvases do not get mistaken for native ink layers", async () => {
   const source = await readFile(sourceUrl, "utf8");
 

@@ -577,6 +577,7 @@ interface NoteDrawDomLayout {
 
 interface NoteDoodleStroke {
   brush: "pen" | "watercolor";
+  variant: string;
   color: string;
   width: number;
   opacity: number;
@@ -585,6 +586,12 @@ interface NoteDoodleStroke {
   layoutBox: { x: number; y: number; width: number; height: number } | null;
   layoutFrame: NoteDrawSourceFrame | null;
   flow: NoteDrawFlowPlacement | null;
+  textAnchor: {
+    path: string;
+    lineStart: number | null;
+    lineEnd: number | null;
+    baseline: number;
+  } | null;
 }
 
 interface NoteDoodleData {
@@ -596,6 +603,7 @@ interface NoteDoodleData {
 
 interface PdfInkStroke {
   brush: "pen" | "watercolor";
+  variant: string;
   color: string;
   widthPx: number;
   opacity: number;
@@ -5880,6 +5888,13 @@ function projectNoteDrawInkStrokes(
           ? (flowAnchorBottom ?? flowAnchorTop) - flow.gap - flow.rowOffset - flowHeight
           : flowAnchorTop + flow.gap + flow.rowOffset
         : null;
+      const anchoredTextY = stroke.variant === "text-highlight" && stroke.textAnchor?.lineStart !== null
+        ? mapNoteDrawLineAnchorY(
+          domLayout ?? { blocks: [], flowSpacers: [] },
+          stroke.textAnchor?.lineStart ?? null,
+          stroke.textAnchor?.baseline ?? 0.58
+        )
+        : null;
       const mapPoint = (point: NoteDoodlePoint): { x: number; y: number } => {
         // Freehand strokes must follow the same continuous surface mapping as
         // NoteDraw's canvas. Per-point Markdown-line projection bends a single
@@ -5889,16 +5904,18 @@ function projectNoteDrawInkStrokes(
         // applying the canvas origin again would double-shift those items.
         const sourceX = mapped.x + (flow ? 0 : inkSurfaceOffsetX);
         const sourceY = mapped.y + (flow ? 0 : inkSurfaceOffsetY);
+        const positionedY = anchoredTextY ?? sourceY;
         if (flow && flowTop !== null && sourceBox && sourceWidth > 0 && sourceHeight > 0 && flowWidth > 0 && flowHeight > 0) {
           return {
             x: targetContentLeft + flow.boxLeftRatio * targetContentWidth + (sourceX - sourceLeft) * (flowWidth / sourceWidth),
-            y: flowTop + (sourceY - sourceTop) * (flowHeight / sourceHeight)
+            y: flowTop + (positionedY - sourceTop) * (flowHeight / sourceHeight)
           };
         }
-        return { x: sourceX, y: sourceY };
+        return { x: sourceX, y: positionedY };
       };
       return {
         brush: stroke.brush,
+        variant: stroke.variant,
         color: stroke.color,
         widthPx: Math.max(0.5, stroke.width * scale),
         opacity: stroke.opacity,
@@ -5917,6 +5934,7 @@ function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
     kind?: unknown;
     connector?: unknown;
     brush?: unknown;
+    variant?: unknown;
     color?: unknown;
     width?: unknown;
     opacity?: unknown;
@@ -5924,6 +5942,7 @@ function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
     points?: unknown;
     layout?: unknown;
     noteFlow?: unknown;
+    textAnchor?: unknown;
   } : null;
   if (candidate?.kind === "text" || candidate?.kind === "embed" || candidate?.connector) return null;
   const points = Array.isArray(candidate?.points) ? candidate.points : [];
@@ -5935,6 +5954,7 @@ function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
 
   return {
     brush: candidate?.brush === NOTE_DOODLE_WATERCOLOR ? "watercolor" : "pen",
+    variant: typeof candidate?.variant === "string" ? candidate.variant : "default",
     color: typeof candidate?.color === "string" ? candidate.color : "#e53935",
     width: clampNumber(Number(candidate?.width), 0.5, 48, 3),
     opacity: clampNumber(Number(candidate?.opacity ?? NOTE_DOODLE_DEFAULT_OPACITY), 0.08, 1, NOTE_DOODLE_DEFAULT_OPACITY),
@@ -5946,7 +5966,8 @@ function normalizeNoteDoodleStroke(stroke: unknown): NoteDoodleStroke | null {
         ? (candidate.layout as Record<string, unknown>).sourceFrame
         : null
     ),
-    flow: normalizeNoteDrawFlowPlacement(candidate?.noteFlow)
+    flow: normalizeNoteDrawFlowPlacement(candidate?.noteFlow),
+    textAnchor: normalizeNoteDrawTextAnchor(candidate?.textAnchor)
   };
 }
 
@@ -9364,6 +9385,40 @@ function mapNoteDrawLineToDomY(layout: NoteDrawDomLayout, line: number | null): 
   return null;
 }
 
+function mapNoteDrawLineAnchorY(
+  layout: NoteDrawDomLayout,
+  line: number | null,
+  baseline: number
+): number | null {
+  if (line === null || !Number.isFinite(line) || layout.blocks.length === 0) return null;
+  const blocks = [...layout.blocks].sort((left, right) => left.lineStart - right.lineStart || left.top - right.top);
+  const exact = blocks
+    .filter((block) => line >= block.lineStart - 0.5 && line <= block.lineEnd + 0.5)
+    .sort((left, right) => Math.abs(line - left.lineStart) - Math.abs(line - right.lineStart))[0];
+  if (exact) {
+    const span = Math.max(1, exact.lineEnd - exact.lineStart + 1);
+    const lineHeight = Math.max(1, (exact.bottom - exact.top) / span);
+    const lineTop = exact.top + clampNumber((line - exact.lineStart) / span, 0, 1, 0) * lineHeight;
+    return lineTop + clampNumber(baseline, 0, 1, 0.58) * lineHeight;
+  }
+  return mapNoteDrawLineToDomY(layout, line);
+}
+
+function normalizeNoteDrawTextAnchor(value: unknown): NoteDoodleStroke["textAnchor"] {
+  if (!value || typeof value !== "object") return null;
+  const anchor = value as Record<string, unknown>;
+  const lineStart = Number(anchor.lineStart);
+  const lineEnd = Number(anchor.lineEnd);
+  const path = typeof anchor.path === "string" ? normalizePath(anchor.path) : "";
+  if (!path && !Number.isFinite(lineStart)) return null;
+  return {
+    path,
+    lineStart: Number.isFinite(lineStart) ? Math.max(0, Math.round(lineStart)) : null,
+    lineEnd: Number.isFinite(lineEnd) ? Math.max(0, Math.round(lineEnd)) : null,
+    baseline: clampNumber(Number(anchor.baseline), 0, 1, 0.58)
+  };
+}
+
 function normalizeNoteDrawSourceFrame(value: unknown): NoteDrawSourceFrame | null {
   if (!value || typeof value !== "object") return null;
   const frame = value as Record<string, unknown>;
@@ -11665,10 +11720,10 @@ function drawNoteDrawInkAnnotationLayer(
       ) * options.pxToPt
     })));
     const allPoints = pdfPaths.flat();
-    const widthPt = Math.max(
-      0.5,
-      stroke.widthPx * options.pxToPt * (stroke.brush === "watercolor" ? 2.15 : 1)
-    );
+    // NoteDraw's watercolor renderer uses the stored width directly. The
+    // previous 2.15 multiplier made text-highlight strokes visibly thicker
+    // than the source and varied with the target page scale.
+    const widthPt = Math.max(0.5, stroke.widthPx * options.pxToPt);
     const padding = widthPt / 2 + 1;
     const left = Math.max(0, Math.min(...allPoints.map((point) => point.x)) - padding);
     const right = Math.min(page.getWidth(), Math.max(...allPoints.map((point) => point.x)) + padding);
@@ -11895,9 +11950,7 @@ function drawCanvasNoteDrawInkLayer(
 ): void {
   for (const stroke of strokes) {
     const strokeWidth = Math.max(0.5, stroke.widthPx);
-    const offsets = stroke.brush === "watercolor"
-      ? getNoteDoodlePenOffsets(Math.max(2, stroke.count + 1), strokeWidth * 0.85)
-      : getNoteDoodlePenOffsets(stroke.count, strokeWidth);
+    const offsets = getNoteDoodlePenOffsets(stroke.count, strokeWidth);
     const paths = offsets.flatMap((offset) => splitInkPathForPage(
       stroke.points.map((point) => ({ x: point.x + offset.x, y: point.y + offset.y })),
       options.pageTopPx,
@@ -11909,13 +11962,9 @@ function drawCanvasNoteDrawInkLayer(
     context.lineCap = "round";
     context.lineJoin = "round";
     context.strokeStyle = stroke.color;
-    for (const [pathIndex, path] of paths.entries()) {
-      context.globalAlpha = stroke.brush === "watercolor"
-        ? clampNumber(stroke.opacity, 0.08, 1, 0.34) * (pathIndex === 0 ? 0.46 : 0.22)
-        : clampNumber(stroke.opacity, 0.08, 1, 0.54);
-      context.lineWidth = stroke.brush === "watercolor"
-        ? strokeWidth * (pathIndex === 0 ? 2.15 : 1.55)
-        : strokeWidth;
+    for (const path of paths) {
+      context.globalAlpha = clampNumber(stroke.opacity, 0.08, 1, 0.54);
+      context.lineWidth = strokeWidth;
       context.beginPath();
       context.moveTo(path[0].x, path[0].y - options.pageTopPx);
       for (const point of path.slice(1)) {
@@ -13718,29 +13767,24 @@ function drawNoteDoodleWatercolorStroke(
   contentFrame?: NoteDrawContentFrame
 ): void {
   if (!stroke.points.length) return;
-  const strokeWidth = Math.max(2, stroke.width);
-  const opacity = clampNumber(stroke.opacity || 0.34, 0.08, 1, 0.34);
-  const offsets = getNoteDoodlePenOffsets(Math.max(2, stroke.count + 1), strokeWidth * 0.85);
+  const strokeWidth = Math.max(0.5, stroke.width);
+  const opacity = clampNumber(stroke.opacity, 0.08, 1, 0.45);
 
   context.save();
   context.lineCap = "round";
   context.lineJoin = "round";
   context.strokeStyle = stroke.color;
+  context.globalAlpha = opacity;
+  context.lineWidth = strokeWidth;
+  context.beginPath();
+  const first = noteDoodlePointToCanvas(stroke.points[0], width, height, contentFrame);
+  context.moveTo(first.x, first.y);
 
-  for (const [layerIndex, offset] of offsets.entries()) {
-    context.globalAlpha = opacity * (layerIndex === 0 ? 0.46 : 0.22);
-    context.lineWidth = strokeWidth * (layerIndex === 0 ? 2.15 : 1.55);
-    context.beginPath();
-    const first = noteDoodlePointToCanvas(stroke.points[0], width, height, contentFrame);
-    context.moveTo(first.x + offset.x, first.y + offset.y);
-
-    for (const point of stroke.points.slice(1)) {
-      const next = noteDoodlePointToCanvas(point, width, height, contentFrame);
-      context.lineTo(next.x + offset.x, next.y + offset.y);
-    }
-
-    context.stroke();
+  for (const point of stroke.points.slice(1)) {
+    const next = noteDoodlePointToCanvas(point, width, height, contentFrame);
+    context.lineTo(next.x, next.y);
   }
+  context.stroke();
 
   context.restore();
 }

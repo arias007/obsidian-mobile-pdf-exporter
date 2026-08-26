@@ -481,13 +481,20 @@ test("mobile preview renders the real PDF with selectable text and never opens a
   assert.match(source, /renderPreviewPdfBlob\(/);
   assert.match(source, /const pdfBlob = await this\.plugin\.renderPreviewPdfBlob\(/);
   assert.match(source, /pdfjsLib\.getDocument\(/);
-  assert.match(source, /disableWorker:\s*true/);
   assert.match(source, /new pdfjsLib\.TextLayer\(/);
-  assert.doesNotMatch(source, /pdfjsWorker/);
-  assert.doesNotMatch(source, /globalThis\.pdfjsWorker/);
+  assert.match(source, /import \* as pdfjsWorker from "pdfjs-dist\/legacy\/build\/pdf\.worker\.mjs"/);
+  assert.match(source, /const previousWorker = workerGlobal\.pdfjsWorker/);
+  assert.match(source, /delete workerGlobal\.pdfjsWorker/);
+  assert.match(source, /return withBundledPreviewWorker\(async \(\) =>/);
+  assert.match(source, /host\.empty\(\);\s*try \{\s*for \(let pageNumber/s);
+  assert.doesNotMatch(source, /pdfjsWorker\s*\?\?=/);
+  assert.doesNotMatch(source, /disableWorker:\s*true/);
   assert.match(source, /mobile-pdf-exporter-preview-pdf-text-layer/);
-  assert.match(source, /previewCollapsed: true/);
-  assert.match(source, /previewCollapsed/);
+  assert.match(source, /previewCollapsed: false/);
+  assert.match(source, /setIcon\(icon, !this\.draft\.previewEnabled \? "eye" : expanded \? "chevron-down" : "chevron-right"\)/);
+  assert.match(source, /button\.setAttribute\("aria-expanded", String\(expanded\)\)/);
+  assert.doesNotMatch(source, /mobile-pdf-exporter-preview-collapse-button/);
+  assert.doesNotMatch(styles, /mobile-pdf-exporter-preview-collapse-button/);
   assert.doesNotMatch(source, /renderPreviewPngBlobs/);
   assert.doesNotMatch(source, /renderExcalidrawToPreviewPng/);
   assert.match(styles, /\.mobile-pdf-exporter-preview-frame-wrap\s*\{/);
@@ -510,6 +517,8 @@ test("PptxGenJS is bundled in browser mode for the Electron renderer", async () 
   assert.match(config, /plugins: \[pptxGenBrowserRuntime, safeZipSchedulers, safePdfjsRuntime\]/);
   assert.match(config, /name: "safe-pdfjs-runtime"/);
   assert.match(config, /pdfjs-dist.*legacy.*build/s);
+  assert.match(config, /PDF\.js worker global registration/);
+  assert.match(config, /var __webpack_exports__ = \{\};/);
 });
 
 test("the release bundle contains no dynamic code or script injection", async () => {

@@ -360,23 +360,6 @@
   display: none;
 }
 
-.mobile-pdf-exporter-preview-collapse-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 8px 12px;
-  border: 0;
-  background: transparent;
-  color: var(--text-normal);
-  text-align: left;
-  cursor: pointer;
-}
-
-.mobile-pdf-exporter-preview-collapse-button:hover {
-  background: var(--interactive-hover);
-}
-
 .mobile-pdf-exporter-preview-status {
   padding: 10px 12px;
   color: var(--text-muted);

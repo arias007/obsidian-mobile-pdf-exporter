@@ -115,6 +115,13 @@ const safePdfjsRuntime = {
 
         let contents = replaceExactly(
           source,
+          /var __webpack_exports__ = globalThis\.pdfjsWorker = \{\};/u,
+          () => "var __webpack_exports__ = {};",
+          1,
+          "PDF.js worker global registration"
+        );
+        contents = replaceExactly(
+          contents,
           /return\s+Function\('return require\("'\s*\+\s*name\s*\+\s*'"\)'\)\(\);/u,
           () => "return undefined;",
           1,

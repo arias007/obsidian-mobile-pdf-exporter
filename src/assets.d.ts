@@ -17,3 +17,8 @@ declare module "*.png" {
   const content: string;
   export default content;
 }
+
+declare module "pdfjs-dist/legacy/build/pdf.worker.mjs" {
+  const worker: Record<string, unknown>;
+  export = worker;
+}

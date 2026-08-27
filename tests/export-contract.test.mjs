@@ -498,10 +498,13 @@ test("mobile preview renders the real PDF with selectable text and never opens a
   assert.match(source, /const pdfBlob = await this\.plugin\.renderPreviewPdfBlob\(/);
   assert.match(source, /pdfjsLib\.getDocument\(/);
   assert.match(source, /new pdfjsLib\.TextLayer\(/);
-  assert.match(source, /import \* as pdfjsWorker from "pdfjs-dist\/legacy\/build\/pdf\.worker\.mjs"/);
+  assert.match(source, /loadPdfJsRuntime\(\)/);
+  assert.match(source, /loadPdfJsWorkerRuntime\(\)/);
+  assert.doesNotMatch(source, /import \* as pdfjsLib from "pdfjs-dist\/legacy\/build\/pdf\.mjs"/);
+  assert.doesNotMatch(source, /^import\s+\{[^}]+\}\s+from "pdf-lib"/m);
   assert.match(source, /const previousWorker = workerGlobal\.pdfjsWorker/);
   assert.match(source, /delete workerGlobal\.pdfjsWorker/);
-  assert.match(source, /return withBundledPreviewWorker\(async \(\) =>/);
+  assert.match(source, /return withBundledPreviewWorker\(async \(pdfjsLib\) =>/);
   assert.match(source, /host\.empty\(\);\s*try \{\s*for \(let pageNumber/s);
   assert.doesNotMatch(source, /pdfjsWorker\s*\?\?=/);
   assert.doesNotMatch(source, /disableWorker:\s*true/);
@@ -522,6 +525,23 @@ test("mobile preview renders the real PDF with selectable text and never opens a
   assert.doesNotMatch(source, /shareAfterExport/);
   assert.doesNotMatch(source, /shareFileIfAvailable/);
   assert.doesNotMatch(source, /cls: "mobile-pdf-exporter-preview-frame"/);
+});
+
+test("export panel keeps PDF actions together and reuses a matching preview", async () => {
+  const [source, styles] = await Promise.all([
+    readFile(sourceUrl, "utf8"),
+    readFile(stylesUrl, "utf8")
+  ]);
+
+  assert.match(source, /prebuiltBlob\?: Blob/);
+  assert.match(source, /format === "pdf" && options\.prebuiltBlob/);
+  assert.match(source, /previewSettingsKey === getPdfExportSettingsKey\(exportSettings\)/);
+  assert.match(source, /mobile-pdf-exporter-primary-actions/);
+  assert.match(source, /mobile-pdf-exporter-more-button/);
+  assert.match(source, /mobile-pdf-exporter-more-panel/);
+  assert.match(styles, /\.mobile-pdf-exporter-primary-actions\s*\{/);
+  assert.match(styles, /\.mobile-pdf-exporter-more-panel\s*\{/);
+  assert.match(styles, /position:\s*absolute/);
 });
 
 /* quality choices and preview refresh contract */

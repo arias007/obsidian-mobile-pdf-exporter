@@ -4655,12 +4655,6 @@ class MobilePdfExportOptionsModal extends Modal {
     this.previewHostEl.hidden = !this.draft.previewEnabled;
     this.previewHostEl.toggleClass("is-collapsed", this.draft.previewCollapsed);
 
-    appendElement(contentEl, "h2", { text: this.plugin.t("optionsTitle") });
-    appendElement(contentEl, "p", {
-      cls: "mobile-pdf-exporter-options-subtitle",
-      text: this.file.basename
-    });
-
     const morePanel = appendElement(contentEl, "div", {
       cls: "mobile-pdf-exporter-more-panel"
     });
@@ -5124,7 +5118,7 @@ class MobilePdfExportOptionsModal extends Modal {
     this.previewButtonEl = previewButton;
     this.updatePreviewButtonState();
 
-    const moreButton = appendElement(innerEl, "button", {
+    const moreButton = appendElement(primaryActions, "button", {
       cls: "mobile-pdf-exporter-more-button"
     });
     moreButton.type = "button";

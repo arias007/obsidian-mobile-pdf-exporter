@@ -545,6 +545,7 @@ test("export panel keeps PDF actions together and reuses a matching preview", as
   assert.doesNotMatch(source, /appendElement\(contentEl, "h2", \{ text: this\.plugin\.t\("optionsTitle"\) \}\)/);
   assert.match(source, /const moreButton = appendElement\(primaryActions, "button"/);
   assert.match(styles, /grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /\.mobile-pdf-exporter-more-panel\s*\{[\s\S]*?position:\s*fixed/);
   assert.match(styles, /\.mobile-pdf-exporter-more-panel\s*\{[\s\S]*?top:\s*112px/);
   assert.match(styles, /\.mobile-pdf-exporter-more-panel\s*\{[\s\S]*?top:\s*190px/);
 });

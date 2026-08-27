@@ -319,7 +319,8 @@
 
 .mobile-pdf-exporter-more-panel {
   position: absolute;
-  top: 58px;
+  /* Keep the floating settings below the sticky action toolbar so its toggle remains reachable. */
+  top: 112px;
   right: 16px;
   z-index: 40;
   width: min(460px, calc(100% - 32px));
@@ -588,7 +589,7 @@
   }
 
   .mobile-pdf-exporter-more-panel {
-    top: 122px;
+    top: 190px;
     right: 12px;
     width: calc(100% - 24px);
     max-height: min(70vh, 620px);

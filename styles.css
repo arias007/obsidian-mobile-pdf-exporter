@@ -333,6 +333,29 @@
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28);
 }
 
+.mobile-pdf-exporter-more-close-button {
+  position: sticky;
+  top: -12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: -12px -2px 4px auto;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--modal-background, var(--background-primary));
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.mobile-pdf-exporter-more-close-button:hover {
+  background: var(--interactive-hover);
+  color: var(--text-normal);
+}
+
 .mobile-pdf-exporter-more-heading {
   margin: 0 0 8px;
   font-size: var(--font-ui-medium);

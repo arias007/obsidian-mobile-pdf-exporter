@@ -4660,6 +4660,18 @@ class MobilePdfExportOptionsModal extends Modal {
     });
     morePanel.hidden = true;
     this.morePanelEl = morePanel;
+    const closeMoreButton = appendElement(morePanel, "button", {
+      cls: "mobile-pdf-exporter-more-close-button"
+    });
+    closeMoreButton.type = "button";
+    closeMoreButton.setAttribute("aria-label", "Close more settings");
+    closeMoreButton.title = closeMoreButton.getAttribute("aria-label") ?? "Close more settings";
+    setIcon(closeMoreButton, "x");
+    closeMoreButton.addEventListener("click", () => {
+      morePanel.hidden = true;
+      this.moreButtonEl?.setAttribute("aria-expanded", "false");
+      this.moreButtonEl?.toggleClass("is-active", false);
+    });
     this.addFormatButtons(morePanel);
 
     this.addOutputLocationSetting(morePanel);

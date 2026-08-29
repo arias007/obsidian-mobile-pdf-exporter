@@ -2165,7 +2165,7 @@ const DEFAULT_SETTINGS: MobilePdfExporterSettings = {
   currentPageHeightPx: 1123,
   zipEmbedDepth: 0,
   previewEnabled: false,
-  previewCollapsed: false
+  previewCollapsed: true
 };
 
 const PDF_PAGE_SIZES_MM: Record<PdfPagePreset, PdfPageSizeMm> = {
@@ -2181,7 +2181,7 @@ const IMAGE_PDF_SUBJECT = "Image preview PDF exported from Obsidian";
 const EXCALIDRAW_IMAGE_PDF_SUBJECT = "Image PDF exported from Obsidian Excalidraw";
 const MAX_SVG_FRAGMENTS_PER_PAGE = 24;
 const SVG_IMAGE_LOAD_TIMEOUT_MS = 1800;
-const IMAGE_WAIT_TIMEOUT_MS = 2500;
+const IMAGE_WAIT_TIMEOUT_MS = 1800;
 const REMOTE_IMAGE_CORS_TIMEOUT_MS = 5000;
 const REMOTE_IMAGE_REQUEST_TIMEOUT_MS = 6000;
 const PREVIEW_RENDER_TIMEOUT_MS = 12000;
@@ -2607,12 +2607,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       8192,
       DEFAULT_SETTINGS.currentPageHeightPx
     );
-  }
-
-  warmupExportRuntime(): void {
-    void loadPdfRuntime().catch((error) => {
-      console.warn("Mobile PDF Exporter PDF runtime warmup failed", error);
-    });
   }
 
   async exportFile(file: TFile, exportSettings?: MobilePdfExporterSettings, options: ExportFileOptions = {}): Promise<void> {
@@ -4636,8 +4630,9 @@ class MobilePdfExportOptionsModal extends Modal {
   ) {
     super(app);
     this.draft = cloneSettings(plugin.settings);
-    // Opening the export panel always starts with an expanded preview.
-    this.draft.previewCollapsed = false;
+    // Start each export panel collapsed; preview generation begins only after
+    // the user expands it.
+    this.draft.previewCollapsed = true;
     this.outputBaseName = defaultPdfBaseName(file);
   }
 
@@ -4646,8 +4641,6 @@ class MobilePdfExportOptionsModal extends Modal {
     contentEl.empty();
     this.modalEl.addClass("mobile-pdf-exporter-options-modal-window");
     contentEl.addClass("mobile-pdf-exporter-options-modal");
-    this.plugin.warmupExportRuntime();
-
     this.addActionToolbar(contentEl);
     this.previewHostEl = appendElement(contentEl, "div", {
       cls: "mobile-pdf-exporter-preview-host"
@@ -4810,7 +4803,7 @@ class MobilePdfExportOptionsModal extends Modal {
           });
       });
 
-    if (this.draft.previewEnabled) void this.refreshPdfPreview();
+    if (this.draft.previewEnabled && !this.draft.previewCollapsed) void this.refreshPdfPreview();
 
   }
 
@@ -4906,7 +4899,11 @@ class MobilePdfExportOptionsModal extends Modal {
 
     host.hidden = false;
     if (this.previewContentEl) this.previewContentEl.hidden = false;
-    if (this.previewPdfBlob && this.previewContentEl) {
+    if (
+      this.previewPdfBlob &&
+      this.previewContentEl &&
+      this.previewSettingsKey === getPdfExportSettingsKey(this.draft)
+    ) {
       await this.ensurePreviewRendered();
     } else {
       await this.refreshPdfPreview();
@@ -5643,12 +5640,12 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     pagePreset: normalizeChoice(saved.pagePreset, PDF_PAGE_PRESETS, DEFAULT_SETTINGS.pagePreset),
     pageOrientation: normalizeChoice(saved.pageOrientation, PDF_ORIENTATIONS, DEFAULT_SETTINGS.pageOrientation),
     colorMode: normalizeChoice(saved.colorMode, PDF_COLOR_MODES, DEFAULT_SETTINGS.colorMode),
-    contentScalePercent: clampNumber(saved.contentScalePercent, 80, 125, DEFAULT_SETTINGS.contentScalePercent),
+    contentScalePercent: normalizeContentScalePercent(saved.contentScalePercent, DEFAULT_SETTINGS.contentScalePercent),
     // 0.6.1 exposed two labels for the same Ultra quality. Normalize legacy
     // 4x values to the single supported 3x choice shown in the UI.
     imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale),
-    currentPageWidthPx: clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx),
-    currentPageHeightPx: clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx),
+    currentPageWidthPx: Math.round(clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx)),
+    currentPageHeightPx: Math.round(clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx)),
     previewEnabled: typeof saved.previewEnabled === "boolean" ? saved.previewEnabled : DEFAULT_SETTINGS.previewEnabled,
     previewCollapsed: typeof saved.previewCollapsed === "boolean" ? saved.previewCollapsed : DEFAULT_SETTINGS.previewCollapsed,
     // Accept the legacy "zipLinkDepth" key so settings written by other builds carry over.
@@ -5705,6 +5702,11 @@ function getPdfExportSettingsKey(settings: MobilePdfExporterSettings): string {
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
+}
+
+function normalizeContentScalePercent(value: unknown, fallback: number): number {
+  const clamped = clampNumber(value, 80, 125, fallback);
+  return Math.round(clamped / 5) * 5;
 }
 
 function normalizeChoice<T extends string>(value: unknown, choices: readonly T[], fallback: T): T {
@@ -7908,31 +7910,7 @@ function buildWordTextRunXml(model: PreviewPdfModel, fragment: TextFragment, tex
 }
 
 function buildWordTextPayloadXml(text: string): string {
-  let xml = "";
-  let buffer = "";
-  const flush = () => {
-    if (!buffer) return;
-    xml += `<w:t xml:space="preserve">${escapeXml(buffer)}</w:t>`;
-    buffer = "";
-  };
-
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    const previous = index > 0 ? text[index - 1] : "";
-    const next = index < text.length - 1 ? text[index + 1] : "";
-    if (character === "-" && isAsciiDigit(previous) && isAsciiDigit(next)) {
-      flush();
-      xml += "<w:noBreakHyphen/>";
-    } else {
-      buffer += character;
-    }
-  }
-  flush();
-  return xml || '<w:t xml:space="preserve"></w:t>';
-}
-
-function isAsciiDigit(value: string): boolean {
-  return value >= "0" && value <= "9";
+  return `<w:t xml:space="preserve">${escapeXml(text)}</w:t>`;
 }
 
 function escapeXml(value: string): string {
@@ -14337,9 +14315,9 @@ function getPreviewWaitProfile(container: HTMLElement): {
   const complexity = imageCount * 3 + svgCount * 3 + heavyBlockCount * 2 + Math.min(8, Math.floor(textLength / 2500));
 
   return {
-    renderedContentMs: complexity > 8 ? 1200 : 520,
-    initialStableMs: complexity > 14 ? 5200 : complexity > 6 ? 2600 : 1100,
-    finalStableMs: complexity > 10 ? 1100 : 420
+    renderedContentMs: complexity > 8 ? 900 : 420,
+    initialStableMs: complexity > 14 ? 2800 : complexity > 6 ? 1700 : 760,
+    finalStableMs: complexity > 10 ? 700 : 280
   };
 }
 

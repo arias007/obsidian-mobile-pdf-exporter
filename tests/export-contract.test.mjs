@@ -229,8 +229,7 @@ test("Office exports keep editable text anchored to PDF fragment coordinates", a
   assert.match(source, /<w:pStyle w:val="Heading\$\{headingLevel\}"\/>/);
   assert.match(source, /fragment\.fontSizePx \* model\.pxToPt \* 2/);
   assert.match(source, /function buildWordTextPayloadXml\(text: string\)/);
-  assert.match(source, /character === "-" && isAsciiDigit\(previous\) && isAsciiDigit\(next\)/);
-  assert.match(source, /xml \+= "<w:noBreakHyphen\/>"/);
+  assert.match(source, /return `<w:t xml:space="preserve">\$\{escapeXml\(text\)\}<\/w:t>`/);
   assert.match(source, /<w:hyperlink r:id="\$\{relationshipId\}" w:history="1">/);
   assert.match(source, /function injectWordHyperlinkRelationships/);
   assert.match(source, /relationships\/hyperlink/);
@@ -509,7 +508,9 @@ test("mobile preview renders the real PDF with selectable text and never opens a
   assert.doesNotMatch(source, /pdfjsWorker\s*\?\?=/);
   assert.doesNotMatch(source, /disableWorker:\s*true/);
   assert.match(source, /mobile-pdf-exporter-preview-pdf-text-layer/);
-  assert.match(source, /previewCollapsed: false/);
+  assert.match(source, /previewCollapsed: true/);
+  assert.match(source, /this\.draft\.previewCollapsed = true/);
+  assert.doesNotMatch(source, /this\.plugin\.warmupExportRuntime\(\)/);
   assert.match(source, /setIcon\(icon, !this\.draft\.previewEnabled \? "eye" : expanded \? "chevron-down" : "chevron-right"\)/);
   assert.match(source, /button\.setAttribute\("aria-expanded", String\(expanded\)\)/);
   assert.doesNotMatch(source, /mobile-pdf-exporter-preview-collapse-button/);
@@ -536,6 +537,9 @@ test("export panel keeps PDF actions together and reuses a matching preview", as
   assert.match(source, /prebuiltBlob\?: Blob/);
   assert.match(source, /format === "pdf" && options\.prebuiltBlob/);
   assert.match(source, /previewSettingsKey === getPdfExportSettingsKey\(exportSettings\)/);
+  assert.match(source, /previewSettingsKey === getPdfExportSettingsKey\(this\.draft\)/);
+  assert.match(source, /function normalizeContentScalePercent\(value: unknown, fallback: number\)/);
+  assert.match(source, /currentPageWidthPx: Math\.round\(clampNumber/);
   assert.match(source, /mobile-pdf-exporter-primary-actions/);
   assert.match(source, /mobile-pdf-exporter-more-button/);
   assert.match(source, /mobile-pdf-exporter-more-panel/);

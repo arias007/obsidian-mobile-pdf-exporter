@@ -74,7 +74,7 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /captured\.canvasFragments = snapshotRestoredNoteDrawCanvases/);
   assert.doesNotMatch(source, /renderer\.sizerEl\.append\(\.\.\.sectionElements\)/);
   assert.doesNotMatch(source, /renderer\.measureSection\?\.\(section\)/);
-  assert.match(source, /for \(let pass = 0; pass < 3; pass \+= 1\)/);
+  assert.match(source, /for \(let pass = 0; pass < 2; pass \+= 1\)/);
   assert.match(source, /function buildLivePreviewGapScrollPositions/);
   assert.match(source, /const gapPositions = buildLivePreviewGapScrollPositions/);
   assert.match(source, /for \(let retry = 0; retry < 4 && countMissingLivePreviewSections\(previewRenderer, previewSectionCaptures\) > 0; retry \+= 1\)/);

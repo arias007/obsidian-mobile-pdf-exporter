@@ -3512,16 +3512,20 @@ export default class MobilePdfExporterPlugin extends Plugin {
         );
       const capturedActualTops = new Set<number>();
       let appendedFinalWindows = false;
+      // A plain text editor/reading surface has no asynchronous layout work
+      // to settle after scrolling. Keep the expensive multi-frame stability
+      // checks for embeds, images, drawings, and other dynamic content.
+      const fastStaticSurface = !previewRenderer && isFastStaticLiveSurface(rootEl);
       scrollEl.scrollLeft = 0;
 
       for (let index = 0; index < scrollPositions.length; index += 1) {
         throwIfExportCancelled(signal);
         await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal, previewRenderer);
-        if (surface.mode === "preview" && index > 0 && !previewRenderer) {
+        if (surface.mode === "preview" && index > 0 && !previewRenderer && !fastStaticSurface) {
           await waitForPreviewDomStable(rootEl, 360);
         }
         refreshLiveDrawingSurface(rootEl);
-        await nextAnimationFrame();
+        if (!fastStaticSurface) await nextAnimationFrame();
         if (previewRenderer) {
           const connectedSections = getUncapturedConnectedPreviewSectionElements(
             rootEl,
@@ -8938,7 +8942,7 @@ async function primeLivePreviewLayout(
   const viewportHeight = Math.max(160, scrollEl.clientHeight || rootEl.getBoundingClientRect().height || 640);
   let previousHeight = 0;
 
-  for (let pass = 0; pass < 3; pass += 1) {
+  for (let pass = 0; pass < 2; pass += 1) {
     const positions = buildLiveSurfaceCaptureScrollPositions(
       Math.max(0, scrollEl.scrollHeight - viewportHeight),
       viewportHeight
@@ -9019,6 +9023,13 @@ async function settleLiveSurfaceAtScrollPosition(
   let expectedTop = clampNumber(requestedTop, 0, maximum, 0);
   scrollEl.scrollTop = expectedTop;
   scrollEl.dispatchEvent(new Event("scroll"));
+  if (!previewRenderer && isFastStaticLiveSurface(rootEl)) {
+    // Source-mode scrolling only changes the viewport. One frame is enough
+    // for the browser to commit the new scroll position; waiting for a
+    // repeated DOM signature here adds several frames per capture window.
+    await nextAnimationFrame(80);
+    return;
+  }
   if (previewRenderer) {
     await waitForLivePreviewRendererSettled(scrollEl, previewRenderer, signal);
   } else {
@@ -9034,6 +9045,12 @@ async function settleLiveSurfaceAtScrollPosition(
   await nextAnimationFrame(Math.min(180, FRAME_WAIT_TIMEOUT_MS));
 }
 
+function isFastStaticLiveSurface(rootEl: HTMLElement): boolean {
+  return !rootEl.querySelector(
+    "img, iframe, object, embed, canvas, svg, video, audio, .internal-embed, .media-embed, .markdown-embed, .file-embed, .notedraw-shell, .note-doodle-shell"
+  );
+}
+
 async function waitForLivePreviewRendererSettled(
   scrollEl: HTMLElement,
   renderer: LivePreviewRenderer,
@@ -9042,7 +9059,7 @@ async function waitForLivePreviewRendererSettled(
   let previousSignature = "";
   let stableFrames = 0;
 
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     throwIfExportCancelled(signal);
     await nextAnimationFrame();
     const sectionSignature = renderer.sections.map((section, index) => [
@@ -9058,7 +9075,7 @@ async function waitForLivePreviewRendererSettled(
     ].join("|");
     if (signature === previousSignature) {
       stableFrames += 1;
-      if (stableFrames >= 2) return;
+      if (stableFrames >= 1) return;
     } else {
       previousSignature = signature;
       stableFrames = 0;
@@ -9074,7 +9091,7 @@ async function waitForLiveSurfaceSettled(
   let previousSignature = "";
   let stableFrames = 0;
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     throwIfExportCancelled(signal);
     await nextAnimationFrame();
     const content = rootEl.querySelector<HTMLElement>(".cm-content, .markdown-preview-sizer, .markdown-preview-section");
@@ -9100,7 +9117,7 @@ async function waitForLiveSurfaceSettled(
     ].join("|");
     if (signature === previousSignature) {
       stableFrames += 1;
-      if (stableFrames >= 2) return;
+      if (stableFrames >= 1) return;
     } else {
       previousSignature = signature;
       stableFrames = 0;
@@ -11547,7 +11564,7 @@ function drawTextLayer(
   const { PDFDict, PDFHexString, PDFName, PDFOperator, PDFOperatorNames } = getPdfLibPrimitives();
   const lineEnds: Array<{ scope: Element; top: number; end: number }> = [];
 
-  for (const fragment of sortTextFragmentsForDrawing(fragments)) {
+  for (const fragment of fragments) {
     if (fragment.bottom <= pageTopPx + 0.5 || fragment.top >= pageBottomPx - 0.5) continue;
 
     const localTop = fragment.top - pageTopPx;
@@ -13137,7 +13154,7 @@ function drawCanvasTextLayer(
   }
 ): void {
   const lineEnds: Array<{ scope: Element; top: number; end: number }> = [];
-  for (const fragment of sortTextFragmentsForDrawing(fragments)) {
+  for (const fragment of fragments) {
     if (fragment.bottom <= options.pageTopPx + 0.5 || fragment.top >= options.pageBottomPx - 0.5) continue;
 
     const fontSize = Math.max(5, fragment.fontSizePx);
@@ -13145,16 +13162,21 @@ function drawCanvasTextLayer(
     const right = clampNumber(fragment.right, left + 1, options.sourceWidthPx, left + 1);
     let x = fragment.direction === "rtl" ? right : left;
     const y = fragment.top - options.pageTopPx + fragment.fontSizePx * 0.86;
-    const naturalWidth = measureCanvasTextRuns(
-      context,
-      splitCanvasTextRuns(normalizeCanvasVisibleText(fragment.text)),
-      fontSize,
-      {
-        fontFamily: fragment.fontFamily,
-        fontWeight: fragment.fontWeight,
-        fontStyle: fragment.fontStyle
-      }
-    );
+    // Ordinary CJK/Latin lines already have reliable DOM range widths. The
+    // expensive grapheme/font fallback measurement is needed only when an
+    // emoji run can exceed that range (the original clipping case).
+    const naturalWidth = isEmojiLikeText(fragment.text)
+      ? measureCanvasTextRuns(
+        context,
+        splitCanvasTextRuns(normalizeCanvasVisibleText(fragment.text)),
+        fontSize,
+        {
+          fontFamily: fragment.fontFamily,
+          fontWeight: fragment.fontWeight,
+          fontStyle: fragment.fontStyle
+        }
+      )
+      : 0;
     const measuredWidth = getCanvasTextPaintWidth(
       left,
       right,
@@ -14409,8 +14431,8 @@ function getPreviewWaitProfile(container: HTMLElement): {
 
 async function waitForPreviewDomStable(container: HTMLElement, timeoutMs: number): Promise<void> {
   const started = Date.now();
-  const minWaitMs = Math.min(420, Math.max(120, timeoutMs * 0.08));
-  const stableForMs = Math.min(520, Math.max(180, timeoutMs * 0.16));
+  const minWaitMs = Math.min(300, Math.max(80, timeoutMs * 0.06));
+  const stableForMs = Math.min(360, Math.max(120, timeoutMs * 0.12));
   let lastSignature = getPreviewDomSignature(container);
   let lastChangedAt = Date.now();
 
@@ -14549,7 +14571,7 @@ async function waitForEmbeddedPreviews(container: HTMLElement, timeoutMs: number
       } else {
         stableFrames += 1;
       }
-      if (stableFrames >= 2 && (changed || pendingEmbeds.every((element) => element.getBoundingClientRect().height > 0.5))) return changed;
+      if (stableFrames >= 1 && (changed || pendingEmbeds.every((element) => element.getBoundingClientRect().height > 0.5))) return changed;
     }
   } finally {
     observer.disconnect();

@@ -10488,7 +10488,17 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
     const fontSizePx = parseFloat(itemStyle.fontSize) || parseFloat(style.fontSize) || 16;
     const size = Math.max(7, Math.min(rect.width, rect.height));
     const left = rect.left - pageRect.left + Math.max(0, (rect.width - size) / 2);
-    const top = rect.top - pageRect.top + Math.max(0, (rect.height - size) / 2);
+    const measuredTop = rect.top - pageRect.top + Math.max(0, (rect.height - size) / 2);
+    // Theme CSS can shift or enlarge the native input box relative to the
+    // task line. Align the visual center to the first rendered text line so
+    // exported checkboxes stay attached to their task in every view/theme.
+    const firstTextRect = item ? firstTextRectInside(item) : null;
+    const textCenter = firstTextRect
+      ? firstTextRect.top - pageRect.top + firstTextRect.height / 2
+      : null;
+    const inputCenter = rect.top - pageRect.top + rect.height / 2;
+    const canAlignToText = textCenter !== null && Math.abs(inputCenter - textCenter) <= fontSizePx * 1.75;
+    const top = canAlignToText ? textCenter - size / 2 : measuredTop;
     const visibleBackground = normalizeVisibleCssColor(style.backgroundColor);
     const background = visibleBackground ? parseCssColor(visibleBackground) : null;
     const borderWidthPx = Math.max(0.75, Math.min(3, parseFloat(style.borderTopWidth) || 1));
@@ -11052,7 +11062,7 @@ function measureTextNode(
 
   const pushCurrent = (): void => {
     if (!current) return;
-    const cleanText = normalizeLineText(current.text);
+    const cleanText = compactSeparatorSpacing(current.text);
     if (cleanText) {
       fragments.push({
         text: cleanText,
@@ -11211,11 +11221,11 @@ function compactSeparatorSpacing(text: string): string {
   if (!clean || isPdfJumpHref(clean)) return clean;
 
   const hasCjk = /[\u3400-\u9FFF\uF900-\uFAFF]/u.test(clean);
-  const separatorCount = (clean.match(/[·•・|｜/、，,;；<>#()[\]（）【】]/gu) ?? []).length;
+  const separatorCount = (clean.match(/[:：·•・|｜/、，,;；<>#()[\]（）【】]/gu) ?? []).length;
   if (!hasCjk && separatorCount < 2) return clean;
 
   return clean
-    .replace(/\s*([·•・|｜/、，,;；<>#()[\]（）【】])\s*/gu, "$1")
+    .replace(/\s*([:：·•・|｜/、，,;；<>#()[\]（）【】])\s*/gu, "$1")
     .replace(/[ \t\u00A0]{2,}/gu, " ")
     .trim();
 }

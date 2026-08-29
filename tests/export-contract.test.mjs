@@ -610,3 +610,14 @@ test("the release bundle contains no dynamic code or script injection", async ()
   assert.doesNotMatch(bundle, /new\s+Function\s*\(/);
   assert.doesNotMatch(bundle, /createElement\s*\(\s*["']script["']/);
 });
+
+test("text separators and task checkbox geometry follow the rendered line", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /const cleanText = compactSeparatorSpacing\(current\.text\)/);
+  assert.match(source, /function compactSeparatorSpacing\(text: string\)/);
+  assert.match(source, /separatorCount = \(clean\.match\(\/[\s\S]*?[:：][\s\S]*?\/gu\)/);
+  assert.match(source, /const firstTextRect = item \? firstTextRectInside\(item\) : null/);
+  assert.match(source, /const canAlignToText = textCenter !== null && Math\.abs\(inputCenter - textCenter\) <= fontSizePx \* 1\.75/);
+  assert.match(source, /const top = canAlignToText \? textCenter - size \/ 2 : measuredTop/);
+});

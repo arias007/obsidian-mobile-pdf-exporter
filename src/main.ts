@@ -3451,6 +3451,16 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const previewRenderer = surface.mode === "preview"
       ? getLivePreviewRenderer(this.app, rootEl)
       : null;
+    // Avoid rescanning for embeds on every capture window when the surface
+    // has none. Virtualized reading views stay enabled because later sections
+    // can mount their embeds as the scroll position changes.
+    const mayHaveEmbeddedPreviews = Boolean(
+      previewRenderer || rootEl.querySelector(".internal-embed, .media-embed, iframe, object, embed")
+    );
+    const hasDrawingSurface = Boolean(
+      rootEl.matches(".note-doodle-shell, .notedraw-shell")
+      || rootEl.querySelector(".note-doodle-shell, .notedraw-shell")
+    );
     // NoteDraw flow spacers are virtualized with the Markdown preview. Measure
     // the source layout at the document origin so line-linked insertions are
     // available even when the user left the note scrolled near the bottom.
@@ -3463,7 +3473,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     // line-linked geometry. Otherwise the virtualized view may not contain the
     // early blocks (for example lines 29-30), forcing a stale saved-coordinate
     // fallback and moving inserted drawings over later embeds.
-    const hasNoteDrawSurface = Boolean(rootEl.querySelector(".notedraw-shell, .note-doodle-shell"));
+    const hasNoteDrawSurface = hasDrawingSurface;
     if (previewRenderer && hasNoteDrawSurface) {
       await primeLivePreviewLayout(rootEl, scrollEl, previewRenderer, signal);
       await nextAnimationFrame();
@@ -3524,7 +3534,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
         if (surface.mode === "preview" && index > 0 && !previewRenderer && !fastStaticSurface) {
           await waitForPreviewDomStable(rootEl, 360);
         }
-        refreshLiveDrawingSurface(rootEl);
+        if (hasDrawingSurface) refreshLiveDrawingSurface(rootEl);
         if (!fastStaticSurface) await nextAnimationFrame();
         if (previewRenderer) {
           const connectedSections = getUncapturedConnectedPreviewSectionElements(
@@ -3540,7 +3550,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
           await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 1100));
           await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal);
         }
-        if (await waitForEmbeddedPreviews(rootEl, 180)) {
+        if (mayHaveEmbeddedPreviews && await waitForEmbeddedPreviews(rootEl, 180)) {
           await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal, previewRenderer);
         }
         throwIfExportCancelled(signal);
@@ -3637,7 +3647,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
             if (await waitForImagesInElements(connectedSections, 420)) {
               await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
             }
-            if (await waitForEmbeddedPreviews(rootEl, 180)) {
+            if (mayHaveEmbeddedPreviews && await waitForEmbeddedPreviews(rootEl, 180)) {
               await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
             }
             captureConnectedLivePreviewSections(
@@ -3660,7 +3670,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       scrollEl.scrollLeft = originalScrollLeft;
       suppressedInlineTitles.forEach((element) => element.classList.remove("mobile-pdf-exporter-skip"));
       preparedNoteDraw.cleanup();
-      refreshLiveDrawingSurface(rootEl);
+      if (hasDrawingSurface) refreshLiveDrawingSurface(rootEl);
       await nextAnimationFrame();
     }
 

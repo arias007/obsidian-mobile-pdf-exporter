@@ -485,7 +485,8 @@ test("PDF text keeps line endings visible and normalizes Arabic copy mappings", 
   assert.match(normalized, /<0003> <0041>/);
   assert.match(source, /normalizePdfToUnicodeMaps\(pdfDoc, \{ PDFName, decodePDFRawStream \}\)/);
   assert.match(source, /getCanvasTextPaintWidth\(/);
-  assert.match(source, /const hasNoteDrawSurface = Boolean\(rootEl\.querySelector\("\.notedraw-shell, \.note-doodle-shell"\)\)/);
+  assert.match(source, /const hasDrawingSurface = Boolean\([\s\S]*?\.notedraw-shell, \.note-doodle-shell/);
+  assert.match(source, /const hasNoteDrawSurface = hasDrawingSurface/);
   assert.match(source, /previewRenderer && hasNoteDrawSurface/);
   assert.match(source, /needsInlineCollisionCorrection/);
   assert.match(source, /const clipLeft = fragment\.direction === "rtl"/);

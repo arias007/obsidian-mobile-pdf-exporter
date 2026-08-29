@@ -619,5 +619,7 @@ test("text separators and task checkbox geometry follow the rendered line", asyn
   assert.match(source, /separatorCount = \(clean\.match\(\/[\s\S]*?[:：][\s\S]*?\/gu\)/);
   assert.match(source, /const firstTextRect = item \? firstTextRectInside\(item\) : null/);
   assert.match(source, /const canAlignToText = textCenter !== null && Math\.abs\(inputCenter - textCenter\) <= fontSizePx \* 1\.75/);
-  assert.match(source, /const top = canAlignToText \? textCenter - size \/ 2 : measuredTop/);
+  assert.match(source, /const top = canAlignToText \? textCenter - fontSizePx \* 0\.12 - size \/ 2 : measuredTop/);
+  assert.match(source, /function compactLinkedFragmentSpacing\(fragments: TextFragment\[\]\)/);
+  assert.match(source, /if \(fragment\.href && sameLine && previousEndsSeparator/);
 });

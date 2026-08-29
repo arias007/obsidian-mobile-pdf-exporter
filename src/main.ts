@@ -9233,7 +9233,27 @@ function captureTextFragments(
     node = walker.nextNode();
   }
 
-  return sortTextFragmentsForDrawing(fragments);
+  return compactLinkedFragmentSpacing(sortTextFragmentsForDrawing(fragments));
+}
+
+function compactLinkedFragmentSpacing(fragments: TextFragment[]): TextFragment[] {
+  const compacted: TextFragment[] = [];
+  for (const fragment of fragments) {
+    const previous = compacted[compacted.length - 1];
+    const sameLine = previous && previous.mergeScope === fragment.mergeScope &&
+      Math.abs(previous.top - fragment.top) <= Math.max(3, fragment.fontSizePx * 0.45);
+    const gap = previous ? fragment.left - previous.right : 0;
+    const previousEndsSeparator = previous && (
+      /[:：,，、;；]$/u.test(previous.text.trim()) || isEmojiLikeText(previous.text.slice(-2))
+    );
+    if (fragment.href && sameLine && previousEndsSeparator && gap > 0.5 && gap <= fragment.fontSizePx * 1.5) {
+      const shift = gap - 0.25;
+      fragment.left -= shift;
+      fragment.right -= shift;
+    }
+    compacted.push(fragment);
+  }
+  return compacted;
 }
 
 function captureEmbeddedOfficeCardTextFragments(
@@ -10498,7 +10518,7 @@ function captureDecorationFragments(pageEl: HTMLElement): DecorationFragment[] {
       : null;
     const inputCenter = rect.top - pageRect.top + rect.height / 2;
     const canAlignToText = textCenter !== null && Math.abs(inputCenter - textCenter) <= fontSizePx * 1.75;
-    const top = canAlignToText ? textCenter - size / 2 : measuredTop;
+    const top = canAlignToText ? textCenter - fontSizePx * 0.12 - size / 2 : measuredTop;
     const visibleBackground = normalizeVisibleCssColor(style.backgroundColor);
     const background = visibleBackground ? parseCssColor(visibleBackground) : null;
     const borderWidthPx = Math.max(0.75, Math.min(3, parseFloat(style.borderTopWidth) || 1));

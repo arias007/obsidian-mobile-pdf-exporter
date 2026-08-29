@@ -470,6 +470,8 @@ test("PDF text keeps line endings visible and normalizes Arabic copy mappings", 
 
   assert.equal(text.getTextFragmentPaintWidth(100, 180, 16, 800), 87.2);
   assert.equal(text.getTextFragmentPaintWidth(780, 800, 16, 800), 20);
+  assert.equal(text.getCanvasTextPaintWidth(100, 180, 16, 800, 120), 122.24);
+  assert.equal(text.getCanvasTextPaintWidth(780, 800, 16, 800, 40), 20);
   const cmap = [
     "beginbfchar",
     "<0001> <FEA2>",
@@ -482,7 +484,7 @@ test("PDF text keeps line endings visible and normalizes Arabic copy mappings", 
   assert.match(normalized, /<0002> <0644>/);
   assert.match(normalized, /<0003> <0041>/);
   assert.match(source, /normalizePdfToUnicodeMaps\(pdfDoc, \{ PDFName, decodePDFRawStream \}\)/);
-  assert.match(source, /getTextFragmentPaintWidth\(/);
+  assert.match(source, /getCanvasTextPaintWidth\(/);
   assert.match(source, /const clipLeft = fragment\.direction === "rtl"/);
   assert.match(source, /!\/\^var\\\(/iu);
 });

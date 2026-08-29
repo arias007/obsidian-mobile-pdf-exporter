@@ -33,7 +33,7 @@ import embeddedThaiFontGzipBase64 from "../fonts/NotoSansThai-Regular.ttf.gz";
 import supportCode1Base64 from "./generated/support-code-1.jpg";
 import supportCode2Base64 from "./generated/support-code-2.png";
 import { computeCenteredSurfaceOffset } from "./surface-layout";
-import { getTextFragmentPaintWidth, normalizePdfToUnicodeCMap } from "./pdf-text";
+import { getCanvasTextPaintWidth, normalizePdfToUnicodeCMap } from "./pdf-text";
 
 const UI_LANGUAGES = [
   "auto",
@@ -11014,6 +11014,10 @@ function measureTextNode(
   const range = textNode.ownerDocument.createRange();
   const fragments: TextFragment[] = [];
   let current: TextLineDraft | null = null;
+  // Some WebViews expose zero-sized ranges for punctuation adjacent to emoji
+  // or inline formatting. Keep those characters until the next useful glyph
+  // so separators such as ':' remain in the exported line.
+  let pendingNoRect = "";
   let offset = 0;
 
   const pushCurrent = (): void => {
@@ -11056,7 +11060,13 @@ function measureTextNode(
     const rect = firstUsefulRect(range);
 
     if (!rect) {
-      if (/\s/u.test(char) && current) current.text += " ";
+      if (/\s/u.test(char)) {
+        if (current) current.text += " ";
+        else if (pendingNoRect) pendingNoRect += " ";
+      } else {
+        if (current) current.text += char;
+        else pendingNoRect += char;
+      }
       continue;
     }
 
@@ -11078,7 +11088,7 @@ function measureTextNode(
 
     if (!current) {
       current = {
-        text: "",
+        text: pendingNoRect,
         left,
         top,
         right,
@@ -11095,6 +11105,7 @@ function measureTextNode(
         headingLevel,
         mergeScope
       };
+      pendingNoRect = "";
     }
 
     current.text += char;
@@ -11102,6 +11113,33 @@ function measureTextNode(
     current.top = Math.min(current.top, top);
     current.right = Math.max(current.right, right);
     current.bottom = Math.max(current.bottom, bottom);
+  }
+
+  if (pendingNoRect) {
+    if (current) current.text += pendingNoRect;
+    else {
+      const fallbackRect = parent.getBoundingClientRect();
+      if (fallbackRect.width > 0.1 && fallbackRect.height > 0.1) {
+        current = {
+          text: pendingNoRect,
+          left: fallbackRect.left - pageRect.left,
+          top: fallbackRect.top - pageRect.top,
+          right: fallbackRect.right - pageRect.left,
+          bottom: fallbackRect.bottom - pageRect.top,
+          fontSizePx,
+          fontFamily: style.fontFamily || "",
+          fontWeight: style.fontWeight || "400",
+          fontStyle: style.fontStyle || "normal",
+          direction,
+          color,
+          underline,
+          lineThrough,
+          href,
+          headingLevel,
+          mergeScope
+        };
+      }
+    }
   }
 
   pushCurrent();
@@ -13081,11 +13119,22 @@ function drawCanvasTextLayer(
     const right = clampNumber(fragment.right, left + 1, options.sourceWidthPx, left + 1);
     const x = fragment.direction === "rtl" ? right : left;
     const y = fragment.top - options.pageTopPx + fragment.fontSizePx * 0.86;
-    const measuredWidth = getTextFragmentPaintWidth(
+    const naturalWidth = measureCanvasTextRuns(
+      context,
+      splitCanvasTextRuns(normalizeCanvasVisibleText(fragment.text)),
+      fontSize,
+      {
+        fontFamily: fragment.fontFamily,
+        fontWeight: fragment.fontWeight,
+        fontStyle: fragment.fontStyle
+      }
+    );
+    const measuredWidth = getCanvasTextPaintWidth(
       left,
       right,
       fragment.fontSizePx,
-      options.sourceWidthPx
+      options.sourceWidthPx,
+      naturalWidth
     );
     const clipLeft = fragment.direction === "rtl" ? Math.max(0, right - measuredWidth) : left;
     const maxWidth = measuredWidth;

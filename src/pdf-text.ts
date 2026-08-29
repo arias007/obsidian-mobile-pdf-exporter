@@ -65,3 +65,22 @@ export function getTextFragmentPaintWidth(
   const safety = Math.max(6, Math.min(18, Math.max(1, fontSizePx) * 0.45));
   return Math.max(1, Math.min(available, Math.max(1, right - left) + safety));
 }
+
+/**
+ * Canvas text can be wider than the browser range box when a line mixes
+ * emoji fallback glyphs, CJK fallback fonts, and punctuation. Keep the
+ * measured DOM width as the baseline, but never clip the actual canvas run.
+ */
+export function getCanvasTextPaintWidth(
+  left: number,
+  right: number,
+  fontSizePx: number,
+  sourceWidthPx: number,
+  naturalWidthPx: number
+): number {
+  const measured = getTextFragmentPaintWidth(left, right, fontSizePx, sourceWidthPx);
+  const available = Math.max(1, sourceWidthPx - Math.max(0, left));
+  const natural = Number.isFinite(naturalWidthPx) ? Math.max(1, naturalWidthPx) : 1;
+  const safety = Math.max(1.5, Math.min(8, Math.max(1, fontSizePx) * 0.14));
+  return Math.max(1, Math.min(available, Math.max(measured, natural + safety)));
+}

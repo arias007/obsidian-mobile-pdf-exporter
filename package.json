@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mobile-pdf-exporter",
-  "version": "0.6.10",
+  "version": "0.6.11",
   "description": "Export Obsidian content to PDF, DOCX, PPTX, PNG, and self-contained HTML.",
   "main": "main.js",
   "scripts": {

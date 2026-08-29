@@ -11542,8 +11542,9 @@ function drawTextLayer(
   const opacity = options.opacity ?? 1;
   const drawUnderlines = options.drawUnderlines ?? true;
   const { PDFDict, PDFHexString, PDFName, PDFOperator, PDFOperatorNames } = getPdfLibPrimitives();
+  const lineEnds: Array<{ scope: Element; top: number; end: number }> = [];
 
-  for (const fragment of fragments) {
+  for (const fragment of sortTextFragmentsForDrawing(fragments)) {
     if (fragment.bottom <= pageTopPx + 0.5 || fragment.top >= pageBottomPx - 0.5) continue;
 
     const localTop = fragment.top - pageTopPx;
@@ -11551,20 +11552,35 @@ function drawTextLayer(
     const visualRight = clampNumber(fragment.right * pxToPt, 4, pageWidthPt, pageWidthPt);
     const baselineY = pageHeightPt - (contentTopInsetPx + localTop + fragment.fontSizePx * 0.86) * pxToPt;
     const glyphSafety = Math.max(6, Math.min(18, fragment.fontSizePx * 0.45)) * pxToPt;
-    const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt + glyphSafety);
     const font = selectPdfFont(fonts, fragment.text);
     const hiddenInVisualLayer = options.hiddenVisualTextFragments?.has(fragment) ?? false;
-    const naturalWidth = font.widthOfTextAtSize(
-      getEncodablePdfText(font, stripProblematicPdfChars(compactSeparatorSpacing(fragment.text))),
-      fontSize
-    );
+    const cleanText = getEncodablePdfText(font, stripProblematicPdfChars(fragment.text));
+    const naturalWidth = font.widthOfTextAtSize(cleanText, fontSize);
+    const visualNaturalWidth = naturalWidth + countPdfVisualPlaceholderAdvances(fragment.text) * fontSize;
+    const measuredWidth = Math.max(1, (fragment.right - fragment.left) * pxToPt + glyphSafety, visualNaturalWidth);
     const isRtl = fragment.direction === "rtl";
-    const x = isRtl
+    let x = isRtl
       ? clampNumber(visualRight - Math.min(measuredWidth, Math.max(1, naturalWidth)), 0, pageWidthPt - 4, 0)
       : clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
+    if (!isRtl) {
+      const line = lineEnds.find((candidate) => (
+        candidate.scope === fragment.mergeScope &&
+        Math.abs(candidate.top - fragment.top) <= Math.max(3, fragment.fontSizePx * 0.45)
+      ));
+      if (line && x < line.end - 0.25) x = line.end + 0.25;
+    }
     const maxWidth = Math.max(8, Math.min(isRtl ? visualRight - x : pageWidthPt - x, measuredWidth));
+    if (!isRtl) {
+      const line = lineEnds.find((candidate) => (
+        candidate.scope === fragment.mergeScope &&
+        Math.abs(candidate.top - fragment.top) <= Math.max(3, fragment.fontSizePx * 0.45)
+      ));
+      const end = x + Math.min(maxWidth, Math.max(1, visualNaturalWidth));
+      if (line) line.end = Math.max(line.end, end);
+      else lineEnds.push({ scope: fragment.mergeScope, top: fragment.top, end });
+    }
 
-    const useActualText = getPdfScriptFont(fragment.text) === "arabic";
+    const useActualText = getPdfScriptFont(fragment.text) === "arabic" || cleanText !== fragment.text;
     if (useActualText) {
       const markedProps = PDFDict.withContext(page.doc.context);
       markedProps.set(PDFName.of("ActualText"), PDFHexString.fromText(fragment.text));
@@ -11575,7 +11591,8 @@ function drawTextLayer(
     }
     let drawn: { text: string; size: number; width: number };
     try {
-      drawn = drawSafeText(page, fragment.text, {
+      const drawText = `${cleanText}${" ".repeat(countPdfVisualPlaceholderAdvances(fragment.text))}`;
+      drawn = drawSafeText(page, drawText, {
         x,
         y: baselineY,
         size: fontSize,
@@ -11614,7 +11631,7 @@ function drawSafeText(
     opacity?: number;
   }
 ): { text: string; size: number; width: number } {
-  const clean = getEncodablePdfText(options.font, stripProblematicPdfChars(compactSeparatorSpacing(text)));
+  const clean = getEncodablePdfText(options.font, stripProblematicPdfChars(text));
   if (!clean) return { text: "", size: options.size, width: 0 };
   const width = options.font.widthOfTextAtSize(clean, options.size);
   const fitSize = width > options.maxWidth
@@ -11963,6 +11980,10 @@ function stripProblematicPdfChars(text: string): string {
     stripped += char;
   }
   return stripped.trim();
+}
+
+function countPdfVisualPlaceholderAdvances(text: string): number {
+  return getCanvasGraphemeSegments(text).filter((segment) => isEmojiLikeText(segment)).length;
 }
 
 function shouldDrawMediaOnPage(
@@ -13111,13 +13132,14 @@ function drawCanvasTextLayer(
     colorMode: PdfColorMode;
   }
 ): void {
-  for (const fragment of fragments) {
+  const lineEnds: Array<{ scope: Element; top: number; end: number }> = [];
+  for (const fragment of sortTextFragmentsForDrawing(fragments)) {
     if (fragment.bottom <= options.pageTopPx + 0.5 || fragment.top >= options.pageBottomPx - 0.5) continue;
 
     const fontSize = Math.max(5, fragment.fontSizePx);
     const left = clampNumber(fragment.left, 0, options.sourceWidthPx - 4, 0);
     const right = clampNumber(fragment.right, left + 1, options.sourceWidthPx, left + 1);
-    const x = fragment.direction === "rtl" ? right : left;
+    let x = fragment.direction === "rtl" ? right : left;
     const y = fragment.top - options.pageTopPx + fragment.fontSizePx * 0.86;
     const naturalWidth = measureCanvasTextRuns(
       context,
@@ -13136,7 +13158,17 @@ function drawCanvasTextLayer(
       options.sourceWidthPx,
       naturalWidth
     );
-    const clipLeft = fragment.direction === "rtl" ? Math.max(0, right - measuredWidth) : left;
+    if (fragment.direction !== "rtl") {
+      const line = lineEnds.find((candidate) => (
+        candidate.scope === fragment.mergeScope &&
+        Math.abs(candidate.top - fragment.top) <= Math.max(3, fragment.fontSizePx * 0.45)
+      ));
+      if (line && x < line.end - 0.25) x = line.end + 0.25;
+      const end = x + Math.min(measuredWidth, naturalWidth);
+      if (line) line.end = Math.max(line.end, end);
+      else lineEnds.push({ scope: fragment.mergeScope, top: fragment.top, end });
+    }
+    const clipLeft = fragment.direction === "rtl" ? Math.max(0, right - measuredWidth) : x;
     const maxWidth = measuredWidth;
     context.save();
     context.beginPath();

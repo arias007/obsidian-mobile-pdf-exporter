@@ -3441,7 +3441,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await waitForPreviewDomStable(rootEl, 900);
       throwIfExportCancelled(signal);
     }
-    await waitForEmbeddedPreviews(rootEl, 1800);
+    // Existing embeds are already laid out by Obsidian in the common case.
+    // Keep a short settle window only for genuinely pending frames/images.
+    await waitForEmbeddedPreviews(rootEl, 480);
     const rootRect = rootEl.getBoundingClientRect();
     const liveWidthPx = Math.max(1, scrollEl.clientWidth || rootRect.width);
     const originalScrollTop = scrollEl.scrollTop;
@@ -3461,10 +3463,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
     // line-linked geometry. Otherwise the virtualized view may not contain the
     // early blocks (for example lines 29-30), forcing a stale saved-coordinate
     // fallback and moving inserted drawings over later embeds.
-    if (previewRenderer) {
+    const hasNoteDrawSurface = Boolean(rootEl.querySelector(".notedraw-shell, .note-doodle-shell"));
+    if (previewRenderer && hasNoteDrawSurface) {
       await primeLivePreviewLayout(rootEl, scrollEl, previewRenderer, signal);
       await nextAnimationFrame();
-      await waitForPreviewDomStable(rootEl, 320);
+      await waitForPreviewDomStable(rootEl, 220);
     }
     const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, rootEl);
     scrollEl.scrollTop = originalScrollTop;
@@ -3525,7 +3528,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
             previewRenderer,
             previewSectionCaptures
           );
-          const waitedForImages = await waitForImagesInElements(connectedSections, 900);
+          const waitedForImages = await waitForImagesInElements(connectedSections, 420);
           if (waitedForImages) {
             await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal, previewRenderer);
           }
@@ -3533,7 +3536,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
           await waitForImages(rootEl, Math.min(IMAGE_WAIT_TIMEOUT_MS, 1100));
           await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal);
         }
-        if (await waitForEmbeddedPreviews(rootEl, 420)) {
+        if (await waitForEmbeddedPreviews(rootEl, 180)) {
           await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, scrollPositions[index], signal, previewRenderer);
         }
         throwIfExportCancelled(signal);
@@ -3627,10 +3630,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
               previewRenderer,
               previewSectionCaptures
             );
-            if (await waitForImagesInElements(connectedSections, 900)) {
+            if (await waitForImagesInElements(connectedSections, 420)) {
               await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
             }
-            if (await waitForEmbeddedPreviews(rootEl, 420)) {
+            if (await waitForEmbeddedPreviews(rootEl, 180)) {
               await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
             }
             captureConnectedLivePreviewSections(
@@ -11563,7 +11566,8 @@ function drawTextLayer(
       ? clampNumber(visualRight - Math.min(measuredWidth, Math.max(1, naturalWidth)), 0, pageWidthPt - 4, 0)
       : clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
     if (!isRtl) {
-      const line = lineEnds.find((candidate) => (
+      const needsInlineCollisionCorrection = /^[：:]/u.test(fragment.text) || isEmojiLikeText(fragment.text.slice(0, 2));
+      const line = needsInlineCollisionCorrection && lineEnds.find((candidate) => (
         candidate.scope === fragment.mergeScope &&
         Math.abs(candidate.top - fragment.top) <= Math.max(3, fragment.fontSizePx * 0.45)
       ));
@@ -13159,7 +13163,8 @@ function drawCanvasTextLayer(
       naturalWidth
     );
     if (fragment.direction !== "rtl") {
-      const line = lineEnds.find((candidate) => (
+      const needsInlineCollisionCorrection = /^[：:]/u.test(fragment.text) || isEmojiLikeText(fragment.text.slice(0, 2));
+      const line = needsInlineCollisionCorrection && lineEnds.find((candidate) => (
         candidate.scope === fragment.mergeScope &&
         Math.abs(candidate.top - fragment.top) <= Math.max(3, fragment.fontSizePx * 0.45)
       ));

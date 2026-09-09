@@ -3479,7 +3479,18 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await nextAnimationFrame();
       await waitForPreviewDomStable(rootEl, 220);
     }
-    const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, rootEl);
+    // Some mobile Obsidian builds render the Properties panel outside the
+    // selected reading surface (or virtualize it away while the note is
+    // scrolled). Add a temporary, self-contained projection in that case so
+    // direct exports include the same frontmatter values as the PDF preview.
+    const livePropertiesFallback = await this.ensureLivePropertiesFallback(file, rootEl);
+    let preparedNoteDraw: PreparedNoteDrawExportOverlay;
+    try {
+      preparedNoteDraw = await this.prepareNoteDrawExportOverlay(file, rootEl);
+    } catch (error) {
+      livePropertiesFallback?.remove();
+      throw error;
+    }
     scrollEl.scrollTop = originalScrollTop;
     scrollEl.scrollLeft = originalScrollLeft;
     const suppressedInlineTitles = this.settings.includeTitle
@@ -3670,6 +3681,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       scrollEl.scrollLeft = originalScrollLeft;
       suppressedInlineTitles.forEach((element) => element.classList.remove("mobile-pdf-exporter-skip"));
       preparedNoteDraw.cleanup();
+      livePropertiesFallback?.remove();
       if (hasDrawingSurface) refreshLiveDrawingSurface(rootEl);
       await nextAnimationFrame();
     }
@@ -3739,6 +3751,24 @@ export default class MobilePdfExporterPlugin extends Plugin {
       linkContext
     });
     return model;
+  }
+
+  private async ensureLivePropertiesFallback(file: TFile, rootEl: HTMLElement): Promise<HTMLElement | null> {
+    if (file.extension.toLowerCase() !== "md") return null;
+    const hasNativeProperties = rootEl.matches(".metadata-container, .metadata-properties")
+      ? Boolean(rootEl.querySelector(".metadata-property"))
+      : Boolean(rootEl.querySelector(".metadata-container .metadata-property, .metadata-properties .metadata-property"));
+    if (hasNativeProperties) {
+      return null;
+    }
+
+    try {
+      const markdown = await this.app.vault.cachedRead(file);
+      return injectNotePropertiesPreview(this.app, file, rootEl, markdown);
+    } catch (error) {
+      console.warn("Mobile PDF Exporter could not add live note properties fallback", error);
+      return null;
+    }
   }
 
   private async renderMarkdownPreview(
@@ -7955,9 +7985,42 @@ interface NotePropertyEntry {
   value: unknown;
 }
 
-function injectNotePropertiesPreview(app: App, file: TFile, markdownEl: HTMLElement, markdown: string): void {
+const METADATA_VALUE_SELECTORS = [
+  ".metadata-property-value input",
+  ".metadata-property-value textarea",
+  ".metadata-property-value [role='textbox']",
+  ".metadata-property-value .metadata-input-text",
+  ".metadata-property-value .multi-select-pill",
+  ".metadata-property-value .multi-select-pill-content",
+  ".metadata-property-value .metadata-link",
+  ".metadata-property-value [data-value]",
+  ".metadata-property-value[data-value]",
+  ".metadata-property-value[data-property-value]",
+  ".metadata-property-value[aria-label]",
+  ".metadata-property-value[title]",
+  ".metadata-property-value .metadata-property-value-content",
+  ".metadata-property-value .metadata-input-longtext"
+].join(",");
+
+const METADATA_CONTROL_SELECTORS = [
+  ".metadata-property-value input",
+  ".metadata-property-value textarea",
+  ".metadata-property-value [role='textbox']",
+  ".metadata-property-value .metadata-input-text"
+].join(",");
+
+const METADATA_UTILITY_SELECTOR = [
+  "button",
+  ".metadata-property-icon",
+  ".metadata-property-actions",
+  ".metadata-property-action",
+  ".multi-select-pill-remove",
+  ".multi-select-pill-remove-button"
+].join(",");
+
+function injectNotePropertiesPreview(app: App, file: TFile, markdownEl: HTMLElement, markdown: string): HTMLElement | null {
   const entries = getNotePropertyEntries(app, file, markdown);
-  if (entries.length === 0) return;
+  if (entries.length === 0) return null;
 
   const nativeContainer = markdownEl.querySelector<HTMLElement>(".metadata-container, .metadata-properties");
   if (nativeContainer && nativeContainer.querySelector(".metadata-property")) {
@@ -7965,12 +8028,16 @@ function injectNotePropertiesPreview(app: App, file: TFile, markdownEl: HTMLElem
     // property rather than a text node, so cloning the panel otherwise loses
     // it. Replace controls only in this detached export render.
     materializeMetadataControlValues(nativeContainer);
-    return;
+    return null;
   }
 
   const panel = (markdownEl.ownerDocument.win as ObsidianExportWindow).createEl("div");
   panel.className = "mobile-pdf-exporter-properties metadata-container";
   panel.setAttribute("data-mpe-properties", "true");
+  appendElement(panel, "div", {
+    cls: "mobile-pdf-exporter-properties-heading",
+    text: runtimeUiLanguage === "zh" ? "\u7B14\u8BB0\u5C5E\u6027" : "Properties"
+  });
   for (const entry of entries) {
     const row = appendElement(panel, "div", { cls: "mobile-pdf-exporter-property metadata-property" });
     row.setAttribute("data-property-key", entry.key);
@@ -7979,18 +8046,18 @@ function injectNotePropertiesPreview(app: App, file: TFile, markdownEl: HTMLElem
     const value = appendElement(row, "div", { cls: "mobile-pdf-exporter-property-value metadata-property-value" });
     const text = formatNotePropertyValue(entry.value);
     value.setAttribute("data-property-value", text);
+    value.setAttribute("aria-label", text || entry.key);
     if (text) value.textContent = text;
     else value.setAttribute("data-empty", "true");
   }
   markdownEl.insertBefore(panel, markdownEl.firstChild);
+  return panel;
 }
 
 function materializeMetadataControlValues(container: HTMLElement): void {
-  const controls = Array.from(container.querySelectorAll<HTMLElement>(
-    ".metadata-property-value input, .metadata-property-value textarea, " +
-      ".metadata-property-value [role='textbox']"
-  ));
+  const controls = Array.from(container.querySelectorAll<HTMLElement>(METADATA_CONTROL_SELECTORS));
   for (const control of controls) {
+    if (control.matches(METADATA_UTILITY_SELECTOR)) continue;
     const inputType = control.tagName.toLowerCase() === "input"
       ? (control.getAttribute("type") ?? "text").toLowerCase()
       : "";
@@ -8008,7 +8075,9 @@ function materializeMetadataControlValues(container: HTMLElement): void {
     replacement.style.fontWeight = style.fontWeight || parentStyle.fontWeight;
     replacement.style.fontStyle = style.fontStyle || parentStyle.fontStyle;
     replacement.style.lineHeight = style.lineHeight || parentStyle.lineHeight;
-    replacement.style.color = normalizeVisibleCssColor(style.color) ? style.color : parentStyle.color;
+    replacement.style.color = normalizeVisibleCssColor(style.color) ??
+      normalizeVisibleCssColor(parentStyle.color) ?? "inherit";
+    replacement.setCssProps({ opacity: "1", visibility: "visible" });
     control.replaceWith(replacement);
   }
 }
@@ -9409,13 +9478,11 @@ function captureMetadataValueFragments(
 ): TextFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
   const fragments: TextFragment[] = [];
-  const controls = Array.from(pageEl.querySelectorAll<HTMLElement>(
-    ".metadata-property-value input, .metadata-property-value textarea, " +
-      ".metadata-property-value [role='textbox']"
-  ));
+  const controls = Array.from(pageEl.querySelectorAll<HTMLElement>(METADATA_VALUE_SELECTORS));
+  const seen = new Set<string>();
 
   for (const control of controls) {
-    if (!isExportableElement(control)) continue;
+    if (control.matches(METADATA_UTILITY_SELECTOR)) continue;
     const inputType = control.tagName.toLowerCase() === "input"
       ? (control.getAttribute("type") ?? "text").toLowerCase()
       : "";
@@ -9423,16 +9490,27 @@ function captureMetadataValueFragments(
 
     const text = getMetadataControlValue(control);
     if (!text) continue;
-    const rect = control.getBoundingClientRect();
+    const valueContainer = control.closest<HTMLElement>(".metadata-property-value, .metadata-property") ??
+      control.parentElement;
+    // Obsidian's mobile date editor can keep the native input transparent while
+    // painting the value through a sibling/pseudo element. In that case the
+    // value container is still visible and provides a usable fallback box.
+    const exportableControl = isExportableElement(control);
+    const exportableContainer = valueContainer ? isExportableElement(valueContainer) : false;
+    if (!exportableControl && !exportableContainer) continue;
+    const controlRect = control.getBoundingClientRect();
+    const rect = controlRect.width > 0.5 && controlRect.height > 0.5
+      ? controlRect
+      : valueContainer?.getBoundingClientRect() ?? controlRect;
     if (rect.width <= 0.5 || rect.height <= 0.5) continue;
 
     const style = getComputedStyle(control);
-    const parentStyle = control.parentElement ? getComputedStyle(control.parentElement) : style;
+    const parentStyle = valueContainer ? getComputedStyle(valueContainer) :
+      control.parentElement ? getComputedStyle(control.parentElement) : style;
     const fontSizePx = parseFloat(style.fontSize) || parseFloat(parentStyle.fontSize) || 16;
     const color = parseCssColor(normalizeVisibleCssColor(style.color) ?? normalizeVisibleCssColor(parentStyle.color) ?? "#1f2937") ??
       rgb(0.12, 0.12, 0.12);
-    const mergeScope = control.closest<HTMLElement>(".metadata-property-value, .metadata-property") ??
-      control.parentElement ?? control;
+    const mergeScope = valueContainer ?? control.parentElement ?? control;
     const fragment: TextFragment = {
       text: normalizeLineText(text),
       left: rect.left - pageRect.left,
@@ -9450,6 +9528,16 @@ function captureMetadataValueFragments(
       href: resolveLinkHref(control.closest("a, .internal-link, .external-link"), linkContext),
       mergeScope
     };
+
+    const key = [
+      fragment.text,
+      Math.round(fragment.left * 2),
+      Math.round(fragment.top * 2),
+      Math.round(fragment.right * 2),
+      Math.round(fragment.bottom * 2)
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
 
     if (!liveWindow) {
       fragments.push(fragment);
@@ -9473,9 +9561,22 @@ function captureMetadataValueFragments(
 }
 
 function getMetadataControlValue(control: HTMLElement): string {
-  const value = "value" in control ? String((control as HTMLInputElement | HTMLTextAreaElement).value ?? "") : "";
-  const fallback = control.getAttribute("value") ?? control.getAttribute("data-value") ?? control.textContent ?? "";
-  return (value || fallback).replace(/[\r\n]+/gu, " ").trim();
+  const value = "value" in control
+    ? String((control as HTMLInputElement | HTMLTextAreaElement).value ?? "")
+    : "";
+  const attributeValue = control.getAttribute("value") ??
+    control.getAttribute("data-value") ??
+    control.getAttribute("data-property-value") ??
+    "";
+  const text = control.textContent ?? "";
+  const accessible = control.getAttribute("aria-label") ?? control.getAttribute("title") ?? "";
+  return [value, attributeValue, text, accessible]
+    .map((candidate) => candidate.replace(/[\r\n]+/gu, " ").trim())
+    .find((candidate) => Boolean(candidate) && !isMetadataUtilityText(candidate)) ?? "";
+}
+
+function isMetadataUtilityText(value: string): boolean {
+  return /^(?:add|clear|delete|edit|property|property value|remove|value)$/iu.test(value.trim());
 }
 
 function compactLinkedFragmentSpacing(fragments: TextFragment[]): TextFragment[] {

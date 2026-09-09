@@ -291,7 +291,7 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /interface NoteDrawApiRuntime/);
   assert.match(source, /noteDrawSourcePath\?: string/);
   assert.match(source, /getAbstractFileByPath\(normalizePath\(options\.noteDrawSourcePath\)\)/);
-  assert.match(source, /const preparedNoteDraw = await this\.prepareNoteDrawExportOverlay\(file, rootEl\)/);
+  assert.match(source, /preparedNoteDraw = await this\.prepareNoteDrawExportOverlay\(file, rootEl\)/);
   assert.match(source, /const preparedNoteDraw = await this\.prepareNoteDrawExportOverlay\(noteDrawFile, noteDrawHost\)/);
   assert.match(source, /model = this\.capturePreviewPdfModel\(file, rendered\.pageEl\)/);
   assert.match(source, /preparedNoteDraw\.cleanup\(\)/);
@@ -636,9 +636,15 @@ test("frontmatter properties are present in HTML and date controls remain select
   assert.match(source, /metadataCache\.getFileCache\(file\)\?\.frontmatter/);
   assert.match(source, /function parseSimpleFrontmatterProperties\(markdown: string\)/);
   assert.match(source, /function materializeMetadataControlValues\(container: HTMLElement\)/);
+  assert.match(source, /METADATA_VALUE_SELECTORS/);
+  assert.match(source, /\.multi-select-pill/);
+  assert.match(source, /data-property-value/);
+  assert.match(source, /ensureLivePropertiesFallback\(file, rootEl\)/);
+  assert.match(source, /Mobile PDF Exporter could not add live note properties fallback/);
   assert.match(source, /function captureMetadataValueFragments\(/);
   assert.match(source, /getMetadataControlValue\(control\)/);
   assert.match(source, /const text = formatNotePropertyValue\(entry\.value\)/);
   assert.match(styles, /\.mobile-pdf-exporter-properties\s*\{/);
+  assert.match(styles, /\.mobile-pdf-exporter-properties-heading\s*\{/);
   assert.match(styles, /\.mobile-pdf-exporter-property-value\[data-empty="true"\]::after/);
 });

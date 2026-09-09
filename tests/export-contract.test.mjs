@@ -624,6 +624,17 @@ test("text separators and task checkbox geometry follow the rendered line", asyn
   assert.match(source, /if \(fragment\.href && sameLine && previousEndsSeparator/);
 });
 
+test("Properties text uses a single semantic capture path and stays aligned", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /parent\.closest\("\.metadata-property"\)\) return NodeFilter\.FILTER_REJECT/);
+  assert.match(source, /const alignmentRect = valueRect && valueRect\.height > 0\.5 \? valueRect : rowRect/);
+  assert.match(source, /const targetCenter = alignmentRect\.top - pageRect\.top \+ alignmentRect\.height \/ 2/);
+  assert.match(source, /top = targetCenter - keyHeight \/ 2/);
+  assert.match(source, /function isFastStaticPreview\(rootEl: HTMLElement\)/);
+  assert.match(source, /if \(isFastStaticPreview\(markdownEl\)\)/);
+});
+
 test("frontmatter properties are present in HTML and date controls remain selectable in PDF", async () => {
   const [source, styles] = await Promise.all([
     readFile(sourceUrl, "utf8"),

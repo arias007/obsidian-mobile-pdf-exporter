@@ -3518,7 +3518,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
         );
       }
       const viewportHeight = Math.max(160, scrollEl.clientHeight || rootRect.height || 640);
-      const captureStep = Math.max(120, viewportHeight * 0.72);
+      // A larger step reduces scroll/capture windows for ordinary notes while
+      // retaining a modest overlap so line boxes are not split at boundaries.
+      const captureStep = Math.max(120, viewportHeight * 0.82);
       const overlapHeight = Math.max(0, viewportHeight - captureStep);
       const scrollPositions = surface.mode === "preview"
         ? previewRenderer
@@ -3849,11 +3851,17 @@ export default class MobilePdfExporterPlugin extends Plugin {
         await waitForRenderedContent(markdownEl, 1000);
       }
 
-      const previewWaitProfile = getPreviewWaitProfile(markdownEl);
-      await waitForRenderedContent(markdownEl, previewWaitProfile.renderedContentMs);
-      await waitForPreviewDomStable(pageEl, previewWaitProfile.initialStableMs);
-      await waitForImages(pageEl, IMAGE_WAIT_TIMEOUT_MS);
-      await waitForPreviewDomStable(pageEl, previewWaitProfile.finalStableMs);
+      if (isFastStaticPreview(markdownEl)) {
+        // Static text and Properties do not need the long image/embed settle
+        // sequence. One committed frame is enough before measuring geometry.
+        await nextAnimationFrame(80);
+      } else {
+        const previewWaitProfile = getPreviewWaitProfile(markdownEl);
+        await waitForRenderedContent(markdownEl, previewWaitProfile.renderedContentMs);
+        await waitForPreviewDomStable(pageEl, previewWaitProfile.initialStableMs);
+        await waitForImages(pageEl, IMAGE_WAIT_TIMEOUT_MS);
+        await waitForPreviewDomStable(pageEl, previewWaitProfile.finalStableMs);
+      }
       this.injectNoteDoodleOverlay(file, markdownEl);
       await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
 
@@ -9193,7 +9201,7 @@ function buildLiveSurfaceCaptureScrollPositions(maxScrollTop: number, viewportHe
   if (maximum <= 0) return [0];
 
   const positions = new Set<number>([0, maximum]);
-  const step = Math.max(120, viewportHeight * 0.72);
+  const step = Math.max(120, viewportHeight * 0.82);
   for (let index = 1; ; index += 1) {
     const next = Math.min(maximum, Math.round(index * step));
     positions.add(next);
@@ -9321,6 +9329,12 @@ function isFastStaticLiveSurface(rootEl: HTMLElement): boolean {
   );
 }
 
+function isFastStaticPreview(rootEl: HTMLElement): boolean {
+  return isFastStaticLiveSurface(rootEl) && !rootEl.querySelector(
+    ".block-language-tasks, .dataview, .bases-view"
+  );
+}
+
 async function waitForLivePreviewRendererSettled(
   scrollEl: HTMLElement,
   renderer: LivePreviewRenderer,
@@ -9329,7 +9343,7 @@ async function waitForLivePreviewRendererSettled(
   let previousSignature = "";
   let stableFrames = 0;
 
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     throwIfExportCancelled(signal);
     await nextAnimationFrame();
     const sectionSignature = renderer.sections.map((section, index) => [
@@ -9442,6 +9456,10 @@ function captureTextFragments(
       // SVG (including Excalidraw) is rasterized as one media fragment. Capturing
       // its internal text nodes as well would draw every label twice on WebKit.
       if (parent.closest("svg")) return NodeFilter.FILTER_REJECT;
+      // Properties have dedicated key/value capture paths below. Excluding
+      // their raw DOM text here prevents native mobile controls and the
+      // semantic projection from being painted on top of each other.
+      if (parent.closest(".metadata-property")) return NodeFilter.FILTER_REJECT;
       if (!isExportableElement(parent)) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     }
@@ -9569,6 +9587,17 @@ function captureMetadataKeyFragments(
         left += shift;
         right += shift;
       }
+    }
+
+    // Mobile Properties controls can expose a key box with a different
+    // line-height than the value control. Align their visual centers so the
+    // key does not float above dates, tags, or other property values.
+    const alignmentRect = valueRect && valueRect.height > 0.5 ? valueRect : rowRect;
+    if (alignmentRect.height > 0.5) {
+      const keyHeight = Math.max(1, bottom - top);
+      const targetCenter = alignmentRect.top - pageRect.top + alignmentRect.height / 2;
+      top = targetCenter - keyHeight / 2;
+      bottom = top + keyHeight;
     }
 
     if (right - left <= 0.5 || bottom - top <= 0.5) continue;

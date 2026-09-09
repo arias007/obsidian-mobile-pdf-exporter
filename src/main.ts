@@ -3830,7 +3830,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       // MarkdownRenderer intentionally omits the reading-view Properties panel.
       // Materialize it for the detached export render so PDF and HTML exports
       // share the same frontmatter/property content.
-      injectNotePropertiesPreview(this.app, file, markdownEl, markdown);
+      injectNotePropertiesPreview(this.app, file, markdownEl, markdown, { forceProjection: true });
 
       hideExcalidrawSourceBlocks(markdownEl);
 
@@ -4401,6 +4401,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const boxFragments = captureBoxFragments(pageEl);
       const textFragments = dedupeOverlappingLiveTextFragments([
         ...captureTextFragments(pageEl, linkContext),
+        ...captureMetadataKeyFragments(pageEl, linkContext),
         ...captureMetadataValueFragments(pageEl, linkContext)
       ]);
       const imageFragments = captureImageFragments(pageEl);
@@ -7985,6 +7986,11 @@ interface NotePropertyEntry {
   value: unknown;
 }
 
+interface NotePropertiesPreviewOptions {
+  /** Always add the semantic projection, hiding an incomplete native panel. */
+  forceProjection?: boolean;
+}
+
 const METADATA_VALUE_SELECTORS = [
   ".metadata-property-value input",
   ".metadata-property-value textarea",
@@ -8000,6 +8006,12 @@ const METADATA_VALUE_SELECTORS = [
   ".metadata-property-value[title]",
   ".metadata-property-value .metadata-property-value-content",
   ".metadata-property-value .metadata-input-longtext"
+].join(",");
+
+const METADATA_PROPERTY_ROW_SELECTORS = [
+  ".metadata-property[data-property-key]",
+  ".metadata-container .metadata-property",
+  ".metadata-properties .metadata-property"
 ].join(",");
 
 const METADATA_CONTROL_SELECTORS = [
@@ -8018,7 +8030,13 @@ const METADATA_UTILITY_SELECTOR = [
   ".multi-select-pill-remove-button"
 ].join(",");
 
-function injectNotePropertiesPreview(app: App, file: TFile, markdownEl: HTMLElement, markdown: string): HTMLElement | null {
+function injectNotePropertiesPreview(
+  app: App,
+  file: TFile,
+  markdownEl: HTMLElement,
+  markdown: string,
+  options: NotePropertiesPreviewOptions = {}
+): HTMLElement | null {
   const entries = getNotePropertyEntries(app, file, markdown);
   if (entries.length === 0) return null;
 
@@ -8028,11 +8046,17 @@ function injectNotePropertiesPreview(app: App, file: TFile, markdownEl: HTMLElem
     // property rather than a text node, so cloning the panel otherwise loses
     // it. Replace controls only in this detached export render.
     materializeMetadataControlValues(nativeContainer);
-    return null;
+    if (!options.forceProjection) return null;
+    // Mobile Obsidian can paint the key through CSS/ARIA only. Those labels
+    // disappear when the DOM is serialized, so use the semantic projection
+    // below and hide the incomplete native panel in this temporary render.
+    nativeContainer.setCssProps({ display: "none" });
   }
 
   const panel = (markdownEl.ownerDocument.win as ObsidianExportWindow).createEl("div");
-  panel.className = "mobile-pdf-exporter-properties metadata-container";
+  // Keep the projection independent from Obsidian's native metadata-container
+  // rules; mobile themes may hide that class outside the live reading view.
+  panel.className = "mobile-pdf-exporter-properties";
   panel.setAttribute("data-mpe-properties", "true");
   appendElement(panel, "div", {
     cls: "mobile-pdf-exporter-properties-heading",
@@ -8808,6 +8832,7 @@ function captureSurfaceFragments(
     const boxFragments = captureBoxFragments(rootEl);
     const textFragments = [
       ...captureTextFragments(rootEl, linkContext, liveWindow),
+      ...captureMetadataKeyFragments(rootEl, linkContext, liveWindow),
       ...captureMetadataValueFragments(rootEl, linkContext, liveWindow),
       ...captureEmbeddedOfficeCardTextFragments(rootEl, linkContext, liveWindow)
     ];
@@ -9469,6 +9494,142 @@ function captureTextFragments(
   }
 
   return compactLinkedFragmentSpacing(sortTextFragmentsForDrawing(fragments));
+}
+
+function captureMetadataKeyFragments(
+  pageEl: HTMLElement,
+  linkContext?: PdfLinkContext,
+  liveWindow?: LiveSurfaceCaptureWindow
+): TextFragment[] {
+  const pageRect = pageEl.getBoundingClientRect();
+  const fragments: TextFragment[] = [];
+  const rows = Array.from(pageEl.querySelectorAll<HTMLElement>(METADATA_PROPERTY_ROW_SELECTORS));
+  const seenRows = new Set<HTMLElement>();
+  const seenFragments = new Set<string>();
+
+  for (const row of rows) {
+    if (seenRows.has(row) || !isExportableElement(row)) continue;
+    seenRows.add(row);
+
+    const keyElement = Array.from(row.querySelectorAll<HTMLElement>(
+      ".metadata-property-key, .metadata-property-name, [data-property-key], [data-property-name]"
+    )).find((element) => element !== row) ?? null;
+    const text = getMetadataPropertyKeyText(row, keyElement);
+    if (!text || isMetadataUtilityText(text)) continue;
+
+    const valueElement = row.querySelector<HTMLElement>(".metadata-property-value");
+    const iconElement = row.querySelector<HTMLElement>(".metadata-property-icon");
+    const rowRect = row.getBoundingClientRect();
+    const keyElementRect = keyElement?.getBoundingClientRect() ?? null;
+    const valueRect = valueElement?.getBoundingClientRect() ?? null;
+    const iconRect = iconElement?.getBoundingClientRect() ?? null;
+    const styleElement = keyElement ?? row;
+    const style = getComputedStyle(styleElement);
+    const rowStyle = getComputedStyle(row);
+    const fontSizePx = parseFloat(style.fontSize) || parseFloat(rowStyle.fontSize) || 16;
+    const estimatedWidth = Math.max(fontSizePx * 0.8, text.length * fontSizePx * 0.62);
+    const gap = Math.max(3, fontSizePx * 0.35);
+    const hasKeyRect = Boolean(keyElementRect && keyElementRect.width > 0.5 && keyElementRect.height > 0.5);
+    let left: number;
+    let top: number;
+    let right: number;
+    let bottom: number;
+
+    if (hasKeyRect && keyElementRect) {
+      left = keyElementRect.left - pageRect.left;
+      top = keyElementRect.top - pageRect.top;
+      right = keyElementRect.right - pageRect.left;
+      bottom = keyElementRect.bottom - pageRect.top;
+    } else if (rowRect.width > 0.5 && rowRect.height > 0.5) {
+      // Some mobile builds keep the key only in data/ARIA or a pseudo element.
+      // Reconstruct its slot between the leading icon and the value control.
+      const start = iconRect && iconRect.width > 0.5
+        ? iconRect.right + gap
+        : rowRect.left;
+      const available = valueRect && valueRect.width > 0.5
+        ? valueRect.left - gap - start
+        : estimatedWidth;
+      const width = Math.max(1, Math.min(estimatedWidth, available > 0 ? available : estimatedWidth));
+      const baselineRect = valueRect && valueRect.height > 0.5 ? valueRect : rowRect;
+      left = start - pageRect.left;
+      top = baselineRect.top - pageRect.top;
+      right = left + width;
+      bottom = top + Math.max(fontSizePx * 1.15, baselineRect.height);
+    } else {
+      continue;
+    }
+
+    // Native mobile rows can report the key box from the row's left edge,
+    // even though the property icon is painted inside that slot. Keep the
+    // exported key text to the right of the icon so it cannot overlap it.
+    if (iconRect && iconRect.width > 0.5) {
+      const minimumLeft = iconRect.right + gap - pageRect.left;
+      if (left < minimumLeft) {
+        const shift = minimumLeft - left;
+        left += shift;
+        right += shift;
+      }
+    }
+
+    if (right - left <= 0.5 || bottom - top <= 0.5) continue;
+    const color = parseCssColor(
+      normalizeVisibleCssColor(style.color) ?? normalizeVisibleCssColor(rowStyle.color) ?? "#6b7280"
+    ) ?? rgb(0.42, 0.45, 0.5);
+    const fragment: TextFragment = {
+      text: normalizeLineText(text),
+      left,
+      top,
+      right,
+      bottom,
+      fontSizePx,
+      fontFamily: style.fontFamily || rowStyle.fontFamily || "system-ui, sans-serif",
+      fontWeight: style.fontWeight || rowStyle.fontWeight || "400",
+      fontStyle: style.fontStyle || rowStyle.fontStyle || "normal",
+      direction: getTextDirection(style.direction || rowStyle.direction, text),
+      color,
+      underline: style.textDecorationLine.includes("underline") || style.textDecoration.includes("underline"),
+      lineThrough: style.textDecorationLine.includes("line-through") || style.textDecoration.includes("line-through"),
+      href: resolveLinkHref(keyElement?.closest("a, .internal-link, .external-link") ?? null, linkContext),
+      mergeScope: row
+    };
+    const key = [
+      fragment.text,
+      Math.round(fragment.left * 2),
+      Math.round(fragment.top * 2),
+      Math.round(fragment.right * 2),
+      Math.round(fragment.bottom * 2)
+    ].join("|");
+    if (seenFragments.has(key)) continue;
+    seenFragments.add(key);
+
+    if (liveWindow) {
+      const documentTop = fragment.top + liveWindow.scrollTop;
+      const documentBottom = fragment.bottom + liveWindow.scrollTop;
+      const center = (documentTop + documentBottom) / 2;
+      if (center < liveWindow.bandTop - 0.5 || center >= liveWindow.bandBottom - 0.5) continue;
+    }
+    fragments.push(fragment);
+  }
+
+  return sortTextFragmentsForDrawing(fragments);
+}
+
+function getMetadataPropertyKeyText(row: HTMLElement, keyElement: HTMLElement | null): string {
+  const candidates = [
+    keyElement?.textContent ?? "",
+    keyElement?.getAttribute("data-property-key") ?? "",
+    keyElement?.getAttribute("data-property-name") ?? "",
+    keyElement?.getAttribute("aria-label") ?? "",
+    keyElement?.getAttribute("title") ?? "",
+    row.getAttribute("data-property-key") ?? "",
+    row.getAttribute("data-property-name") ?? "",
+    row.getAttribute("data-key") ?? "",
+    row.getAttribute("aria-label") ?? "",
+    row.getAttribute("title") ?? ""
+  ];
+  return candidates
+    .map((candidate) => candidate.replace(/[\r\n]+/gu, " ").trim())
+    .find((candidate) => Boolean(candidate) && !isMetadataUtilityText(candidate)) ?? "";
 }
 
 function captureMetadataValueFragments(
@@ -11230,6 +11391,7 @@ function capturePseudoTextDecorations(pageEl: HTMLElement, pageRect: DOMRect): D
     ".list-bullet",
     ".task-list-item",
     ".metadata-property-icon",
+    ".metadata-property-key",
     ".nav-file-tag",
     ".tag"
   ].join(",");

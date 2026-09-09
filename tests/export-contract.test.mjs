@@ -630,12 +630,20 @@ test("frontmatter properties are present in HTML and date controls remain select
     readFile(stylesUrl, "utf8")
   ]);
 
-  assert.match(source, /injectNotePropertiesPreview\(this\.app, file, markdownEl, markdown\)/);
-  assert.match(source, /function injectNotePropertiesPreview\(app: App, file: TFile, markdownEl: HTMLElement, markdown: string\)/);
+  assert.match(source, /injectNotePropertiesPreview\(this\.app, file, markdownEl, markdown(?:, \{ forceProjection: true \})?\)/);
+  assert.match(source, /function injectNotePropertiesPreview\(\s*app: App,\s*file: TFile,\s*markdownEl: HTMLElement,\s*markdown: string,/);
   assert.match(source, /function getNotePropertyEntries\(app: App, file: TFile, markdown: string\)/);
   assert.match(source, /metadataCache\.getFileCache\(file\)\?\.frontmatter/);
   assert.match(source, /function parseSimpleFrontmatterProperties\(markdown: string\)/);
   assert.match(source, /function materializeMetadataControlValues\(container: HTMLElement\)/);
+  assert.match(source, /function captureMetadataKeyFragments\(/);
+  assert.match(source, /function getMetadataPropertyKeyText\(row: HTMLElement, keyElement: HTMLElement \| null\)/);
+  assert.match(source, /const minimumLeft = iconRect\.right \+ gap - pageRect\.left/);
+  assert.match(source, /if \(left < minimumLeft\)/);
+  assert.match(source, /METADATA_PROPERTY_ROW_SELECTORS/);
+  assert.match(source, /forceProjection: true/);
+  assert.match(source, /nativeContainer\.setCssProps\(\{ display: "none" \}\)/);
+  assert.match(source, /panel\.className = "mobile-pdf-exporter-properties"/);
   assert.match(source, /METADATA_VALUE_SELECTORS/);
   assert.match(source, /\.multi-select-pill/);
   assert.match(source, /data-property-value/);

@@ -623,3 +623,22 @@ test("text separators and task checkbox geometry follow the rendered line", asyn
   assert.match(source, /function compactLinkedFragmentSpacing\(fragments: TextFragment\[\]\)/);
   assert.match(source, /if \(fragment\.href && sameLine && previousEndsSeparator/);
 });
+
+test("frontmatter properties are present in HTML and date controls remain selectable in PDF", async () => {
+  const [source, styles] = await Promise.all([
+    readFile(sourceUrl, "utf8"),
+    readFile(stylesUrl, "utf8")
+  ]);
+
+  assert.match(source, /injectNotePropertiesPreview\(this\.app, file, markdownEl, markdown\)/);
+  assert.match(source, /function injectNotePropertiesPreview\(app: App, file: TFile, markdownEl: HTMLElement, markdown: string\)/);
+  assert.match(source, /function getNotePropertyEntries\(app: App, file: TFile, markdown: string\)/);
+  assert.match(source, /metadataCache\.getFileCache\(file\)\?\.frontmatter/);
+  assert.match(source, /function parseSimpleFrontmatterProperties\(markdown: string\)/);
+  assert.match(source, /function materializeMetadataControlValues\(container: HTMLElement\)/);
+  assert.match(source, /function captureMetadataValueFragments\(/);
+  assert.match(source, /getMetadataControlValue\(control\)/);
+  assert.match(source, /const text = formatNotePropertyValue\(entry\.value\)/);
+  assert.match(styles, /\.mobile-pdf-exporter-properties\s*\{/);
+  assert.match(styles, /\.mobile-pdf-exporter-property-value\[data-empty="true"\]::after/);
+});

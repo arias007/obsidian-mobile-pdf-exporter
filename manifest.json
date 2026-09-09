@@ -1,9 +1,9 @@
 {
   "id": "mobile-pdf-exporter",
   "name": "Mobile PDF Exporter",
-  "version": "0.6.16",
+  "version": "0.6.17",
   "minAppVersion": "1.5.0",
-  "description": "Export notes to PDF, DOCX, PPTX, PNG, HTML, and ZIP with embedded notes. Fixed NoteDraw/Excalidraw ghosting and font weight preservation.",
+  "description": "Export notes to PDF, DOCX, PPTX, PNG, HTML, and ZIP with embedded notes and Properties. Fixed date/frontmatter values and NoteDraw/Excalidraw rendering.",
   "author": "Murat",
   "isDesktopOnly": false
 }

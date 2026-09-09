@@ -3797,6 +3797,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
         PREVIEW_RENDER_TIMEOUT_MS
       );
 
+      // MarkdownRenderer intentionally omits the reading-view Properties panel.
+      // Materialize it for the detached export render so PDF and HTML exports
+      // share the same frontmatter/property content.
+      injectNotePropertiesPreview(this.app, file, markdownEl, markdown);
+
       hideExcalidrawSourceBlocks(markdownEl);
 
       if (isExcalidrawFile) {
@@ -4364,7 +4369,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const pageHeightPx = pageHeightPt / pxToPt;
       const { bodyTopInsetPx, bodyBottomInsetPx, bodyHeightPx } = getPageBodyLayoutPx(this.settings, pageHeightPx);
       const boxFragments = captureBoxFragments(pageEl);
-      const textFragments = dedupeOverlappingLiveTextFragments(captureTextFragments(pageEl, linkContext));
+      const textFragments = dedupeOverlappingLiveTextFragments([
+        ...captureTextFragments(pageEl, linkContext),
+        ...captureMetadataValueFragments(pageEl, linkContext)
+      ]);
       const imageFragments = captureImageFragments(pageEl);
       const videoFragments = captureVideoFragments(pageEl);
       const canvasFragments = captureCanvasFragments(pageEl);
@@ -7942,6 +7950,163 @@ function escapeHtml(value: string): string {
   })[character] ?? character);
 }
 
+interface NotePropertyEntry {
+  key: string;
+  value: unknown;
+}
+
+function injectNotePropertiesPreview(app: App, file: TFile, markdownEl: HTMLElement, markdown: string): void {
+  const entries = getNotePropertyEntries(app, file, markdown);
+  if (entries.length === 0) return;
+
+  const nativeContainer = markdownEl.querySelector<HTMLElement>(".metadata-container, .metadata-properties");
+  if (nativeContainer && nativeContainer.querySelector(".metadata-property")) {
+    // Date/datetime properties are native inputs. Their value is a DOM
+    // property rather than a text node, so cloning the panel otherwise loses
+    // it. Replace controls only in this detached export render.
+    materializeMetadataControlValues(nativeContainer);
+    return;
+  }
+
+  const panel = (markdownEl.ownerDocument.win as ObsidianExportWindow).createEl("div");
+  panel.className = "mobile-pdf-exporter-properties metadata-container";
+  panel.setAttribute("data-mpe-properties", "true");
+  for (const entry of entries) {
+    const row = appendElement(panel, "div", { cls: "mobile-pdf-exporter-property metadata-property" });
+    row.setAttribute("data-property-key", entry.key);
+    const key = appendElement(row, "div", { cls: "mobile-pdf-exporter-property-key metadata-property-key", text: entry.key });
+    key.setAttribute("aria-label", entry.key);
+    const value = appendElement(row, "div", { cls: "mobile-pdf-exporter-property-value metadata-property-value" });
+    const text = formatNotePropertyValue(entry.value);
+    value.setAttribute("data-property-value", text);
+    if (text) value.textContent = text;
+    else value.setAttribute("data-empty", "true");
+  }
+  markdownEl.insertBefore(panel, markdownEl.firstChild);
+}
+
+function materializeMetadataControlValues(container: HTMLElement): void {
+  const controls = Array.from(container.querySelectorAll<HTMLElement>(
+    ".metadata-property-value input, .metadata-property-value textarea, " +
+      ".metadata-property-value [role='textbox']"
+  ));
+  for (const control of controls) {
+    const inputType = control.tagName.toLowerCase() === "input"
+      ? (control.getAttribute("type") ?? "text").toLowerCase()
+      : "";
+    if (inputType === "checkbox" || inputType === "radio" || inputType === "hidden") continue;
+    const text = getMetadataControlValue(control);
+    if (!text) continue;
+
+    const replacement = (control.ownerDocument.win as ObsidianExportWindow).createEl("span");
+    replacement.className = "mobile-pdf-exporter-property-control-text";
+    replacement.textContent = text;
+    const style = getComputedStyle(control);
+    const parentStyle = control.parentElement ? getComputedStyle(control.parentElement) : style;
+    replacement.style.fontFamily = style.fontFamily || parentStyle.fontFamily;
+    replacement.style.fontSize = style.fontSize || parentStyle.fontSize;
+    replacement.style.fontWeight = style.fontWeight || parentStyle.fontWeight;
+    replacement.style.fontStyle = style.fontStyle || parentStyle.fontStyle;
+    replacement.style.lineHeight = style.lineHeight || parentStyle.lineHeight;
+    replacement.style.color = normalizeVisibleCssColor(style.color) ? style.color : parentStyle.color;
+    control.replaceWith(replacement);
+  }
+}
+
+function getNotePropertyEntries(app: App, file: TFile, markdown: string): NotePropertyEntry[] {
+  try {
+    const rawCached = app.metadataCache.getFileCache(file)?.frontmatter;
+    const cached = isRecord(rawCached) ? rawCached : null;
+    const entries = cached ? Object.entries(cached)
+      .filter(([key]) => key !== "position")
+      .map(([key, value]) => ({ key, value })) : [];
+    if (entries.length > 0) return entries;
+  } catch (error) {
+    console.warn("Mobile PDF Exporter could not read cached note properties", error);
+  }
+  return parseSimpleFrontmatterProperties(markdown);
+}
+
+function parseSimpleFrontmatterProperties(markdown: string): NotePropertyEntry[] {
+  const match = markdown.match(/^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/u);
+  if (!match) return [];
+
+  const entries: NotePropertyEntry[] = [];
+  let current: NotePropertyEntry | null = null;
+  const flush = (): void => {
+    if (current) entries.push(current);
+    current = null;
+  };
+
+  for (const line of match[1].split(/\r?\n/u)) {
+    if (!line.trim() || /^\s*#/u.test(line)) continue;
+    const listItem = line.match(/^\s+-\s*(.*)$/u);
+    if (listItem && current) {
+      const value = parseFrontmatterScalar(listItem[1]);
+      if (Array.isArray(current.value)) {
+        const values: unknown[] = current.value;
+        values.push(value);
+        current.value = values;
+      } else {
+        current.value = [value];
+      }
+      continue;
+    }
+
+    const property = line.match(/^([^:#][^:]*):(?:\s*(.*))?$/u);
+    if (!property) continue;
+    flush();
+    current = { key: property[1].trim(), value: parseFrontmatterScalar(property[2] ?? "") };
+  }
+  flush();
+  return entries;
+}
+
+function parseFrontmatterScalar(raw: string): unknown {
+  const withoutComment = raw.replace(/\s+#.*$/u, "").trim();
+  if (!withoutComment) return "";
+  if ((withoutComment.startsWith("\"") && withoutComment.endsWith("\"")) ||
+      (withoutComment.startsWith("'") && withoutComment.endsWith("'"))) {
+    return withoutComment.slice(1, -1).replace(/\\([\\"'])/gu, "$1");
+  }
+  if (withoutComment === "[]") return [];
+  if (withoutComment.startsWith("[") && withoutComment.endsWith("]")) {
+    return withoutComment.slice(1, -1).split(",").map((value) => parseFrontmatterScalar(value)).filter((value) => value !== "");
+  }
+  if (/^(?:true|false)$/iu.test(withoutComment)) return withoutComment.toLowerCase() === "true";
+  if (/^(?:null|~)$/iu.test(withoutComment)) return null;
+  if (/^-?(?:\d+\.?\d*|\.\d+)$/u.test(withoutComment)) return Number(withoutComment);
+  return withoutComment;
+}
+
+function formatNotePropertyValue(value: unknown, depth = 0): string {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (depth > 3) return typeof value === "object" ? (JSON.stringify(value) ?? "") : formatPrimitiveValue(value);
+  if (Array.isArray(value)) return value.map((item) => formatNotePropertyValue(item, depth + 1)).filter(Boolean).join(", ");
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key !== "position")
+      .map(([key, item]) => `${key}: ${formatNotePropertyValue(item, depth + 1)}`)
+      .filter(Boolean)
+      .join("; ");
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return formatPrimitiveValue(value);
+  }
+  return JSON.stringify(value) ?? "";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function formatPrimitiveValue(value: unknown): string {
+  if (typeof value === "symbol") return value.description ?? "";
+  if (typeof value === "function") return value.name || "";
+  return String(value);
+}
+
 const HTML_INLINE_STYLE_PROPERTIES = [
   "display", "visibility", "position", "float", "clear", "box-sizing",
   "width", "min-width", "max-width", "height", "min-height", "max-height",
@@ -8574,6 +8739,7 @@ function captureSurfaceFragments(
     const boxFragments = captureBoxFragments(rootEl);
     const textFragments = [
       ...captureTextFragments(rootEl, linkContext, liveWindow),
+      ...captureMetadataValueFragments(rootEl, linkContext, liveWindow),
       ...captureEmbeddedOfficeCardTextFragments(rootEl, linkContext, liveWindow)
     ];
     const imageFragments = captureImageFragments(rootEl);
@@ -9234,6 +9400,82 @@ function captureTextFragments(
   }
 
   return compactLinkedFragmentSpacing(sortTextFragmentsForDrawing(fragments));
+}
+
+function captureMetadataValueFragments(
+  pageEl: HTMLElement,
+  linkContext?: PdfLinkContext,
+  liveWindow?: LiveSurfaceCaptureWindow
+): TextFragment[] {
+  const pageRect = pageEl.getBoundingClientRect();
+  const fragments: TextFragment[] = [];
+  const controls = Array.from(pageEl.querySelectorAll<HTMLElement>(
+    ".metadata-property-value input, .metadata-property-value textarea, " +
+      ".metadata-property-value [role='textbox']"
+  ));
+
+  for (const control of controls) {
+    if (!isExportableElement(control)) continue;
+    const inputType = control.tagName.toLowerCase() === "input"
+      ? (control.getAttribute("type") ?? "text").toLowerCase()
+      : "";
+    if (inputType === "checkbox" || inputType === "radio" || inputType === "hidden") continue;
+
+    const text = getMetadataControlValue(control);
+    if (!text) continue;
+    const rect = control.getBoundingClientRect();
+    if (rect.width <= 0.5 || rect.height <= 0.5) continue;
+
+    const style = getComputedStyle(control);
+    const parentStyle = control.parentElement ? getComputedStyle(control.parentElement) : style;
+    const fontSizePx = parseFloat(style.fontSize) || parseFloat(parentStyle.fontSize) || 16;
+    const color = parseCssColor(normalizeVisibleCssColor(style.color) ?? normalizeVisibleCssColor(parentStyle.color) ?? "#1f2937") ??
+      rgb(0.12, 0.12, 0.12);
+    const mergeScope = control.closest<HTMLElement>(".metadata-property-value, .metadata-property") ??
+      control.parentElement ?? control;
+    const fragment: TextFragment = {
+      text: normalizeLineText(text),
+      left: rect.left - pageRect.left,
+      top: rect.top - pageRect.top,
+      right: rect.right - pageRect.left,
+      bottom: rect.bottom - pageRect.top,
+      fontSizePx,
+      fontFamily: style.fontFamily || parentStyle.fontFamily || "system-ui, sans-serif",
+      fontWeight: style.fontWeight || parentStyle.fontWeight || "400",
+      fontStyle: style.fontStyle || parentStyle.fontStyle || "normal",
+      direction: getTextDirection(style.direction || parentStyle.direction, text),
+      color,
+      underline: style.textDecorationLine.includes("underline") || style.textDecoration.includes("underline"),
+      lineThrough: style.textDecorationLine.includes("line-through") || style.textDecoration.includes("line-through"),
+      href: resolveLinkHref(control.closest("a, .internal-link, .external-link"), linkContext),
+      mergeScope
+    };
+
+    if (!liveWindow) {
+      fragments.push(fragment);
+      continue;
+    }
+
+    const documentTop = fragment.top + liveWindow.scrollTop;
+    const documentBottom = fragment.bottom + liveWindow.scrollTop;
+    const center = (documentTop + documentBottom) / 2;
+    if (center < liveWindow.bandTop - 0.5 || center >= liveWindow.bandBottom - 0.5) continue;
+    fragments.push({
+      ...fragment,
+      left: fragment.left,
+      right: fragment.right,
+      top: fragment.top,
+      bottom: fragment.bottom
+    });
+  }
+
+  return sortTextFragmentsForDrawing(fragments);
+}
+
+function getMetadataControlValue(control: HTMLElement): string {
+  const value = "value" in control ? String((control as HTMLInputElement | HTMLTextAreaElement).value ?? "") : "";
+  const fallback = control.getAttribute("value") ?? control.getAttribute("data-value") ?? control.textContent ?? "";
+  return (value || fallback).replace(/[\r\n]+/gu, " ").trim();
 }
 
 function compactLinkedFragmentSpacing(fragments: TextFragment[]): TextFragment[] {

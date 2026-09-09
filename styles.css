@@ -827,3 +827,47 @@
   font-size: var(--font-ui-smaller);
   text-align: center;
 }
+
+/* Frontmatter/Properties exported from both detached and live note views. */
+.mobile-pdf-exporter-properties {
+  margin: 0 0 1.2em;
+  padding: 0.35em 0 0.55em;
+  border-top: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-normal);
+}
+
+.mobile-pdf-exporter-property {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8em;
+  min-height: 1.55em;
+  padding: 0.2em 0;
+}
+
+.mobile-pdf-exporter-property-key {
+  flex: 0 0 9em;
+  color: var(--text-muted);
+  font-size: 0.9em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.mobile-pdf-exporter-property-value {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--text-normal);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.mobile-pdf-exporter-property-value[data-empty="true"]::after {
+  content: "—";
+  color: var(--text-faint);
+}
+
+.mobile-pdf-exporter-property-control-text {
+  display: inline-block;
+  min-width: 1px;
+  white-space: pre-wrap;
+}

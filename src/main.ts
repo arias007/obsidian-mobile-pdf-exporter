@@ -30,6 +30,7 @@ import embeddedArabicFontGzipBase64 from "../fonts/NotoSansArabic-Regular.ttf.gz
 import embeddedHebrewFontGzipBase64 from "../fonts/NotoSansHebrew-Regular.ttf.gz";
 import embeddedDevanagariFontGzipBase64 from "../fonts/NotoSansDevanagari-Regular.ttf.gz";
 import embeddedThaiFontGzipBase64 from "../fonts/NotoSansThai-Regular.ttf.gz";
+import embeddedPdfjsWorkerGzipBase64 from "./generated/pdfjs-worker.min.mjs.gz";
 import supportCode1Base64 from "./generated/support-code-1.jpg";
 import supportCode2Base64 from "./generated/support-code-2.png";
 import { computeCenteredSurfaceOffset } from "./surface-layout";
@@ -5294,10 +5295,19 @@ async function loadPdfJsRuntime(): Promise<PdfJsRuntime> {
 
 async function loadPdfJsWorkerRuntime(): Promise<PdfJsWorkerRuntime> {
   if (!pdfJsWorkerRuntimePromise) {
-    pdfJsWorkerRuntimePromise = import("pdfjs-dist/legacy/build/pdf.worker.mjs").catch((error) => {
-      pdfJsWorkerRuntimePromise = null;
-      throw error;
-    });
+    pdfJsWorkerRuntimePromise = decompressEmbeddedGzip(embeddedPdfjsWorkerGzipBase64)
+      .then(async (bytes) => {
+        const workerUrl = URL.createObjectURL(new Blob([bytes], { type: "text/javascript" }));
+        try {
+          return await import(/* webpackIgnore: true */ workerUrl) as PdfJsWorkerRuntime;
+        } finally {
+          URL.revokeObjectURL(workerUrl);
+        }
+      })
+      .catch((error) => {
+        pdfJsWorkerRuntimePromise = null;
+        throw error;
+      });
   }
   return pdfJsWorkerRuntimePromise;
 }
@@ -5809,19 +5819,23 @@ function decodeBase64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-function decompressEmbeddedFont(base64: string, script: PdfScriptFont): Promise<ArrayBuffer> {
-  const cached = embeddedScriptFontBytes.get(script);
-  if (cached) return cached;
-
-  const promise = (async () => {
+function decompressEmbeddedGzip(base64: string): Promise<ArrayBuffer> {
+  return (async () => {
     const DecompressionStreamCtor = (activeWindow as ObsidianExportWindow).DecompressionStream;
     if (!DecompressionStreamCtor) {
-      throw new Error("This WebView does not support DecompressionStream.");
+      throw new Error("This WebView does not support gzip decompression.");
     }
     const compressedBytes = decodeBase64ToArrayBuffer(base64);
     const stream = new Blob([compressedBytes]).stream().pipeThrough(new DecompressionStreamCtor("gzip"));
     return new Response(stream).arrayBuffer();
-  })().catch((error) => {
+  })();
+}
+
+function decompressEmbeddedFont(base64: string, script: PdfScriptFont): Promise<ArrayBuffer> {
+  const cached = embeddedScriptFontBytes.get(script);
+  if (cached) return cached;
+
+  const promise = decompressEmbeddedGzip(base64).catch((error) => {
     embeddedScriptFontBytes.delete(script);
     throw error;
   });

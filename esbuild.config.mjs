@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { builtinModules } from "node:module";
 import process from "node:process";
+import { gzipSync } from "node:zlib";
 import esbuild from "esbuild";
 
 const prod = process.argv[2] === "production";
@@ -34,6 +35,49 @@ function replaceExactly(source, pattern, replacement, expected, label) {
   });
   if (replacements !== expected) {
     throw new Error(`Expected ${expected} ${label} replacement(s), found ${replacements}.`);
+  }
+  return contents;
+}
+
+function sanitizePdfjsWorkerSource(source) {
+  let contents = replaceExactly(
+    source,
+    /var __webpack_exports__ = globalThis\.pdfjsWorker = \{\};/u,
+    () => "var __webpack_exports__ = {};",
+    1,
+    "PDF.js worker global registration"
+  );
+  const replacements = [
+    [
+      /Function\('return require\("'\s*\+\s*[a-zA-Z_$][\w$]*\s*\+\s*'"\)'\)\(\)/u,
+      "undefined",
+      "PDF.js Node require fallback"
+    ],
+    [
+      /Function\("return this"\)\(\)/u,
+      "undefined",
+      "PDF.js global object fallback"
+    ],
+    [
+      /new\s+Function\(\s*""\s*\)/u,
+      "(() => {})()",
+      "PDF.js eval capability probe"
+    ],
+    [
+      /new\s+Function\("src","srcOffset","dest","destOffset",[a-zA-Z_$][\w$]*\)/u,
+      '(() => { throw new Error("Dynamic PDF function compilation is disabled."); })() ',
+      "PDF.js PostScript compiler"
+    ]
+  ];
+  for (const [pattern, replacement, label] of replacements) {
+    const next = contents.replace(pattern, replacement);
+    if (next === contents) {
+      throw new Error(`Expected one ${label} replacement.`);
+    }
+    contents = next;
+  }
+  if (/\b(?:eval|Function)\s*\(/u.test(contents)) {
+    throw new Error("PDF.js worker still contains dynamic code execution.");
   }
   return contents;
 }
@@ -100,57 +144,37 @@ const safePdfjsRuntime = {
     build.onLoad(
       { filter: /[\\/]node_modules[\\/]pdfjs-dist[\\/]legacy[\\/]build[\\/]pdf(?:\.worker)?\.mjs$/ },
       async (args) => {
-        const source = await readFile(args.path, "utf8");
+        // Keep the public import paths stable for TypeScript and contract checks,
+        // but feed esbuild the vendor-provided minified modules.  PDF.js ships
+        // these alongside the readable builds; using them cuts startup parse
+        // work without moving the worker or any runtime dependency outside
+        // main.js.
+        const minifiedPath = args.path.replace(
+          /pdf\.worker\.mjs$/u,
+          "pdf.worker.min.mjs"
+        ).replace(/pdf\.mjs$/u, "pdf.min.mjs");
+        const source = await readFile(minifiedPath, "utf8");
         const isWorker = args.path.endsWith("pdf.worker.mjs");
         if (!isWorker) {
-          const matches = source.match(/new\s+Function\(\s*""\s*\)/gu) ?? [];
-          if (matches.length !== 1) {
-            throw new Error(`Expected one PDF.js eval probe, found ${matches.length}.`);
+          const evalProbeMatches = source.match(/new\s+Function\(\s*""\s*\)/gu) ?? [];
+          if (evalProbeMatches.length !== 1) {
+            throw new Error(`Expected one PDF.js eval probe, found ${evalProbeMatches.length}.`);
+          }
+          let contents = source.replace(/new\s+Function\(\s*""\s*\)/u, "(() => {})()");
+          contents = contents.replace(
+            /Function\('return require\("'\s*\+\s*t\s*\+\s*'"\)'\)\(\)/u,
+            "undefined"
+          );
+          contents = contents.replace(/Function\("return this"\)\(\)/u, "undefined");
+          if (/\b(?:eval|Function)\s*\(/u.test(contents)) {
+            throw new Error("PDF.js runtime still contains dynamic code execution.");
           }
           return {
-            contents: source.replace(/new\s+Function\(\s*""\s*\)/u, "(() => {})"),
+            contents,
             loader: "js"
           };
         }
-
-        let contents = replaceExactly(
-          source,
-          /var __webpack_exports__ = globalThis\.pdfjsWorker = \{\};/u,
-          () => "var __webpack_exports__ = {};",
-          1,
-          "PDF.js worker global registration"
-        );
-        contents = replaceExactly(
-          contents,
-          /return\s+Function\('return require\("'\s*\+\s*name\s*\+\s*'"\)'\)\(\);/u,
-          () => "return undefined;",
-          1,
-          "PDF.js Node require fallback"
-        );
-        contents = replaceExactly(
-          contents,
-          /Function\('return this'\)\(\)/u,
-          () => "undefined",
-          1,
-          "PDF.js global object fallback"
-        );
-        contents = replaceExactly(
-          contents,
-          /function isEvalSupported\(\) \{\s*try \{\s*new Function\(""\);\s*return true;\s*\} catch \{\s*return false;\s*\}\s*\}/u,
-          () => "function isEvalSupported() { return false; }",
-          1,
-          "PDF.js eval capability probe"
-        );
-        contents = replaceExactly(
-          contents,
-          /return new Function\("src", "srcOffset", "dest", "destOffset", compiled\);/u,
-          () => "throw new Error(\"Dynamic PDF function compilation is disabled.\");",
-          1,
-          "PDF.js PostScript compiler"
-        );
-        if (/\b(?:eval|Function)\s*\(/u.test(contents)) {
-          throw new Error("PDF.js worker still contains dynamic code execution.");
-        }
+        const contents = sanitizePdfjsWorkerSource(source);
         return {
           contents,
           loader: "js"
@@ -159,6 +183,15 @@ const safePdfjsRuntime = {
     );
   }
 };
+
+const embeddedPdfjsWorkerPath = "src/generated/pdfjs-worker.min.mjs.gz";
+const vendorPdfjsWorkerPath = "node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs";
+const vendorPdfjsWorkerSource = await readFile(vendorPdfjsWorkerPath, "utf8");
+const sanitizedPdfjsWorkerSource = sanitizePdfjsWorkerSource(vendorPdfjsWorkerSource);
+await writeFile(
+  embeddedPdfjsWorkerPath,
+  gzipSync(Buffer.from(sanitizedPdfjsWorkerSource, "utf8"), { level: 9 })
+);
 
 const context = await esbuild.context({
   banner: {

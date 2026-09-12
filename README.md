@@ -25,7 +25,7 @@ High-fidelity PDF, DOCX, PPTX, PNG, and self-contained HTML export for Obsidian 
 - Draws link color/underlines, task checkboxes, list bullets, ordered-list markers, and small SVG icons from the rendered preview.
 - Keeps short images, rows, list items, paragraphs, code blocks, tables, quotes, embeds, and callouts together when doing so does not leave a mostly empty page; long blocks and media are sliced continuously instead of being forced onto one page.
 - Exports direct `.excalidraw.md` files as pure image PDFs through the Excalidraw runtime, with automatic lower-resolution retries and page slicing for large drawings.
-- Keeps the startup bundle small for Obsidian mobile. Full CJK text export is available when a local font file is installed.
+- Defers PDF.js and PDF.js Worker initialization until preview is opened, while keeping all runtime code and fonts self-contained in `main.js`.
 
 ## Install
 
@@ -43,11 +43,7 @@ main.js
 styles.css
 ```
 
-For selectable Chinese PDF export, version 0.3.57 includes a gzip-compressed CJK subset font and decompresses it only during the first export that needs Chinese text. The first export can take about half a minute while the font is decompressed and cached; later exports should be faster because the cached font is reused. If embedded decompression is unavailable, it can still download and cache the CJK subset font from GitHub/CDN. For offline manual installs, also place `NotoSansSC-Regular.gb2312-subset.ttf` at:
-
-```text
-<your-vault>/.obsidian/plugins/mobile-pdf-exporter/fonts/NotoSansSC-Regular.gb2312-subset.ttf
-```
+Selectable Chinese and multilingual PDF text uses the gzip-compressed fonts embedded in `main.js`. Fonts and the PDF.js Worker are decoded only when needed; no extra font folder, runtime file, or post-install download is required. Keep the plugin install as the standard three files shown above.
 
 Restart Obsidian, or disable and re-enable the plugin from Obsidian settings.
 
@@ -71,9 +67,16 @@ The interface language can be set to Auto, Chinese, or English in the plugin set
 
 Markor creates PDF through Android WebView printing, so its preview PDF text is selectable. Obsidian plugins do not expose Android native printing, so this plugin uses the closest available browser-side approach: render the Obsidian preview layout, then write real PDF text and images at matching positions.
 
-The exporter walks the active reading or editing surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. Editing view stays on the real CodeMirror DOM: the exporter scrolls through virtualized windows, waits for each window to settle, assigns each document band to one window, and deduplicates remounted fragments. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK text, it tries the embedded compressed font first, then local font files, then tagged remote font downloads, and otherwise falls back to a standard PDF font.
+The exporter walks the active reading or editing surface, including its live canvas and embedded overlay layers, then writes a matching visual layer plus a real PDF text layer. Editing view stays on the real CodeMirror DOM: the exporter scrolls through virtualized windows, waits for each window to settle, assigns each document band to one window, and deduplicates remounted fragments. A hidden rendered preview is used only when the target file has no active Markdown view. For CJK and other supported scripts, it uses the compressed fonts embedded in `main.js` and falls back to a standard PDF font only when a glyph is outside the embedded coverage.
 
 ## Changelog
+
+### 0.7.4
+
+- Recovers mobile virtualized reading sections from multiple scroll anchors so today's notes export instead of failing when a section is temporarily unmounted.
+- Keeps tag/date/frontmatter and other Properties labels aligned in selectable PDF and semantic HTML output.
+- Keeps the release self-contained as `main.js`, `manifest.json`, and `styles.css`: fonts stay embedded, and PDF.js Worker source is gzip-embedded and loaded only when preview is opened.
+- Uses the vendor minified PDF.js builds and defers PDF.js/Worker initialization until preview, reducing `main.js` to about 6.23 MB without removing selectable text, images, or NoteDraw rendering.
 
 ### 0.4.15
 

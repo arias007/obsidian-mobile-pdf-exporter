@@ -30,6 +30,7 @@ import embeddedArabicFontGzipBase64 from "../fonts/NotoSansArabic-Regular.ttf.gz
 import embeddedHebrewFontGzipBase64 from "../fonts/NotoSansHebrew-Regular.ttf.gz";
 import embeddedDevanagariFontGzipBase64 from "../fonts/NotoSansDevanagari-Regular.ttf.gz";
 import embeddedThaiFontGzipBase64 from "../fonts/NotoSansThai-Regular.ttf.gz";
+import embeddedPdfjsMainGzipBase64 from "./generated/pdfjs.min.mjs.gz";
 import embeddedPdfjsWorkerGzipBase64 from "./generated/pdfjs-worker.min.mjs.gz";
 import supportCode1Base64 from "./generated/support-code-1.jpg";
 import supportCode2Base64 from "./generated/support-code-2.png";
@@ -5285,10 +5286,19 @@ function getPdfLibPrimitives(): PdfLibPrimitives {
 
 async function loadPdfJsRuntime(): Promise<PdfJsRuntime> {
   if (!pdfJsRuntimePromise) {
-    pdfJsRuntimePromise = import("pdfjs-dist/legacy/build/pdf.mjs").catch((error) => {
-      pdfJsRuntimePromise = null;
-      throw error;
-    });
+    pdfJsRuntimePromise = decompressEmbeddedGzip(embeddedPdfjsMainGzipBase64)
+      .then(async (bytes) => {
+        const runtimeUrl = URL.createObjectURL(new Blob([bytes], { type: "text/javascript" }));
+        try {
+          return await import(/* webpackIgnore: true */ runtimeUrl) as PdfJsRuntime;
+        } finally {
+          URL.revokeObjectURL(runtimeUrl);
+        }
+      })
+      .catch((error) => {
+        pdfJsRuntimePromise = null;
+        throw error;
+      });
   }
   return pdfJsRuntimePromise;
 }

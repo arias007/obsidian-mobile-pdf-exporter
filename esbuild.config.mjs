@@ -39,6 +39,23 @@ function replaceExactly(source, pattern, replacement, expected, label) {
   return contents;
 }
 
+function sanitizePdfjsMainSource(source) {
+  const evalProbeMatches = source.match(/new\s+Function\(\s*""\s*\)/gu) ?? [];
+  if (evalProbeMatches.length !== 1) {
+    throw new Error(`Expected one PDF.js eval probe, found ${evalProbeMatches.length}.`);
+  }
+  let contents = source.replace(/new\s+Function\(\s*""\s*\)/u, "(() => {})()");
+  contents = contents.replace(
+    /Function\('return require\("'\s*\+\s*t\s*\+\s*'"\)'\)\(\)/u,
+    "undefined"
+  );
+  contents = contents.replace(/Function\("return this"\)\(\)/u, "undefined");
+  if (/\b(?:eval|Function)\s*\(/u.test(contents)) {
+    throw new Error("PDF.js runtime still contains dynamic code execution.");
+  }
+  return contents;
+}
+
 function sanitizePdfjsWorkerSource(source) {
   let contents = replaceExactly(
     source,
@@ -156,21 +173,8 @@ const safePdfjsRuntime = {
         const source = await readFile(minifiedPath, "utf8");
         const isWorker = args.path.endsWith("pdf.worker.mjs");
         if (!isWorker) {
-          const evalProbeMatches = source.match(/new\s+Function\(\s*""\s*\)/gu) ?? [];
-          if (evalProbeMatches.length !== 1) {
-            throw new Error(`Expected one PDF.js eval probe, found ${evalProbeMatches.length}.`);
-          }
-          let contents = source.replace(/new\s+Function\(\s*""\s*\)/u, "(() => {})()");
-          contents = contents.replace(
-            /Function\('return require\("'\s*\+\s*t\s*\+\s*'"\)'\)\(\)/u,
-            "undefined"
-          );
-          contents = contents.replace(/Function\("return this"\)\(\)/u, "undefined");
-          if (/\b(?:eval|Function)\s*\(/u.test(contents)) {
-            throw new Error("PDF.js runtime still contains dynamic code execution.");
-          }
           return {
-            contents,
+            contents: sanitizePdfjsMainSource(source),
             loader: "js"
           };
         }
@@ -186,11 +190,19 @@ const safePdfjsRuntime = {
 
 const embeddedPdfjsWorkerPath = "src/generated/pdfjs-worker.min.mjs.gz";
 const vendorPdfjsWorkerPath = "node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs";
+const embeddedPdfjsMainPath = "src/generated/pdfjs.min.mjs.gz";
+const vendorPdfjsMainPath = "node_modules/pdfjs-dist/legacy/build/pdf.min.mjs";
 const vendorPdfjsWorkerSource = await readFile(vendorPdfjsWorkerPath, "utf8");
 const sanitizedPdfjsWorkerSource = sanitizePdfjsWorkerSource(vendorPdfjsWorkerSource);
+const vendorPdfjsMainSource = await readFile(vendorPdfjsMainPath, "utf8");
+const sanitizedPdfjsMainSource = sanitizePdfjsMainSource(vendorPdfjsMainSource);
 await writeFile(
   embeddedPdfjsWorkerPath,
   gzipSync(Buffer.from(sanitizedPdfjsWorkerSource, "utf8"), { level: 9 })
+);
+await writeFile(
+  embeddedPdfjsMainPath,
+  gzipSync(Buffer.from(sanitizedPdfjsMainSource, "utf8"), { level: 9 })
 );
 
 const context = await esbuild.context({

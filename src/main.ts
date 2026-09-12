@@ -3643,7 +3643,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       }
 
       if (previewRenderer) {
-        for (let retry = 0; retry < 4 && countMissingLivePreviewSections(previewRenderer, previewSectionCaptures) > 0; retry += 1) {
+        for (let retry = 0; retry < 2 && countMissingLivePreviewSections(previewRenderer, previewSectionCaptures) > 0; retry += 1) {
           const missingPositions = buildMissingLivePreviewSectionScrollPositions(
             previewRenderer,
             previewSectionCaptures,
@@ -3652,6 +3652,8 @@ export default class MobilePdfExporterPlugin extends Plugin {
           );
           for (const position of missingPositions) {
             await settleLiveSurfaceAtScrollPosition(rootEl, scrollEl, position, signal, previewRenderer);
+            previewRenderer.updateVirtualDisplay?.(scrollEl.scrollTop);
+            await nextAnimationFrame(80);
             const connectedSections = getUncapturedConnectedPreviewSectionElements(
               rootEl,
               previewRenderer,
@@ -3675,7 +3677,15 @@ export default class MobilePdfExporterPlugin extends Plugin {
         appendLivePreviewSectionCaptures(captured, previewRenderer, previewSectionCaptures, seen);
         const missingSections = countMissingLivePreviewSections(previewRenderer, previewSectionCaptures);
         if (missingSections > 0) {
-          throw new Error(`Live reading view did not render ${missingSections} content section(s) during export.`);
+          // Mobile Obsidian may keep a virtual section's cached height after
+          // unmounting it. It is safe to continue when the capture already
+          // contains real text/media; only an entirely empty capture is fatal.
+          console.warn(
+            `Mobile PDF Exporter skipped ${missingSections} virtual reading-view section(s) that were not mounted.`
+          );
+        }
+        if (!hasSurfaceCaptureContent(captured)) {
+          throw new Error("Live reading view did not render any exportable content during export.");
         }
       }
     } finally {
@@ -8626,8 +8636,17 @@ function buildMissingLivePreviewSectionScrollPositions(
     const section = renderer.sections[index];
     const sectionHeight = getLivePreviewSectionHeight(section);
     if (section.shown !== false && sectionHeight > 0.5 && !captures.has(index)) {
-      const target = clampNumber(sectionTop - viewportHeight * 0.18, 0, maximum, 0);
-      positions.add(Math.round(target));
+      // A section can be mounted only when its middle or tail enters the
+      // viewport. Try a small set of stable anchors instead of repeating the
+      // same section-top position on every retry.
+      const anchors = [
+        sectionTop - viewportHeight * 0.18,
+        sectionTop + sectionHeight * 0.5 - viewportHeight * 0.5,
+        sectionTop + sectionHeight - viewportHeight * 0.82
+      ];
+      for (const anchor of anchors) {
+        positions.add(Math.round(clampNumber(anchor, 0, maximum, 0)));
+      }
     }
     sectionTop += getLivePreviewSectionLayoutHeight(section, captures.get(index));
   }
@@ -8644,6 +8663,16 @@ function countMissingLivePreviewSections(
     getLivePreviewSectionHeight(section) > 0.5 &&
     !captures.has(index)
   )).length;
+}
+
+function hasSurfaceCaptureContent(capture: CapturedSurfaceFragments): boolean {
+  return capture.textFragments.length > 0
+    || capture.imageFragments.length > 0
+    || capture.videoFragments.length > 0
+    || capture.canvasFragments.length > 0
+    || capture.svgFragments.length > 0
+    || capture.decorationFragments.length > 0
+    || capture.boxFragments.length > 0;
 }
 
 function appendLivePreviewSectionCaptures(

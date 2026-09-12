@@ -65,7 +65,8 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /const previewSectionCaptures = new Map<number, CapturedLivePreviewSection>/);
   assert.match(source, /appendLivePreviewSectionCaptures\(captured, previewRenderer, previewSectionCaptures, seen\)/);
   assert.match(source, /countMissingLivePreviewSections\(previewRenderer, previewSectionCaptures\)/);
-  assert.match(source, /Live reading view did not render/);
+  assert.match(source, /Mobile PDF Exporter skipped \$\{missingSections\} virtual reading-view section/);
+  assert.match(source, /Live reading view did not render any exportable content during export/);
   assert.match(source, /await primeLivePreviewLayout\(rootEl, scrollEl, previewRenderer, signal\)/);
   assert.doesNotMatch(source, /section\.render\?\.\(\)/);
   assert.match(source, /renderer\.updateVirtualDisplay\?\.\(scrollEl\.scrollTop\)/);
@@ -77,7 +78,9 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /for \(let pass = 0; pass < 2; pass \+= 1\)/);
   assert.match(source, /function buildLivePreviewGapScrollPositions/);
   assert.match(source, /const gapPositions = buildLivePreviewGapScrollPositions/);
-  assert.match(source, /for \(let retry = 0; retry < 4 && countMissingLivePreviewSections\(previewRenderer, previewSectionCaptures\) > 0; retry \+= 1\)/);
+  assert.match(source, /for \(let retry = 0; retry < 2 && countMissingLivePreviewSections\(previewRenderer, previewSectionCaptures\) > 0; retry \+= 1\)/);
+  assert.match(source, /sectionTop \+ sectionHeight \* 0\.5 - viewportHeight \* 0\.5/);
+  assert.match(source, /sectionTop \+ sectionHeight - viewportHeight \* 0\.82/);
   assert.match(source, /if \(surface\.mode === "preview" && !previewRenderer\) \{/);
   assert.match(source, /const captureWholePreview = surface\.mode === "preview" && index === 0/);
   assert.match(source, /surface\.mode === "preview" && !hasRenderedContent\(rootEl\)/);

@@ -76,7 +76,7 @@ The exporter walks the active reading or editing surface, including its live can
 - Recovers mobile virtualized reading sections from multiple scroll anchors so today's notes export instead of failing when a section is temporarily unmounted.
 - Keeps tag/date/frontmatter and other Properties labels aligned in selectable PDF and semantic HTML output.
 - Keeps the release self-contained as `main.js`, `manifest.json`, and `styles.css`: fonts stay embedded, and PDF.js Worker source is gzip-embedded and loaded only when preview is opened.
-- Uses the vendor minified PDF.js builds and defers PDF.js/Worker initialization until preview, reducing `main.js` to about 6.23 MB without removing selectable text, images, or NoteDraw rendering.
+- Uses the vendor minified PDF.js builds and defers PDF.js/Worker initialization until preview, reducing `main.js` to about 5.98 MB without removing selectable text, images, or NoteDraw rendering.
 
 ### 0.4.15
 

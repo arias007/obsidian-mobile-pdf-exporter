@@ -5290,6 +5290,8 @@ async function loadPdfJsRuntime(): Promise<PdfJsRuntime> {
       .then(async (bytes) => {
         const runtimeUrl = URL.createObjectURL(new Blob([bytes], { type: "text/javascript" }));
         try {
+          // The URL is created only from the plugin's embedded, build-sanitized PDF.js bytes.
+          // eslint-disable-next-line no-unsanitized/method -- Blob URL is built only from embedded, sanitized PDF.js bytes.
           return await import(/* webpackIgnore: true */ runtimeUrl) as PdfJsRuntime;
         } finally {
           URL.revokeObjectURL(runtimeUrl);
@@ -5309,6 +5311,8 @@ async function loadPdfJsWorkerRuntime(): Promise<PdfJsWorkerRuntime> {
       .then(async (bytes) => {
         const workerUrl = URL.createObjectURL(new Blob([bytes], { type: "text/javascript" }));
         try {
+          // The URL is created only from the plugin's embedded, build-sanitized PDF.js Worker bytes.
+          // eslint-disable-next-line no-unsanitized/method -- Blob URL is built only from embedded, sanitized PDF.js Worker bytes.
           return await import(/* webpackIgnore: true */ workerUrl) as PdfJsWorkerRuntime;
         } finally {
           URL.revokeObjectURL(workerUrl);

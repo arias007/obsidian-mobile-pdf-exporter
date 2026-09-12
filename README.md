@@ -71,7 +71,7 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
-### 0.7.4
+### 0.7.5
 
 - Recovers mobile virtualized reading sections from multiple scroll anchors so today's notes export instead of failing when a section is temporarily unmounted.
 - Keeps tag/date/frontmatter and other Properties labels aligned in selectable PDF and semantic HTML output.

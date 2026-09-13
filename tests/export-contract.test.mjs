@@ -305,6 +305,8 @@ test("NoteDraw exports fall back to persisted strokes when the live canvas is ou
   assert.match(source, /drawNoteDoodleStrokes\(context, data\.strokes, width, height, contentFrame\)/);
   assert.match(source, /mobile-pdf-exporter-note-doodle-canvas mobile-pdf-exporter-live-drawing-canvas notedraw-canvas/);
   assert.match(source, /function isNoteDrawCanvasFragment\(fragment: CanvasFragment\)/);
+  assert.match(source, /!isNoteDrawExportSnapshotCanvas\(canvas\)/);
+  assert.match(source, /function isNoteDrawExportSnapshotCanvas\(canvas: HTMLCanvasElement\)/);
   assert.match(source, /canvas\.closest\(\s*"\.notedraw-shell, \.note-doodle-shell, \.notedraw-export-image-canvas-layer"/);
   assert.match(source, /canvasFragments: model\.canvasFragments\.filter\(\(fragment\) => !isNoteDrawCanvasFragment\(fragment\)\)/);
   assert.match(source, /prepareNoteDrawElementData\(this\.app, host\.ownerDocument, rawData\)/);

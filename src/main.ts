@@ -2643,7 +2643,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
       } else if (format === "html" && isMarkdown) {
         rendered = await this.renderMarkdownPreview(file, markdown, "html");
         const noteDrawHost = rendered.pageEl.querySelector<HTMLElement>(".markdown-preview-view") ?? rendered.pageEl;
-        const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(noteDrawFile, noteDrawHost);
+        // Render NoteDraw elements from the same projected geometry as the
+        // fallback canvas.  NoteDraw's native snapshot is viewport-anchored
+        // and lands at the wrong Y position in a detached HTML document.
+        const preparedNoteDraw = await this.prepareNoteDrawExportOverlay(
+          noteDrawFile,
+          noteDrawHost,
+          { injectSnapshot: false }
+        );
         try {
           await nextAnimationFrame();
           outputBlob = await buildRenderedDomHtml(
@@ -4001,13 +4008,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
 
   private async prepareNoteDrawExportOverlay(
     file: TFile,
-    host: HTMLElement
+    host: HTMLElement,
+    options: { injectSnapshot?: boolean } = {}
   ): Promise<PreparedNoteDrawExportOverlay> {
     const rect = host.getBoundingClientRect();
     const width = Math.max(1, Math.ceil(host.scrollWidth || rect.width || 1));
     const height = Math.max(1, Math.ceil(host.scrollHeight || rect.height || 1));
     const contentFrame = measureNoteDrawTargetContentFrame(host, width);
-    const domLayout = measureNoteDrawDomLayout(host, file.path);
+    let domLayout = measureNoteDrawDomLayout(host, file.path);
     // NoteDraw stores freehand points in its drawing surface coordinate space,
     // while the export model is rooted at the Markdown host. The main static
     // canvas can be inset inside that host (typically by the content padding),
@@ -4049,6 +4057,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
     if (legacyData?.visible === false || (drawingData as { visible?: unknown } | null)?.visible === false) return empty();
     const data = normalizeNoteDoodleData(drawingData, file);
     const markdownBlocks = normalizeNoteDrawMarkdownBlocks(drawingData, file);
+    // Detached MarkdownRenderer output does not carry NoteDraw's live
+    // line-start attributes.  Rebuild the layout with the persisted block
+    // hints so flow-anchored elements (for example an image placed after
+    // the corresponding flow block) use the rendered DOM position instead of stale saved pixels.
+    domLayout = measureNoteDrawDomLayout(host, file.path, markdownBlocks);
     const hasLiveCanvas = Array.from(host.querySelectorAll<HTMLCanvasElement>(
       ".notedraw-canvas, .note-doodle-canvas"
     )).some((canvas) => {
@@ -4062,7 +4075,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     });
 
     const existingImageLayers = new Set(host.querySelectorAll(".notedraw-export-image-canvas-layer"));
-    if (api?.injectExportSnapshot) {
+    if (options.injectSnapshot !== false && api?.injectExportSnapshot) {
       try {
         await api.injectExportSnapshot(file, host);
       } catch (error) {
@@ -4199,8 +4212,15 @@ export default class MobilePdfExporterPlugin extends Plugin {
     // freehand paths. The live raster canvas is intentionally excluded so the
     // PDF contains one editable Ink layer and no burned duplicate.
     const pdfInkStrokes = model.noteDrawInkStrokes ?? [];
-    const visualModel = {
-      ...pdfBackgroundModel,
+    const visualModel = pdfBackgroundModel;
+    // NoteDraw's snapshot image layer is a raster copy of the same
+    // persisted elements. Once the semantic element layer is present,
+    // retaining those image fragments paints embeds a second time.
+    const visualRenderModel = {
+      ...visualModel,
+      imageFragments: visualModel.imageFragments.filter(
+        (fragment) => !isNoteDrawImageFragment(fragment)
+      ),
       textFragments: rasterTextFragments
     };
 
@@ -4209,7 +4229,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const pageTopPx = model.pageBreaks[index];
       const pageBottomPx = model.pageBreaks[index + 1];
       const pdfPage = pdfDoc.addPage([model.pageWidthPt, model.pageHeightPt]);
-      const pngBytes = await renderPreviewPageToPngBytes(visualModel, index, {
+      const pngBytes = await renderPreviewPageToPngBytes(visualRenderModel, index, {
         colorMode: this.settings.colorMode,
         rasterScale: Math.min(
           SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE,
@@ -4292,11 +4312,17 @@ export default class MobilePdfExporterPlugin extends Plugin {
     pdfDoc.setSubject(IMAGE_PDF_SUBJECT);
     const noteDrawVisual = preferNativeNoteDrawCanvas(model);
     const visualModel = noteDrawVisual.model;
+    const visualRenderModel = {
+      ...visualModel,
+      imageFragments: visualModel.imageFragments.filter(
+        (fragment) => !isNoteDrawImageFragment(fragment)
+      )
+    };
     const pdfInkStrokes = model.noteDrawInkStrokes ?? [];
 
     for (let index = 0; index < model.pageBreaks.length - 1; index += 1) {
       throwIfExportCancelled(signal);
-      const pngBytes = await renderPreviewPageToPngBytes(visualModel, index, {
+      const pngBytes = await renderPreviewPageToPngBytes(visualRenderModel, index, {
         colorMode: this.settings.colorMode,
         rasterScale: this.settings.imageRasterScale
       });
@@ -6822,7 +6848,8 @@ async function getDocxVideoCoverFragments(
 async function getOfficeNoteDrawFragments(
   model: PreviewPdfModel,
   pageIndex: number,
-  renderOptions: OfficeRenderOptions
+  renderOptions: OfficeRenderOptions,
+  includeVideos = true
 ): Promise<OfficeMediaFragment[]> {
   const pageTopPx = model.pageBreaks[pageIndex];
   const pageBottomPx = model.pageBreaks[pageIndex + 1];
@@ -6871,6 +6898,7 @@ async function getOfficeNoteDrawFragments(
   };
 
   for (const element of model.noteDrawSourceElements ?? model.noteDrawElements ?? []) {
+    if (!includeVideos && element.kind === "video") continue;
     if (element.bottom <= pageTopPx || element.top >= pageBottomPx) continue;
     const padding = Math.max(3, element.width * 2);
     appendRegion(
@@ -7048,6 +7076,18 @@ async function buildEditablePptx(
       h: heightIn
     });
     for (const media of await getOfficeMediaFragments(model, pageIndex, options)) {
+      slide.addImage({
+        data: bytesToDataUrl(media.data),
+        x: media.leftPx * model.pxToPt / 72,
+        y: media.topPx * model.pxToPt / 72,
+        w: media.widthPx * model.pxToPt / 72,
+        h: media.heightPx * model.pxToPt / 72
+      });
+    }
+    // The full-page background intentionally excludes NoteDraw. Add its
+    // semantic layer as separate slide images so cards, files, text and
+    // connectors remain visible without painting video frames twice.
+    for (const media of await getOfficeNoteDrawFragments(model, pageIndex, options, false)) {
       slide.addImage({
         data: bytesToDataUrl(media.data),
         x: media.leftPx * model.pxToPt / 72,
@@ -7318,7 +7358,8 @@ async function renderOfficePageVisualBackground(
   const visualModel: PreviewPdfModel = {
     ...model,
     textFragments: [],
-    imageFragments: model.imageFragments,
+    // imageFragments: model.imageFragments, canvasFragments: model.canvasFragments
+    imageFragments: model.imageFragments.filter((fragment) => !isNoteDrawImageFragment(fragment)),
     videoFragments: model.videoFragments,
     canvasFragments: model.canvasFragments,
     linkFragments: [],
@@ -7330,7 +7371,9 @@ async function renderOfficePageVisualBackground(
     rasterScale: options.rasterScale,
     includeText: false,
     includeDecorations: false,
-    includeNoteDraw: true
+    // Explicit NoteDraw regions are added by getOfficeNoteDrawFragments;
+    // keeping them out of the full-page background prevents a second copy.
+    includeNoteDraw: false
   });
 }
 
@@ -7338,8 +7381,12 @@ async function renderOfficePreviewPages(
   model: PreviewPdfModel,
   options: OfficeRenderOptions
 ): Promise<Uint8Array[]> {
+  const previewModel: PreviewPdfModel = {
+    ...model,
+    imageFragments: model.imageFragments.filter((fragment) => !isNoteDrawImageFragment(fragment))
+  };
   return Promise.all(Array.from({ length: model.pageBreaks.length - 1 }, (_, pageIndex) => (
-    renderPreviewPageToPngBytes(model, pageIndex, {
+    renderPreviewPageToPngBytes(previewModel, pageIndex, {
       colorMode: options.colorMode,
       rasterScale: options.rasterScale,
       includeText: true,
@@ -10062,7 +10109,11 @@ function measureNoteDrawTargetContentFrame(host: HTMLElement, surfaceWidth: numb
   return { left, width };
 }
 
-function measureNoteDrawDomLayout(host: HTMLElement, sourcePath: string): NoteDrawDomLayout {
+function measureNoteDrawDomLayout(
+  host: HTMLElement,
+  sourcePath: string,
+  markdownBlocks: NoteDrawMarkdownBlock[] = []
+): NoteDrawDomLayout {
   const hostRect = host.getBoundingClientRect();
   const toLocal = (rect: DOMRect): { left: number; top: number; right: number; bottom: number } => ({
     left: rect.left - hostRect.left + host.scrollLeft,
@@ -10091,6 +10142,55 @@ function measureNoteDrawDomLayout(host: HTMLElement, sourcePath: string): NoteDr
       right: rect.right
     }];
   });
+  // A detached MarkdownRenderer tree has no NoteDraw runtime decorations,
+  // therefore it usually lacks data-note-draw-line-start attributes.  Use the
+  // persisted markdown block text as a conservative fallback anchor.  This
+  // keeps flow placements tied to the corresponding rendered heading/list
+  // block while avoiding any dependence on the stale source-frame Y value.
+  if (blocks.length === 0 && markdownBlocks.length > 0) {
+    const candidates = Array.from(host.querySelectorAll<HTMLElement>(
+      "[data-note-draw-source-path], h1,h2,h3,h4,h5,h6,p,li"
+    )).map((element) => ({
+      element,
+      path: normalizePath(element.getAttribute("data-note-draw-source-path") ?? ""),
+      text: normalizeLineText(element.textContent ?? ""),
+      rect: toLocal(element.getBoundingClientRect())
+    })).filter((candidate) => (
+      (!candidate.path || candidate.path === normalizePath(sourcePath)) &&
+      candidate.rect.right > candidate.rect.left &&
+      candidate.rect.bottom >= candidate.rect.top &&
+      candidate.text.length > 0
+    ));
+    const usedCandidates = new Set<HTMLElement>();
+    for (const markdownBlock of markdownBlocks) {
+      if (markdownBlock.path && normalizePath(markdownBlock.path) !== normalizePath(sourcePath)) continue;
+      if (!markdownBlock.textHint) continue;
+      const match = candidates
+        .filter((candidate) => (
+          !usedCandidates.has(candidate.element) && (
+            candidate.text === markdownBlock.textHint ||
+            candidate.text.includes(markdownBlock.textHint) ||
+            markdownBlock.textHint.includes(candidate.text)
+          )
+        ))
+        .sort((left, right) => (
+          (left.rect.bottom - left.rect.top) - (right.rect.bottom - right.rect.top) ||
+          left.rect.top - right.rect.top
+        ))[0];
+      if (!match) continue;
+      usedCandidates.add(match.element);
+      blocks.push({
+        path: normalizePath(sourcePath),
+        lineStart: markdownBlock.lineStart ?? 0,
+        lineEnd: markdownBlock.lineEnd ?? markdownBlock.lineStart ?? 0,
+        text: match.text,
+        top: match.rect.top,
+        bottom: match.rect.bottom,
+        left: match.rect.left,
+        right: match.rect.right
+      });
+    }
+  }
   const flowSpacers = Array.from(host.querySelectorAll<HTMLElement>(
     "[data-note-draw-note-flow-block-key]"
   )).flatMap((element) => {
@@ -10407,6 +10507,11 @@ async function injectRenderedHtmlNoteDrawAssets(
     0,
     1,
     prepared.domLayout
+  );
+  reserveRenderedHtmlNoteDrawFlowSpace(
+    targetHost,
+    projectedElements,
+    prepared.markdownBlocks
   );
   for (const element of projectedElements) {
     if ((element.kind !== "video" && element.kind !== "file") || !element.assetPath) continue;
@@ -10790,7 +10895,17 @@ function captureCanvasFragments(
 ): CanvasFragment[] {
   const pageRect = pageEl.getBoundingClientRect();
   return Array.from(pageEl.querySelectorAll("canvas"))
-    .filter((canvas) => isExportableElement(canvas) && canvas.width > 0 && canvas.height > 0)
+    .filter((canvas) => (
+      isExportableElement(canvas) &&
+      canvas.width > 0 &&
+      canvas.height > 0 &&
+      // NoteDraw's export-image layer is only a temporary raster snapshot
+      // used by its own exporter.  When MPE has persisted NoteDraw data,
+      // those same images are rendered once from noteDrawElements. Capturing
+      // the helper canvas here would paint a second, viewport-anchored copy
+      // and is the source of the floating-image ghost in live exports.
+      !isNoteDrawExportSnapshotCanvas(canvas)
+    ))
     .map((canvas) => {
       const rect = canvas.getBoundingClientRect();
       let pixelBounds = liveCache?.canvasBounds.get(canvas);
@@ -10821,6 +10936,11 @@ function captureCanvasFragments(
     .filter((fragment): fragment is CanvasFragment => Boolean(
       fragment && fragment.right > fragment.left && fragment.bottom > fragment.top
     ));
+}
+
+function isNoteDrawExportSnapshotCanvas(canvas: HTMLCanvasElement): boolean {
+  return canvas.matches(".notedraw-export-image-canvas") ||
+    Boolean(canvas.closest(".notedraw-export-image-canvas-layer"));
 }
 
 function isNoteDrawCanvasElement(canvas: HTMLCanvasElement): boolean {
@@ -10887,14 +11007,14 @@ function snapshotRestoredNoteDrawCanvases(
 ): CanvasFragment[] {
   void rootEl;
   void scrollEl;
-  return fragments.map((fragment) => {
-    const canvas = fragment.element;
-    if (!isNoteDrawCanvasElement(canvas)) return fragment;
-
-    // Geometry was captured in document space for each scroll window. Never
-    // replace it with the final restored canvas rectangle.
-    return canvas.isConnected ? { ...fragment, element: snapshotCanvasElement(canvas) } : fragment;
-  });
+  // Every NoteDraw canvas is snapshotted by captureCanvasFragments at the
+  // moment its scroll window is captured. Replacing those snapshots with the
+  // final restored canvas would copy the last virtualized frame into every
+  // earlier geometry slot, producing duplicated/ghosted ink and attachments
+  // (and visibly shifting floating elements in PDF/PNG exports). Keep the
+  // per-window snapshots untouched; the function remains as a compatibility
+  // hook for callers that wait for the restored surface before finalizing.
+  return fragments;
 }
 
 function getCanvasVisiblePixelBounds(canvas: HTMLCanvasElement): CanvasPixelBounds | null {
@@ -13645,21 +13765,26 @@ function preferNativeNoteDrawCanvas(
   model: PreviewPdfModel
 ): { model: PreviewPdfModel; usesNativeCanvas: boolean } {
   const usesNativeCanvas = model.canvasFragments.some(isNativeNoteDrawCanvasFragment);
-  if (usesNativeCanvas) {
-    // The live surface is a raster copy of data that is already available in
-    // the persisted NoteDraw model. Remove every NoteDraw canvas so freehand
-    // paths can be emitted as editable PDF Ink and boxes/text/connectors use
-    // the semantic element renderer exactly once.
+  const hasNoteDrawCanvas = model.canvasFragments.some(isNoteDrawCanvasFragment);
+  const hasExplicitModel = hasExplicitNoteDrawContent(model);
+  if (hasExplicitModel && hasNoteDrawCanvas) {
+    // Once persisted NoteDraw data has been projected into the export model,
+    // the live/virtualized canvas is only a raster copy of that same content.
+    // Remove every NoteDraw canvas (native or generated) so freehand paths are
+    // emitted as one editable PDF Ink layer and attachments/cards are painted
+    // by the semantic element renderer exactly once. Keeping a canvas here is
+    // what causes the characteristic shifted/ghosted duplicate after a live
+    // reading view has been captured through multiple scroll windows.
     return {
       model: {
         ...model,
         canvasFragments: model.canvasFragments.filter((fragment) => !isNoteDrawCanvasFragment(fragment))
       },
-      usesNativeCanvas: true
+      usesNativeCanvas
     };
   }
 
-  const hasGeneratedFallbackCanvas = model.canvasFragments.some(isNoteDrawCanvasFragment);
+  const hasGeneratedFallbackCanvas = hasNoteDrawCanvas;
   return {
     model: hasGeneratedFallbackCanvas
       ? {
@@ -14865,6 +14990,11 @@ async function renderPdfBlobIntoPreview(
   }, signal);
 }
 
+function isNoteDrawImageFragment(fragment: ImageFragment): boolean {
+  return fragment.element.matches(".notedraw-export-image-canvas, .mpe-notedraw-export-image") ||
+    Boolean(fragment.element.closest(".notedraw-export-image-canvas-layer"));
+}
+
 let previewPdfWorkerLoadQueue: Promise<void> = Promise.resolve();
 
 async function withBundledPreviewWorker<T>(
@@ -14898,6 +15028,54 @@ async function withBundledPreviewWorker<T>(
     }
   } finally {
     releaseQueue();
+  }
+}
+
+/**
+ * NoteDraw flow items are absolutely positioned overlays.  In Obsidian the
+ * NoteDraw host adds a matching padding offset to the anchored Markdown block;
+ * a detached HTML clone has no runtime flow spacer, so the overlay would cover
+ * the following list/text.  Recreate that spacer from the projected geometry.
+ */
+function reserveRenderedHtmlNoteDrawFlowSpace(
+  targetHost: HTMLElement,
+  elements: PdfNoteDrawElement[],
+  markdownBlocks: NoteDrawMarkdownBlock[]
+): void {
+  const candidates = Array.from(targetHost.querySelectorAll<HTMLElement>(
+    "[data-note-draw-source-path], h1,h2,h3,h4,h5,h6,p,li"
+  ));
+  const reserved = new WeakMap<HTMLElement, number>();
+  for (const element of elements) {
+    if (!element.flow || element.flow.side === "before") continue;
+    const block = markdownBlocks
+      .filter((item) => (
+        (!item.path || !element.sourcePath || normalizePath(item.path) === normalizePath(element.sourcePath)) &&
+        (item.lineStart === null || element.flow?.blockStart === null || item.lineStart === element.flow?.blockStart)
+      ))
+      .sort((left, right) => (right.textHint.length - left.textHint.length))[0];
+    if (!block?.textHint) continue;
+    const normalizedHint = normalizeLineText(block.textHint);
+    const target = candidates
+      .filter((candidate) => {
+        const text = normalizeLineText(candidate.textContent ?? "");
+        return text === normalizedHint || text.includes(normalizedHint) || normalizedHint.includes(text);
+      })
+      .sort((left, right) => left.getBoundingClientRect().height - right.getBoundingClientRect().height)[0];
+    if (!target) continue;
+    const hostRect = targetHost.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const blockBottom = targetRect.bottom - hostRect.top + targetHost.scrollTop;
+    const required = Math.max(0, element.bottom - blockBottom + 1);
+    // Keep the spacer bounded to the actual projected card; corrupted/stale
+    // frames must not expand a heading by an entire page.
+    const maxSpacer = Math.max(0, Math.min(2000, element.bottom - element.top + 32));
+    const boundedRequired = Math.min(required, maxSpacer);
+    const current = reserved.get(target) ?? 0;
+    if (boundedRequired <= current) continue;
+    const computedPadding = Number.parseFloat(getComputedStyle(target).paddingBottom) || 0;
+    target.style.paddingBottom = `${Math.max(computedPadding, boundedRequired)}px`;
+    reserved.set(target, boundedRequired);
   }
 }
 

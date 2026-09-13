@@ -7,7 +7,7 @@ const stylesUrl = new URL("../styles.css", import.meta.url);
 const buildConfigUrl = new URL("../esbuild.config.mjs", import.meta.url);
 const builtPluginUrl = new URL("../main.js", import.meta.url);
 
-test("the visible export prompt can cancel every expensive phase", async () => {
+test("the visible export prompt can cancel every expensive phase without a viewport shield", async () => {
   const [source, styles] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(stylesUrl, "utf8")
@@ -17,14 +17,14 @@ test("the visible export prompt can cancel every expensive phase", async () => {
   assert.match(source, /private readonly abortController = new AbortController\(\)/);
   assert.match(source, /readonly signal = this\.abortController\.signal/);
   assert.match(source, /busyCancelButton/);
-  assert.match(source, /mobile-pdf-exporter-busy-shield/);
+  assert.doesNotMatch(source, /mobile-pdf-exporter-busy-shield/);
   assert.match(source, /this\.abortController\.abort\(\)/);
   assert.match(source, /captureLiveViewPdfModel\(file, liveSurface, signal\)/);
   assert.match(source, /renderPreviewToSelectablePdf\(file, model, signal\)/);
   assert.match(source, /adapter\.remove\(writtenOutputPath\)/);
   assert.ok((source.match(/throwIfExportCancelled\(signal\)/g) ?? []).length >= 12);
   assert.match(styles, /\.mobile-pdf-exporter-busy-cancel\s*\{/);
-  assert.match(styles, /\.mobile-pdf-exporter-busy-shield\s*\{[\s\S]*pointer-events:\s*auto/);
+  assert.doesNotMatch(styles, /\.mobile-pdf-exporter-busy-shield/);
   assert.match(styles, /\.mobile-pdf-exporter-busy[\s\S]*pointer-events:\s*auto/);
   assert.match(styles, /\.mobile-pdf-exporter-capture-freeze[\s\S]*scroll-behavior:\s*auto\s*!important/);
   assert.match(styles, /\.mobile-pdf-exporter-capture-freeze[\s\S]*transition:\s*none\s*!important/);
@@ -82,8 +82,8 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.doesNotMatch(source, /section\.render\?\.\(\)/);
   assert.match(source, /renderer\.updateVirtualDisplay\?\.\(scrollEl\.scrollTop\)/);
   assert.match(source, /function snapshotCanvasElement\(canvas: HTMLCanvasElement\)/);
-  assert.match(source, /await waitForRestoredNoteDrawSurface\(rootEl, signal\)/);
-  assert.match(source, /captured\.canvasFragments = snapshotRestoredNoteDrawCanvases/);
+  assert.doesNotMatch(source, /waitForRestoredNoteDrawSurface/);
+  assert.match(source, /isNoteDrawCanvasElement\(canvas\) \? snapshotCanvasElement\(canvas\) : canvas/);
   assert.doesNotMatch(source, /renderer\.sizerEl\.append\(\.\.\.sectionElements\)/);
   assert.doesNotMatch(source, /renderer\.measureSection\?\.\(section\)/);
   assert.match(source, /for \(let pass = 0; pass < 2; pass \+= 1\)/);

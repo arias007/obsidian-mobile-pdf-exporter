@@ -2198,7 +2198,6 @@ const EXCALIDRAW_MAX_SLICE_PIXELS = 16_000_000;
 // canvas budget for mobile WebViews.
 const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 32_000_000;
 const FRAME_WAIT_TIMEOUT_MS = 120;
-const BUSY_PROMPT_PAINT_WAIT_MS = 80;
 // Keep a small overlap so a virtualized line/image is owned by one capture
 // window, while avoiding the large 18% overlap that made long exports scroll
 // through many redundant frames.
@@ -3717,14 +3716,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
       await nextAnimationFrame();
     }
 
-    // The virtual capture pass makes NoteDraw resize/redraw its reading canvas.
-    // Freeze the final restored surface, not an intermediate scroll frame.
-    await waitForRestoredNoteDrawSurface(rootEl, signal);
-    captured.canvasFragments = snapshotRestoredNoteDrawCanvases(
-      captured.canvasFragments,
-      rootEl,
-      scrollEl
-    );
     throwIfExportCancelled(signal);
     captured.textFragments = dedupeOverlappingLiveTextFragments(captured.textFragments);
 
@@ -4451,7 +4442,6 @@ export default class MobilePdfExporterPlugin extends Plugin {
         includeDecorations,
         includeNoteDraw
       }));
-      await nextAnimationFrame();
     }
     return pages;
   }
@@ -5352,7 +5342,6 @@ async function loadPdfJsRuntime(): Promise<PdfJsRuntime> {
   }
   return pdfJsRuntimePromise;
 }
-
 async function loadPdfJsWorkerRuntime(): Promise<PdfJsWorkerRuntime> {
   if (!pdfJsWorkerRuntimePromise) {
     pdfJsWorkerRuntimePromise = decompressEmbeddedGzip(embeddedPdfjsWorkerGzipBase64)
@@ -5375,7 +5364,6 @@ async function loadPdfJsWorkerRuntime(): Promise<PdfJsWorkerRuntime> {
 }
 
 class PdfExportBusyPrompt {
-  private readonly shieldEl: HTMLElement;
   private readonly rootEl: HTMLElement;
   private readonly titleEl: HTMLElement;
   private readonly elapsedEl: HTMLElement;
@@ -5391,10 +5379,6 @@ class PdfExportBusyPrompt {
   readonly signal = this.abortController.signal;
 
   constructor(noteName: string, private readonly language: ResolvedUiLanguage) {
-    this.shieldEl = appendElement(activeDocument.body, "div", {
-      cls: "mobile-pdf-exporter-busy-shield"
-    });
-    this.shieldEl.setAttribute("aria-hidden", "true");
     this.rootEl = appendElement(activeDocument.body, "div", {
       cls: "mobile-pdf-exporter-busy"
     });
@@ -5425,8 +5409,6 @@ class PdfExportBusyPrompt {
     this.rootEl.addClass("is-visible");
     this.rootEl.getBoundingClientRect();
     this.updateElapsed();
-    await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
-    await delay(BUSY_PROMPT_PAINT_WAIT_MS);
     this.painted = true;
   }
 
@@ -5488,7 +5470,6 @@ class PdfExportBusyPrompt {
     this.closed = true;
     activeWindow.clearInterval(this.timer);
     if (this.closeTimer) activeWindow.clearTimeout(this.closeTimer);
-    this.shieldEl.remove();
     this.rootEl.remove();
   }
 }
@@ -11047,57 +11028,6 @@ function snapshotCanvasElement(canvas: HTMLCanvasElement): HTMLCanvasElement {
   return snapshot;
 }
 
-async function waitForRestoredNoteDrawSurface(
-  rootEl: HTMLElement,
-  signal?: AbortSignal
-): Promise<void> {
-  if (!rootEl.querySelector(".notedraw-reading-stage, .notedraw-shell")) return;
-  let previousSignature = "";
-  let stableFrames = 0;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    throwIfExportCancelled(signal);
-    await nextAnimationFrame();
-    const signature = Array.from(rootEl.querySelectorAll<HTMLCanvasElement>(
-      ".notedraw-underlay-canvas, .notedraw-static-canvas, .notedraw-canvas"
-    )).map((canvas) => {
-      const rect = canvas.getBoundingClientRect();
-      return [
-        canvas.className,
-        canvas.width,
-        canvas.height,
-        Math.round(rect.left * 10),
-        Math.round(rect.top * 10),
-        Math.round(rect.width * 10),
-        Math.round(rect.height * 10)
-      ].join(":");
-    }).join(";");
-    if (signature && signature === previousSignature) {
-      stableFrames += 1;
-      if (stableFrames >= 3) return;
-    } else {
-      previousSignature = signature;
-      stableFrames = 0;
-    }
-  }
-}
-
-function snapshotRestoredNoteDrawCanvases(
-  fragments: CanvasFragment[],
-  rootEl: HTMLElement,
-  scrollEl: HTMLElement
-): CanvasFragment[] {
-  void rootEl;
-  void scrollEl;
-  // Every NoteDraw canvas is snapshotted by captureCanvasFragments at the
-  // moment its scroll window is captured. Replacing those snapshots with the
-  // final restored canvas would copy the last virtualized frame into every
-  // earlier geometry slot, producing duplicated/ghosted ink and attachments
-  // (and visibly shifting floating elements in PDF/PNG exports). Keep the
-  // per-window snapshots untouched; the function remains as a compatibility
-  // hook for callers that wait for the restored surface before finalizing.
-  return fragments;
-}
-
 function getCanvasVisiblePixelBounds(canvas: HTMLCanvasElement): CanvasPixelBounds | null {
   const fullBounds = { left: 0, top: 0, right: canvas.width, bottom: canvas.height };
   const drawingSurface = canvas.closest<HTMLElement>(".notedraw-shell, .note-doodle-shell");
@@ -15525,9 +15455,4 @@ async function nextAnimationFrame(timeoutMs = FRAME_WAIT_TIMEOUT_MS): Promise<vo
     frame = activeWindow.requestAnimationFrame(finish);
     timeout = activeWindow.setTimeout(finish, timeoutMs);
   });
-}
-
-async function delay(ms: number): Promise<void> {
-  if (activeDocument.hidden) return;
-  await new Promise<void>((resolve) => activeWindow.setTimeout(resolve, ms));
 }

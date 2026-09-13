@@ -71,6 +71,12 @@ The exporter walks the active reading or editing surface, including its live can
 
 ## Changelog
 
+### 0.8.0
+
+- Removes the full-screen export shield; the export prompt and cancel action remain available without covering the active note.
+- Speeds up multi-page PNG/PDF rendering by removing redundant per-page frame waits and redundant post-capture NoteDraw stabilization work.
+- Keeps capture freezing, per-window NoteDraw snapshots, embedded assets, Properties, and self-contained three-file release behavior unchanged.
+
 ### 0.7.5
 
 - Recovers mobile virtualized reading sections from multiple scroll anchors so today's notes export instead of failing when a section is temporarily unmounted.

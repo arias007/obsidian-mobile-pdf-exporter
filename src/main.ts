@@ -4219,7 +4219,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const visualRenderModel = {
       ...visualModel,
       imageFragments: visualModel.imageFragments.filter(
-        (fragment) => !isNoteDrawImageFragment(fragment)
+        (fragment) => !isNoteDrawImageFragment(fragment, visualModel)
       ),
       textFragments: rasterTextFragments
     };
@@ -4315,7 +4315,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const visualRenderModel = {
       ...visualModel,
       imageFragments: visualModel.imageFragments.filter(
-        (fragment) => !isNoteDrawImageFragment(fragment)
+        (fragment) => !isNoteDrawImageFragment(fragment, visualModel)
       )
     };
     const pdfInkStrokes = model.noteDrawInkStrokes ?? [];
@@ -4376,8 +4376,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
     }
     if (format === "png") {
       const noteDrawVisual = preferNativeNoteDrawCanvas(model);
+      const visualModel = {
+        ...noteDrawVisual.model,
+        imageFragments: noteDrawVisual.model.imageFragments.filter(
+          (fragment) => !isNoteDrawImageFragment(fragment, noteDrawVisual.model)
+        )
+      };
       const pages = await this.renderModelPagesToPng(
-        noteDrawVisual.model,
+        visualModel,
         signal,
         true,
         true,
@@ -7359,7 +7365,7 @@ async function renderOfficePageVisualBackground(
     ...model,
     textFragments: [],
     // imageFragments: model.imageFragments, canvasFragments: model.canvasFragments
-    imageFragments: model.imageFragments.filter((fragment) => !isNoteDrawImageFragment(fragment)),
+    imageFragments: model.imageFragments.filter((fragment) => !isNoteDrawImageFragment(fragment, model)),
     videoFragments: model.videoFragments,
     canvasFragments: model.canvasFragments,
     linkFragments: [],
@@ -7383,7 +7389,7 @@ async function renderOfficePreviewPages(
 ): Promise<Uint8Array[]> {
   const previewModel: PreviewPdfModel = {
     ...model,
-    imageFragments: model.imageFragments.filter((fragment) => !isNoteDrawImageFragment(fragment))
+    imageFragments: model.imageFragments.filter((fragment) => !isNoteDrawImageFragment(fragment, model))
   };
   return Promise.all(Array.from({ length: model.pageBreaks.length - 1 }, (_, pageIndex) => (
     renderPreviewPageToPngBytes(previewModel, pageIndex, {
@@ -10836,13 +10842,17 @@ function attachPreparedNoteDrawToModel(
     }
   }
 
-  // Filter out text fragments that overlap with NoteDraw elements to prevent ghosting.
-  // NoteDraw text elements are rendered both as DOM text (captured as text fragments)
-  // and as NoteDraw elements (drawn via drawCanvasNoteDrawElementLayer). Without filtering,
-  // the text appears twice — once in the text layer and once in the NoteDraw element layer.
-  if (elements.length > 0) {
+  // Only NoteDraw text elements can duplicate a captured Markdown text
+  // fragment. Media/cards are intentionally allowed to overlap the DOM text:
+  // a single captured fragment may span several words while a floating image
+  // covers only its right-hand portion. Dropping that whole fragment made the
+  // uncovered words disappear. The media element is painted above the text
+  // later, preserving the WYSIWYG stacking without losing visible text on its
+  // left.
+  const textElements = elements.filter((element) => element.kind === "text");
+  if (textElements.length > 0) {
     model.textFragments = model.textFragments.filter((fragment) =>
-      !elements.some((element) =>
+      !textElements.some((element) =>
         fragment.left < element.right + 2 &&
         fragment.right > element.left - 2 &&
         fragment.top < element.bottom + 2 &&
@@ -11127,6 +11137,11 @@ function captureBoxFragments(pageEl: HTMLElement): BoxFragment[] {
   for (const element of Array.from(pageEl.querySelectorAll<HTMLElement>("*"))) {
     if (!isExportableElement(element)) continue;
     if (element.matches("input[type='checkbox']")) continue;
+    // NoteDraw's floating embed wrapper paints a selection-style background
+    // and border around its native DOM image. The semantic NoteDraw layer
+    // supplies the actual media during export, so the wrapper chrome would
+    // otherwise remain as a shifted ghost outline.
+    if (element.matches(".notedraw-embed, .notedraw-embed-layer")) continue;
 
     const style = getComputedStyle(element);
     const background = normalizeVisibleCssColor(style.backgroundColor);
@@ -14990,9 +15005,19 @@ async function renderPdfBlobIntoPreview(
   }, signal);
 }
 
-function isNoteDrawImageFragment(fragment: ImageFragment): boolean {
-  return fragment.element.matches(".notedraw-export-image-canvas, .mpe-notedraw-export-image") ||
-    Boolean(fragment.element.closest(".notedraw-export-image-canvas-layer"));
+function isNoteDrawImageFragment(fragment: ImageFragment, model?: PreviewPdfModel): boolean {
+  const image = fragment.element;
+  const isSnapshot = image.matches(".notedraw-export-image-canvas, .mpe-notedraw-export-image") ||
+    Boolean(image.closest(".notedraw-export-image-canvas-layer"));
+  if (isSnapshot) return true;
+
+  // NoteDraw keeps floating embeds as regular DOM <img> elements while its
+  // persisted model is rendered again by the semantic layer. Exclude that
+  // native copy only when the semantic model is available; otherwise it is
+  // the only usable image source and must remain in the export.
+  const isNativeEmbed = image.matches(".notedraw-embed") ||
+    Boolean(image.closest(".notedraw-embed, .notedraw-embed-layer"));
+  return Boolean(model && hasExplicitNoteDrawContent(model) && isNativeEmbed);
 }
 
 let previewPdfWorkerLoadQueue: Promise<void> = Promise.resolve();

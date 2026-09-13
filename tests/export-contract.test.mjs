@@ -383,6 +383,27 @@ test("native NoteDraw surfaces are raster-free and emit one semantic PDF Ink lay
   assert.match(source, /drawNoteDrawInkAnnotationLayer\(pdfPage, pdfInkStrokes/);
 });
 
+test("native NoteDraw floating embeds are filtered only when semantic content exists", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /function isNoteDrawImageFragment\(fragment: ImageFragment, model\?: PreviewPdfModel\)/);
+  assert.match(source, /image\.matches\("\.notedraw-embed"\)/);
+  assert.match(source, /image\.closest\("\.notedraw-embed, \.notedraw-embed-layer"\)/);
+  assert.match(source, /Boolean\(model && hasExplicitNoteDrawContent\(model\) && isNativeEmbed\)/);
+  assert.match(source, /!isNoteDrawImageFragment\(fragment, visualModel\)/);
+  assert.match(source, /!isNoteDrawImageFragment\(fragment, model\)/);
+  assert.match(source, /const visualModel = \{[\s\S]*?imageFragments: noteDrawVisual\.model\.imageFragments\.filter\([\s\S]*?!isNoteDrawImageFragment\(fragment, noteDrawVisual\.model\)/);
+  assert.match(source, /element\.matches\("\.notedraw-embed, \.notedraw-embed-layer"\)/);
+});
+
+test("floating NoteDraw media never removes an entire overlapping Markdown line", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /const textElements = elements\.filter\(\(element\) => element\.kind === "text"\)/);
+  assert.match(source, /const textElements = elements\.filter\(\(element\) => element\.kind === "text"\)[\s\S]*?model\.textFragments = model\.textFragments\.filter/);
+  assert.doesNotMatch(source, /if \(elements\.length > 0\) \{\s*model\.textFragments = model\.textFragments\.filter/);
+});
+
 test("Cancip Office cards keep stable layout and expose a usable file fallback", async () => {
   const source = await readFile(sourceUrl, "utf8");
 

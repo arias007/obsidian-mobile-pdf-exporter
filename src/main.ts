@@ -2199,6 +2199,11 @@ const EXCALIDRAW_MAX_SLICE_PIXELS = 16_000_000;
 const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 32_000_000;
 const FRAME_WAIT_TIMEOUT_MS = 120;
 const BUSY_PROMPT_PAINT_WAIT_MS = 80;
+// Keep a small overlap so a virtualized line/image is owned by one capture
+// window, while avoiding the large 18% overlap that made long exports scroll
+// through many redundant frames.
+const LIVE_CAPTURE_OVERLAP_MIN_PX = 24;
+const LIVE_CAPTURE_OVERLAP_MAX_PX = 64;
 const PAGE_BREAK_PADDING_PX = 8;
 const PAGE_BREAK_MIN_ADVANCE_PX = 72;
 const HEADER_FOOTER_MIN_BAND_MM = 8;
@@ -3457,9 +3462,11 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const liveWidthPx = Math.max(1, scrollEl.clientWidth || rootRect.width);
     const originalScrollTop = scrollEl.scrollTop;
     const originalScrollLeft = scrollEl.scrollLeft;
-    const previewRenderer = surface.mode === "preview"
-      ? getLivePreviewRenderer(this.app, rootEl)
-      : null;
+    const restoreCaptureFreeze = freezeLiveSurfaceForCapture(rootEl, scrollEl);
+    try {
+      const previewRenderer = surface.mode === "preview"
+        ? getLivePreviewRenderer(this.app, rootEl)
+        : null;
     // Avoid rescanning for embeds on every capture window when the surface
     // has none. Virtualized reading views stay enabled because later sections
     // can mount their embeds as the scroll position changes.
@@ -3527,9 +3534,9 @@ export default class MobilePdfExporterPlugin extends Plugin {
         );
       }
       const viewportHeight = Math.max(160, scrollEl.clientHeight || rootRect.height || 640);
-      // A larger step reduces scroll/capture windows for ordinary notes while
-      // retaining a modest overlap so line boxes are not split at boundaries.
-      const captureStep = Math.max(120, viewportHeight * 0.82);
+      // Use a bounded 8% overlap (at least 24px) so line boxes remain intact
+      // while long notes need fewer scroll/capture windows.
+      const captureStep = getLiveSurfaceCaptureStep(viewportHeight);
       const overlapHeight = Math.max(0, viewportHeight - captureStep);
       const scrollPositions = surface.mode === "preview"
         ? previewRenderer
@@ -3557,7 +3564,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
           await waitForPreviewDomStable(rootEl, 360);
         }
         if (hasDrawingSurface) refreshLiveDrawingSurface(rootEl);
-        if (!fastStaticSurface) await nextAnimationFrame();
+        // Renderer settling already waits for a committed frame. Waiting once
+        // more here only slowed preview exports and exposed an extra visible
+        // scroll frame; dynamic source surfaces still keep their paint wait.
+        if (!fastStaticSurface && !previewRenderer) await nextAnimationFrame();
         if (previewRenderer) {
           const connectedSections = getUncapturedConnectedPreviewSectionElements(
             rootEl,
@@ -3771,7 +3781,13 @@ export default class MobilePdfExporterPlugin extends Plugin {
       scale: surfaceScale,
       linkContext
     });
-    return model;
+      return model;
+    } finally {
+      // Restore the user's scroll/animation behavior only after the final
+      // NoteDraw canvas snapshot is complete, so no intermediate redraw leaks
+      // into the visible Obsidian view.
+      restoreCaptureFreeze();
+    }
   }
 
   private async ensureLivePropertiesFallback(file: TFile, rootEl: HTMLElement): Promise<HTMLElement | null> {
@@ -9311,7 +9327,7 @@ function buildLiveSurfaceCaptureScrollPositions(maxScrollTop: number, viewportHe
   if (maximum <= 0) return [0];
 
   const positions = new Set<number>([0, maximum]);
-  const step = Math.max(120, viewportHeight * 0.82);
+  const step = getLiveSurfaceCaptureStep(viewportHeight);
   for (let index = 1; ; index += 1) {
     const next = Math.min(maximum, Math.round(index * step));
     positions.add(next);
@@ -9321,6 +9337,17 @@ function buildLiveSurfaceCaptureScrollPositions(maxScrollTop: number, viewportHe
   return [...positions].sort((a, b) => a - b);
 }
 
+function getLiveSurfaceCaptureStep(viewportHeight: number): number {
+  const safeViewportHeight = Math.max(160, viewportHeight);
+  const overlap = clampNumber(
+    safeViewportHeight * 0.08,
+    LIVE_CAPTURE_OVERLAP_MIN_PX,
+    LIVE_CAPTURE_OVERLAP_MAX_PX,
+    LIVE_CAPTURE_OVERLAP_MIN_PX
+  );
+  return Math.max(120, safeViewportHeight - overlap);
+}
+
 async function primeLivePreviewLayout(
   rootEl: HTMLElement,
   scrollEl: HTMLElement,
@@ -9328,7 +9355,10 @@ async function primeLivePreviewLayout(
   signal?: AbortSignal
 ): Promise<void> {
   const viewportHeight = Math.max(160, scrollEl.clientHeight || rootEl.getBoundingClientRect().height || 640);
-  let previousHeight = 0;
+  // The renderer has already measured its initial viewport before this pass.
+  // Start from that height so a complete, unchanged first sweep can finish
+  // immediately instead of always forcing a second full-document scroll.
+  let previousHeight = Math.max(scrollEl.scrollHeight, rootEl.scrollHeight);
 
   for (let pass = 0; pass < 2; pass += 1) {
     const positions = buildLiveSurfaceCaptureScrollPositions(
@@ -9409,8 +9439,7 @@ async function settleLiveSurfaceAtScrollPosition(
   throwIfExportCancelled(signal);
   const maximum = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
   let expectedTop = clampNumber(requestedTop, 0, maximum, 0);
-  scrollEl.scrollTop = expectedTop;
-  scrollEl.dispatchEvent(new Event("scroll"));
+  setLiveSurfaceScrollTop(scrollEl, expectedTop);
   if (!previewRenderer && isFastStaticLiveSurface(rootEl)) {
     // Source-mode scrolling only changes the viewport. One frame is enough
     // for the browser to commit the new scroll position; waiting for a
@@ -9428,15 +9457,51 @@ async function settleLiveSurfaceAtScrollPosition(
   await waitForPromiseOrTimeout(new Promise<void>((resolve) => activeWindow.setTimeout(resolve, 40)), 80);
   throwIfExportCancelled(signal);
   expectedTop = clampNumber(requestedTop, 0, Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight), 0);
-  scrollEl.scrollTop = expectedTop;
-  scrollEl.dispatchEvent(new Event("scroll"));
+  setLiveSurfaceScrollTop(scrollEl, expectedTop);
   await nextAnimationFrame(Math.min(180, FRAME_WAIT_TIMEOUT_MS));
+}
+
+function setLiveSurfaceScrollTop(scrollEl: HTMLElement, expectedTop: number): boolean {
+  if (Math.abs(scrollEl.scrollTop - expectedTop) <= 0.5) return false;
+  scrollEl.scrollTop = expectedTop;
+  // Obsidian's virtual renderer listens for scroll events. Dispatch only when
+  // the position actually changed so the same capture window cannot trigger a
+  // second layout pass and visible redraw.
+  scrollEl.dispatchEvent(new Event("scroll"));
+  return true;
 }
 
 function isFastStaticLiveSurface(rootEl: HTMLElement): boolean {
   return !rootEl.querySelector(
     "img, iframe, object, embed, canvas, svg, video, audio, .internal-embed, .media-embed, .markdown-embed, .file-embed, .notedraw-shell, .note-doodle-shell"
   );
+}
+
+function freezeLiveSurfaceForCapture(rootEl: HTMLElement, scrollEl: HTMLElement): () => void {
+  const targets = rootEl === scrollEl ? [rootEl] : [rootEl, scrollEl];
+  const hadClass = new Map<HTMLElement, boolean>();
+  for (const element of targets) {
+    hadClass.set(element, element.classList.contains("mobile-pdf-exporter-capture-freeze"));
+    element.classList.add("mobile-pdf-exporter-capture-freeze");
+  }
+
+  // Cancel a theme's in-flight smooth-scroll animation before the first
+  // programmatic position change. The class also disables transitions and
+  // animations while capture is running, without changing exported geometry.
+  scrollEl.scrollTo({
+    top: scrollEl.scrollTop,
+    left: scrollEl.scrollLeft,
+    behavior: "auto"
+  });
+
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    for (const element of targets) {
+      if (!hadClass.get(element)) element.classList.remove("mobile-pdf-exporter-capture-freeze");
+    }
+  };
 }
 
 function isFastStaticPreview(rootEl: HTMLElement): boolean {

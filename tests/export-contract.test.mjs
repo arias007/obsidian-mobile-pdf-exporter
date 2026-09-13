@@ -24,6 +24,8 @@ test("the visible export prompt can cancel every expensive phase", async () => {
   assert.ok((source.match(/throwIfExportCancelled\(signal\)/g) ?? []).length >= 12);
   assert.match(styles, /\.mobile-pdf-exporter-busy-cancel\s*\{/);
   assert.match(styles, /\.mobile-pdf-exporter-busy[\s\S]*pointer-events:\s*auto/);
+  assert.match(styles, /\.mobile-pdf-exporter-capture-freeze[\s\S]*scroll-behavior:\s*auto\s*!important/);
+  assert.match(styles, /\.mobile-pdf-exporter-capture-freeze[\s\S]*transition:\s*none\s*!important/);
 });
 
 test("external and internal links produce PDF URI annotations", async () => {
@@ -68,6 +70,13 @@ test("live capture avoids virtual-scroll loss, blank trailing pages, and split t
   assert.match(source, /Mobile PDF Exporter skipped \$\{missingSections\} virtual reading-view section/);
   assert.match(source, /Live reading view did not render any exportable content during export/);
   assert.match(source, /await primeLivePreviewLayout\(rootEl, scrollEl, previewRenderer, signal\)/);
+  assert.match(source, /function freezeLiveSurfaceForCapture\(rootEl: HTMLElement, scrollEl: HTMLElement\)/);
+  assert.match(source, /const restoreCaptureFreeze = freezeLiveSurfaceForCapture\(rootEl, scrollEl\)/);
+  assert.match(source, /let previousHeight = Math\.max\(scrollEl\.scrollHeight, rootEl\.scrollHeight\)/);
+  assert.match(source, /function getLiveSurfaceCaptureStep\(viewportHeight: number\)/);
+  assert.match(source, /const step = getLiveSurfaceCaptureStep\(viewportHeight\)/);
+  assert.match(source, /if \(!fastStaticSurface && !previewRenderer\) await nextAnimationFrame\(\)/);
+  assert.match(source, /function setLiveSurfaceScrollTop\(scrollEl: HTMLElement, expectedTop: number\)/);
   assert.doesNotMatch(source, /section\.render\?\.\(\)/);
   assert.match(source, /renderer\.updateVirtualDisplay\?\.\(scrollEl\.scrollTop\)/);
   assert.match(source, /function snapshotCanvasElement\(canvas: HTMLCanvasElement\)/);

@@ -742,6 +742,23 @@
   background: var(--interactive-hover);
 }
 
+/* The live-note capture pass intentionally moves the scroll viewport through
+   virtualized sections. Disable theme smooth-scroll/animations for that short
+   pass so the viewport settles in one commit instead of visibly jittering and
+   triggering extra compositor work. This class is removed in the finalizer. */
+.mobile-pdf-exporter-capture-freeze,
+.mobile-pdf-exporter-capture-freeze * {
+  animation: none !important;
+  animation-delay: 0s !important;
+  animation-duration: 0s !important;
+  scroll-behavior: auto !important;
+  transition: none !important;
+}
+
+.mobile-pdf-exporter-capture-freeze {
+  overflow-anchor: none !important;
+}
+
 .mobile-pdf-exporter-busy.is-complete .mobile-pdf-exporter-busy-title {
   color: var(--text-success, #2f9e44);
 }

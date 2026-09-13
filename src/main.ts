@@ -5375,6 +5375,7 @@ async function loadPdfJsWorkerRuntime(): Promise<PdfJsWorkerRuntime> {
 }
 
 class PdfExportBusyPrompt {
+  private readonly shieldEl: HTMLElement;
   private readonly rootEl: HTMLElement;
   private readonly titleEl: HTMLElement;
   private readonly elapsedEl: HTMLElement;
@@ -5390,6 +5391,10 @@ class PdfExportBusyPrompt {
   readonly signal = this.abortController.signal;
 
   constructor(noteName: string, private readonly language: ResolvedUiLanguage) {
+    this.shieldEl = appendElement(activeDocument.body, "div", {
+      cls: "mobile-pdf-exporter-busy-shield"
+    });
+    this.shieldEl.setAttribute("aria-hidden", "true");
     this.rootEl = appendElement(activeDocument.body, "div", {
       cls: "mobile-pdf-exporter-busy"
     });
@@ -5483,6 +5488,7 @@ class PdfExportBusyPrompt {
     this.closed = true;
     activeWindow.clearInterval(this.timer);
     if (this.closeTimer) activeWindow.clearTimeout(this.closeTimer);
+    this.shieldEl.remove();
     this.rootEl.remove();
   }
 }

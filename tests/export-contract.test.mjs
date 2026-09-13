@@ -17,12 +17,14 @@ test("the visible export prompt can cancel every expensive phase", async () => {
   assert.match(source, /private readonly abortController = new AbortController\(\)/);
   assert.match(source, /readonly signal = this\.abortController\.signal/);
   assert.match(source, /busyCancelButton/);
+  assert.match(source, /mobile-pdf-exporter-busy-shield/);
   assert.match(source, /this\.abortController\.abort\(\)/);
   assert.match(source, /captureLiveViewPdfModel\(file, liveSurface, signal\)/);
   assert.match(source, /renderPreviewToSelectablePdf\(file, model, signal\)/);
   assert.match(source, /adapter\.remove\(writtenOutputPath\)/);
   assert.ok((source.match(/throwIfExportCancelled\(signal\)/g) ?? []).length >= 12);
   assert.match(styles, /\.mobile-pdf-exporter-busy-cancel\s*\{/);
+  assert.match(styles, /\.mobile-pdf-exporter-busy-shield\s*\{[\s\S]*pointer-events:\s*auto/);
   assert.match(styles, /\.mobile-pdf-exporter-busy[\s\S]*pointer-events:\s*auto/);
   assert.match(styles, /\.mobile-pdf-exporter-capture-freeze[\s\S]*scroll-behavior:\s*auto\s*!important/);
   assert.match(styles, /\.mobile-pdf-exporter-capture-freeze[\s\S]*transition:\s*none\s*!important/);

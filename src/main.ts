@@ -371,6 +371,8 @@ interface TextLineDraft {
 interface ImageFragment {
   element: HTMLImageElement;
   sourcePath: string | null;
+  /** Original LaTeX of a rasterized formula, offered as copyable text on export. */
+  mathSource?: string | null;
   left: number;
   top: number;
   right: number;
@@ -2215,6 +2217,9 @@ const HEADER_FOOTER_FONT_SIZE_PX = 10;
 // PNG, DOCX, PPTX and HTML exports.
 const MATH_IMAGE_MAX_SCALE = 3;
 const MATH_IMAGE_MIN_SCALE = 2;
+// Carries the original TeX of a formula from the swapped image element into the
+// fragment model, so the export can still offer the formula as copyable text.
+const MATH_SOURCE_ATTRIBUTE = "data-mobile-pdf-exporter-math-source";
 const MATH_TYPESET_WAIT_TIMEOUT_MS = 2000;
 // LaTeX delimiters understood by the reading view. Only used to decide whether
 // waiting for MathJax output is worthwhile.
@@ -3467,13 +3472,21 @@ export default class MobilePdfExporterPlugin extends Plugin {
    * formulas in place so the live capture sees images, and hand the original
    * DOM back so the reading view can be restored afterwards.
    */
-  private async prepareLiveMathImages(rootEl: HTMLElement): Promise<MathImageReplacement[]> {
-    if (rootEl.querySelector("mjx-container")) {
-      return replaceMathWithImages(rootEl);
+  private async prepareLiveMathImages(
+    file: TFile,
+    rootEl: HTMLElement
+  ): Promise<MathImageReplacement[]> {
+    if (!rootEl.querySelector("mjx-container") && !rootEl.querySelector(".math")) return [];
+    if (!rootEl.querySelector("mjx-container")) {
+      await waitForMathTypeset(rootEl, true, MATH_LIVE_TYPESET_WAIT_TIMEOUT_MS);
     }
-    if (!rootEl.querySelector(".math")) return [];
-    await waitForMathTypeset(rootEl, true, MATH_LIVE_TYPESET_WAIT_TIMEOUT_MS);
-    return replaceMathWithImages(rootEl);
+    let mathSources: MathSourcePool | undefined;
+    try {
+      mathSources = collectMathSourcePool(await this.app.vault.cachedRead(file));
+    } catch (error) {
+      console.warn("Mobile PDF Exporter could not read math sources", error);
+    }
+    return replaceMathWithImages(rootEl, mathSources);
   }
 
   private async captureLiveViewPdfModel(
@@ -3561,7 +3574,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       // the detached render path. The live DOM exposes the same MathJax glyph
       // boxes that carry neither text nor media, so swap them for images first
       // and put the original DOM back in the finally block below.
-      mathReplacements = await this.prepareLiveMathImages(rootEl);
+      mathReplacements = await this.prepareLiveMathImages(file, rootEl);
       if (previewRenderer) {
         contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
         captureConnectedLivePreviewSections(
@@ -3934,7 +3947,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       // render settles. Materialize every formula as an image here, before the
       // export geometry is measured, so no export mode loses it.
       await waitForMathTypeset(markdownEl, markdownHasMath(markdownToRender), MATH_TYPESET_WAIT_TIMEOUT_MS);
-      await replaceMathWithImages(markdownEl);
+      await replaceMathWithImages(markdownEl, collectMathSourcePool(markdownToRender));
       this.injectNoteDoodleOverlay(file, markdownEl);
       await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
 
@@ -4312,6 +4325,18 @@ export default class MobilePdfExporterPlugin extends Plugin {
         opacity: SELECTABLE_TEXT_LAYER_OPACITY,
         drawUnderlines: true,
         hiddenVisualTextFragments
+      });
+
+      // Formulas are rasterized into the page image, so give each of them an
+      // invisible text twin to keep the LaTeX copyable and searchable.
+      drawMathSourceTextLayer(pdfPage, visualRenderModel.imageFragments, {
+        fonts,
+        pageTopPx,
+        pageBottomPx,
+        pageWidthPt: model.pageWidthPt,
+        pageHeightPt: model.pageHeightPt,
+        pxToPt: model.pxToPt,
+        contentTopInsetPx: model.bodyTopInsetPx
       });
 
       drawLinkAnnotationLayer(pdfPage, model.linkFragments, {
@@ -5981,7 +6006,7 @@ function requiresRasterTextFallback(text: string): boolean {
 
 function collectVisualRasterTextFragments(fragments: TextFragment[]): TextFragment[] {
   const linkedFragments = fragments.filter((fragment) => Boolean(fragment.href));
-  return fragments.filter((fragment) => (
+  const needsVisualRaster = (fragment: TextFragment): boolean => (
     requiresRasterTextFallback(fragment.text) ||
     linkedFragments.some((linked) => areTextFragmentsOnSameVisualLine(fragment, linked)) ||
     // Rasterize bold and italic text so font weight/style is preserved as-is from the DOM.
@@ -5989,7 +6014,16 @@ function collectVisualRasterTextFragments(fragments: TextFragment[]): TextFragme
     // rasterization, bold/italic formatting would be lost in the exported PDF.
     Number.parseInt(fragment.fontWeight, 10) >= 600 ||
     fragment.fontStyle === "italic"
-  ));
+  );
+  // A page can only ever show one typeface. Text that goes through the canvas
+  // raster is painted with the fonts the reading view actually resolves, while
+  // anything left to the PDF text layer can only use the embedded font. Mixing
+  // the two makes plain text that carries no Markdown markup on its line — no
+  // bold, no link, no emoji, no fullwidth punctuation — visibly change typeface
+  // next to its neighbours, and it lets the text layer overflow into an inline
+  // formula image. As soon as one fragment needs the raster, keep the whole
+  // note in it: the invisible text layer still provides copy and search.
+  return fragments.some(needsVisualRaster) ? fragments.slice() : [];
 }
 
 function areTextFragmentsOnSameVisualLine(left: TextFragment, right: TextFragment): boolean {
@@ -10092,6 +10126,7 @@ function captureImageFragments(pageEl: HTMLElement): ImageFragment[] {
       return {
         element: image,
         sourcePath: getImageFragmentSourcePath(image),
+        mathSource: image.getAttribute(MATH_SOURCE_ATTRIBUTE),
         left: rect.left - pageRect.left,
         top: rect.top - pageRect.top,
         right: rect.right - pageRect.left,
@@ -11470,13 +11505,15 @@ async function rasterizeMathContainer(container: HTMLElement, cssText: string): 
 function createMathImageElement(
   container: HTMLElement,
   dataUrl: string,
-  rect: DOMRect
+  rect: DOMRect,
+  mathSource: string | null
 ): HTMLImageElement {
   const style = getComputedStyle(container);
   const image = container.ownerDocument.createElement("img");
   image.addClass("mobile-pdf-exporter-math-image");
   image.src = dataUrl;
   image.alt = "";
+  if (mathSource) image.setAttribute(MATH_SOURCE_ATTRIBUTE, mathSource);
   image.setAttribute(
     "style",
     [
@@ -11490,6 +11527,68 @@ function createMathImageElement(
     ].join(";")
   );
   return image;
+}
+
+/**
+ * LaTeX found in a note, split by the two forms the reading view typesets.
+ * Display math becomes a `block` container, inline math stays `inline`.
+ */
+interface MathSourcePool {
+  display: string[];
+  inline: string[];
+}
+
+/**
+ * Collects every formula of a note in document order, keeping the original text
+ * including its delimiters.
+ *
+ * This has to come from the markdown source: Obsidian empties the wrapper span as
+ * soon as MathJax has taken over, MathJax's CHTML output carries no TeX layer, and
+ * MathJax's own math document does not track these previews, so there is no DOM or
+ * API route back to the source. Rendering order matches source order, which lets
+ * `replaceMathWithImages` pair a container with its formula again.
+ */
+function collectMathSourcePool(markdown: string): MathSourcePool {
+  const pool: MathSourcePool = { display: [], inline: [] };
+  if (!markdown || !markdown.includes("$") && !markdown.includes("\\(") && !markdown.includes("```math")) {
+    return pool;
+  }
+  // Blank out code so a `$` inside it cannot shift the pairing.
+  const scannable = markdown
+    .replace(/^```(?!math\b)[^\n]*\n[\s\S]*?^[ \t]*```[ \t]*$/gmu, "")
+    .replace(/(?:``|`)[^\n]*?(?:``|`)/gu, "");
+  const pattern = /```math[^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*$|\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$(?!\$)([^\n$]+?)\$(?!\$)/gmu;
+  for (const match of scannable.matchAll(pattern)) {
+    const raw = match[0].trim();
+    if (!raw) continue;
+    const isDisplay = match[1] !== undefined || match[2] !== undefined || match[3] !== undefined;
+    (isDisplay ? pool.display : pool.inline).push(raw);
+  }
+  return pool;
+}
+
+/**
+ * Pairs the containers of one export with their formulas. The counts have to line
+ * up before anything is used: a note whose LaTeX lives in an embedded note, or
+ * that uses a lone `$` as currency, would otherwise get the wrong formula
+ * attached to an image, and a wrong copy text is worse than none.
+ */
+function createMathSourcePicker(
+  containers: HTMLElement[],
+  pool: MathSourcePool
+): (container: HTMLElement) => string | null {
+  const displayTotal = containers.filter((container) => container.getAttribute("display") === "true").length;
+  const ready = {
+    display: pool.display.length === displayTotal,
+    inline: pool.inline.length === containers.length - displayTotal
+  };
+  if (!ready.display && !ready.inline) return () => null;
+  const cursor = { display: 0, inline: 0 };
+  return (container: HTMLElement): string | null => {
+    const kind = container.getAttribute("display") === "true" ? "display" : "inline";
+    if (!ready[kind]) return null;
+    return pool[kind][cursor[kind]++] ?? null;
+  };
 }
 
 function markdownHasMath(markdown: string): boolean {
@@ -11551,7 +11650,10 @@ interface MathImageReplacement {
  * Replaces every typeset math formula with a rasterized image so the fragment
  * pipeline (text + media) can carry it into all export formats.
  */
-async function replaceMathWithImages(root: HTMLElement): Promise<MathImageReplacement[]> {
+async function replaceMathWithImages(
+  root: HTMLElement,
+  mathSources?: MathSourcePool
+): Promise<MathImageReplacement[]> {
   const containers = Array.from(root.querySelectorAll<HTMLElement>("mjx-container"));
   if (!containers.length) return [];
 
@@ -11570,15 +11672,17 @@ async function replaceMathWithImages(root: HTMLElement): Promise<MathImageReplac
     return [];
   }
 
+  const pickMathSource = createMathSourcePicker(containers, mathSources ?? { display: [], inline: [] });
   const replacements: MathImageReplacement[] = [];
   for (const container of containers) {
     if (!container.isConnected) continue;
     const rect = container.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) continue;
     try {
+      const mathSource = pickMathSource(container);
       const dataUrl = await rasterizeMathContainer(container, cssText);
       if (!dataUrl) continue;
-      const image = createMathImageElement(container, dataUrl, rect);
+      const image = createMathImageElement(container, dataUrl, rect, mathSource);
       const parent = container.parentNode;
       const nextSibling = container.nextSibling;
       if (!parent) continue;
@@ -12820,6 +12924,67 @@ function drawTextLayer(
         thickness: Math.max(0.35, drawn.size * 0.055),
         color: outputColor(fragment.color, options.colorMode)
       });
+    }
+  }
+}
+
+/**
+ * A rasterized formula carries its original TeX in the fragment model. Draw that
+ * TeX as invisible text on top of the formula image so the formula can be
+ * selected, copied and searched in the exported PDF. The glyphs use opacity 0 and
+ * are wrapped in an ActualText span, which makes viewers hand back the TeX exactly
+ * as the user typed it instead of the placeholder glyph run.
+ */
+function drawMathSourceTextLayer(
+  page: PDFPage,
+  fragments: ImageFragment[],
+  options: {
+    fonts: ExportFontSet;
+    pageTopPx: number;
+    pageBottomPx: number;
+    pageWidthPt: number;
+    pageHeightPt: number;
+    pxToPt: number;
+    contentTopInsetPx?: number;
+  }
+): void {
+  const { fonts, pageTopPx, pageBottomPx, pageWidthPt, pageHeightPt, pxToPt } = options;
+  const contentTopInsetPx = options.contentTopInsetPx ?? 0;
+  const { PDFDict, PDFHexString, PDFName, PDFOperator, PDFOperatorNames } = getPdfLibPrimitives();
+
+  for (const fragment of fragments) {
+    const mathSource = fragment.mathSource?.trim();
+    if (!mathSource) continue;
+    if (fragment.bottom <= pageTopPx + 0.5 || fragment.top >= pageBottomPx - 0.5) continue;
+
+    const heightPx = Math.max(1, fragment.bottom - fragment.top);
+    const localTop = fragment.top - pageTopPx;
+    const fontSize = Math.max(3.5, heightPx * pxToPt);
+    const x = clampNumber(fragment.left * pxToPt, 0, pageWidthPt - 4, 0);
+    const baselineY = pageHeightPt - (contentTopInsetPx + localTop + heightPx * 0.86) * pxToPt;
+    const maxWidth = Math.max(8, Math.min(pageWidthPt - x, (fragment.right - fragment.left) * pxToPt));
+    const font = selectPdfFont(fonts, mathSource);
+    const cleanText = getEncodablePdfText(font, stripProblematicPdfChars(mathSource));
+    if (!cleanText) continue;
+
+    const markedProps = PDFDict.withContext(page.doc.context);
+    markedProps.set(PDFName.of("ActualText"), PDFHexString.fromText(mathSource));
+    page.pushOperators(PDFOperator.of(
+      PDFOperatorNames.BeginMarkedContentSequence,
+      [PDFName.of("Span"), markedProps] as unknown as never[]
+    ));
+    try {
+      drawSafeText(page, cleanText, {
+        x,
+        y: baselineY,
+        size: fontSize,
+        font,
+        color: rgb(0, 0, 0),
+        maxWidth,
+        opacity: 0
+      });
+    } finally {
+      page.pushOperators(PDFOperator.of(PDFOperatorNames.EndMarkedContent));
     }
   }
 }

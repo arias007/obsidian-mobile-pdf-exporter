@@ -2197,8 +2197,10 @@ const EXCALIDRAW_MAX_SLICE_WIDTH_PX = 4096;
 const EXCALIDRAW_MAX_SLICE_HEIGHT_PX = 8192;
 const EXCALIDRAW_MAX_SLICE_PIXELS = 16_000_000;
 // Keep the ultra preset genuinely high resolution while leaving a bounded
-// canvas budget for mobile WebViews.
-const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 32_000_000;
+// canvas budget for mobile WebViews. 16M pixels matches EXCALIDRAW_MAX_SLICE_PIXELS
+// and stays inside the ~16.7M pixel canvas ceiling of iOS WebKit, so raising the
+// supersampling factor below can never push a page past what the platform allows.
+const PREVIEW_IMAGE_MAX_CANVAS_PIXELS = 16_000_000;
 const FRAME_WAIT_TIMEOUT_MS = 120;
 // Keep a small overlap so a virtualized line/image is owned by one capture
 // window, while avoiding the large 18% overlap that made long exports scroll
@@ -2232,7 +2234,15 @@ const MATH_STYLESHEET_WAIT_TIMEOUT_MS = 4000;
 // short wait only covers a formula that is still settling mid-export.
 const MATH_LIVE_TYPESET_WAIT_TIMEOUT_MS = 1500;
 const SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE = 2;
-const SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE = 4;
+// A selectable PDF paints the whole page into one raster and only lays an
+// invisible text layer on top, so that raster's resolution *is* the visible
+// document quality; below ~360 DPI the glyph edges stair-step as soon as the
+// reader zooms in. Text-only pages supersample highest because their flat
+// backgrounds keep the PNG small, while pages that also carry photos, canvases
+// or video stay one step lower to bound file size and encode time.
+const SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE = 6;
+const SELECTABLE_PREVIEW_TEXT_SCALE = 5;
+const SELECTABLE_PREVIEW_MEDIA_SCALE = 4;
 const SELECTABLE_TEXT_LAYER_OPACITY = 1;
 const NOTE_DOODLE_MAX_PEN_COUNT = 5;
 const NOTE_DOODLE_DEFAULT_OPACITY = 1;
@@ -4298,9 +4308,10 @@ export default class MobilePdfExporterPlugin extends Plugin {
       const pdfPage = pdfDoc.addPage([model.pageWidthPt, model.pageHeightPt]);
       const pngBytes = await renderPreviewPageToPngBytes(visualRenderModel, index, {
         colorMode: this.settings.colorMode,
-        rasterScale: Math.min(
-          SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE,
-          Math.max(this.settings.imageRasterScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE)
+        rasterScale: resolveSelectableRasterScale(
+          this.settings.imageRasterScale,
+          rasterTextFragments.length > 0,
+          hasPageMediaFragments(visualRenderModel, pageTopPx, pageBottomPx)
         ),
         includeText: rasterTextFragments.length > 0
       });
@@ -4948,7 +4959,7 @@ class MobilePdfExportOptionsModal extends Modal {
           .addOption("3", this.plugin.t("imageQualityUltra"))
           .setValue(String(this.draft.imageRasterScale))
           .onChange((value) => {
-            this.draft.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 3, DEFAULT_SETTINGS.imageRasterScale);
+            this.draft.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 6, DEFAULT_SETTINGS.imageRasterScale);
             this.schedulePreviewRefresh();
           });
       });
@@ -5674,7 +5685,7 @@ class MobilePdfExporterSettingTab extends PluginSettingTab {
           .addOption("3", this.plugin.t("imageQualityUltra"))
           .setValue(String(this.plugin.settings.imageRasterScale))
           .onChange(async (value) => {
-            this.plugin.settings.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 3, DEFAULT_SETTINGS.imageRasterScale);
+            this.plugin.settings.imageRasterScale = clampNumber(Number.parseFloat(value), 1, 6, DEFAULT_SETTINGS.imageRasterScale);
             await this.plugin.saveSettings();
           });
       });
@@ -5848,7 +5859,7 @@ function normalizeSettings(raw: unknown): MobilePdfExporterSettings {
     contentScalePercent: normalizeContentScalePercent(saved.contentScalePercent, DEFAULT_SETTINGS.contentScalePercent),
     // 0.6.1 exposed two labels for the same Ultra quality. Normalize legacy
     // 4x values to the single supported 3x choice shown in the UI.
-    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 3, DEFAULT_SETTINGS.imageRasterScale),
+    imageRasterScale: clampNumber(saved.imageRasterScale, 1, 6, DEFAULT_SETTINGS.imageRasterScale),
     currentPageWidthPx: Math.round(clampNumber(saved.currentPageWidthPx, 240, 4096, DEFAULT_SETTINGS.currentPageWidthPx)),
     currentPageHeightPx: Math.round(clampNumber(saved.currentPageHeightPx, 240, 8192, DEFAULT_SETTINGS.currentPageHeightPx)),
     previewEnabled: typeof saved.previewEnabled === "boolean" ? saved.previewEnabled : DEFAULT_SETTINGS.previewEnabled,
@@ -13483,6 +13494,25 @@ async function renderPreviewPageToPngBytes(
     applyCanvasGrayscale(context, canvas.width, canvas.height);
   }
 
+  return canvasToPngBytes(canvas);
+}
+
+/**
+ * Encodes a canvas as PNG bytes. `toBlob` lets the WebView run the deflate off
+ * the main thread and skips the base64 round trip that `toDataURL` forces, which
+ * matters on the multi-megapixel rasters used by the image and selectable modes.
+ */
+async function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
+  if (typeof canvas.toBlob === "function") {
+    const blob = await new Promise<Blob | null>((resolve) => {
+      try {
+        canvas.toBlob(resolve, "image/png");
+      } catch {
+        resolve(null);
+      }
+    });
+    if (blob && blob.size > 0) return new Uint8Array(await blob.arrayBuffer());
+  }
   return dataUrlToUint8Array(canvas.toDataURL("image/png"));
 }
 
@@ -13587,8 +13617,48 @@ function formatHeaderFooterText(
     .replace(/\{date\}/giu, exportDate);
 }
 
+/**
+ * Selectable PDFs draw the page as a raster plus an invisible text layer, so the
+ * raster decides how sharp the export looks. Pages whose text is baked into that
+ * raster get the high text supersampling factor; pages that also show photos,
+ * canvases, video or SVG artwork step down so the embedded PNG stays reasonable.
+ */
+function resolveSelectableRasterScale(
+  settingsScale: number,
+  rasterCarriesText: boolean,
+  pageHasMedia: boolean
+): number {
+  const base = Math.max(settingsScale, SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE);
+  const target = rasterCarriesText
+    ? (pageHasMedia ? SELECTABLE_PREVIEW_MEDIA_SCALE : SELECTABLE_PREVIEW_TEXT_SCALE)
+    : base;
+  return Math.min(
+    SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE,
+    Math.max(base, target)
+  );
+}
+
+function hasPageMediaFragments(
+  model: PreviewPdfModel,
+  pageTopPx: number,
+  pageBottomPx: number
+): boolean {
+  const overlapsPage = (fragment: { top: number; bottom: number }): boolean => (
+    fragment.bottom > pageTopPx && fragment.top < pageBottomPx
+  );
+  return (
+    // A rasterized formula is line art, not a photo: it gains as much from the
+    // higher text supersampling as the surrounding text does, so it must not
+    // push the page down into the media tier.
+    model.imageFragments.some((fragment) => !fragment.mathSource && overlapsPage(fragment)) ||
+    model.canvasFragments.some(overlapsPage) ||
+    model.videoFragments.some(overlapsPage) ||
+    model.svgFragments.some(overlapsPage)
+  );
+}
+
 function getSafePreviewImageScale(widthPx: number, heightPx: number, requestedScale: number): number {
-  const safeRequested = clampNumber(requestedScale, 1, 4, DEFAULT_SETTINGS.imageRasterScale);
+  const safeRequested = clampNumber(requestedScale, 1, 6, DEFAULT_SETTINGS.imageRasterScale);
   const maxPixelScale = Math.sqrt(PREVIEW_IMAGE_MAX_CANVAS_PIXELS / Math.max(1, widthPx * heightPx));
   return Math.max(0.75, Math.min(safeRequested, maxPixelScale));
 }

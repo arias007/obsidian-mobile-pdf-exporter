@@ -2207,6 +2207,25 @@ const PAGE_BREAK_PADDING_PX = 8;
 const PAGE_BREAK_MIN_ADVANCE_PX = 72;
 const HEADER_FOOTER_MIN_BAND_MM = 8;
 const HEADER_FOOTER_FONT_SIZE_PX = 10;
+// MathJax renders every formula with CHTML, where each glyph is a CSS ::before
+// box drawn with the MathJax web fonts. Such a formula therefore contributes no
+// text node and no <img>/<svg> to the export tree, which is why LaTeX used to
+// come out blank in every export mode. Typeset formulas are rasterized into
+// self-contained images so they survive the image PDF, the selectable-text PDF,
+// PNG, DOCX, PPTX and HTML exports.
+const MATH_IMAGE_MAX_SCALE = 3;
+const MATH_IMAGE_MIN_SCALE = 2;
+const MATH_TYPESET_WAIT_TIMEOUT_MS = 2000;
+// LaTeX delimiters understood by the reading view. Only used to decide whether
+// waiting for MathJax output is worthwhile.
+const MATH_SOURCE_PATTERN = /\$\$[\s\S]+?\$\$|\$(?!\$)[^\n$]+?\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]|^```math\b/mu;
+// Matches Obsidian's bundled MathJax assets, e.g.
+// app://obsidian.md/lib/mathjax/output/chtml/fonts/woff-v2/MathJax_Main-Regular.woff
+const MATHJAX_ASSET_HINT = "/lib/mathjax/";
+const MATH_STYLESHEET_WAIT_TIMEOUT_MS = 4000;
+// The live reading view is already typeset when the user looks at it, so this
+// short wait only covers a formula that is still settling mid-export.
+const MATH_LIVE_TYPESET_WAIT_TIMEOUT_MS = 1500;
 const SELECTABLE_PREVIEW_BACKGROUND_MIN_SCALE = 2;
 const SELECTABLE_PREVIEW_BACKGROUND_MAX_SCALE = 4;
 const SELECTABLE_TEXT_LAYER_OPACITY = 1;
@@ -3442,6 +3461,21 @@ export default class MobilePdfExporterPlugin extends Plugin {
     return { rootEl, scrollEl: rootEl, mode: "preview" };
   }
 
+  /**
+   * Live reading views render LaTeX through MathJax CHTML, whose glyph boxes
+   * contribute no text node and no media element to the capture. Rasterize the
+   * formulas in place so the live capture sees images, and hand the original
+   * DOM back so the reading view can be restored afterwards.
+   */
+  private async prepareLiveMathImages(rootEl: HTMLElement): Promise<MathImageReplacement[]> {
+    if (rootEl.querySelector("mjx-container")) {
+      return replaceMathWithImages(rootEl);
+    }
+    if (!rootEl.querySelector(".math")) return [];
+    await waitForMathTypeset(rootEl, true, MATH_LIVE_TYPESET_WAIT_TIMEOUT_MS);
+    return replaceMathWithImages(rootEl);
+  }
+
   private async captureLiveViewPdfModel(
     file: TFile,
     surface: LiveMarkdownSurface,
@@ -3520,8 +3554,14 @@ export default class MobilePdfExporterPlugin extends Plugin {
     const previewSectionCaptures = new Map<number, CapturedLivePreviewSection>();
     let capturedPreviewOverlays = false;
     let contentHeightPx = Math.max(1, scrollEl.scrollHeight, rootEl.scrollHeight, rootRect.height);
+    let mathReplacements: MathImageReplacement[] = [];
 
     try {
+      // Exporting an open note captures the live reading view, which bypasses
+      // the detached render path. The live DOM exposes the same MathJax glyph
+      // boxes that carry neither text nor media, so swap them for images first
+      // and put the original DOM back in the finally block below.
+      mathReplacements = await this.prepareLiveMathImages(rootEl);
       if (previewRenderer) {
         contentHeightPx = Math.max(contentHeightPx, scrollEl.scrollHeight, rootEl.scrollHeight);
         captureConnectedLivePreviewSections(
@@ -3710,6 +3750,7 @@ export default class MobilePdfExporterPlugin extends Plugin {
       scrollEl.scrollTop = originalScrollTop;
       scrollEl.scrollLeft = originalScrollLeft;
       suppressedInlineTitles.forEach((element) => element.classList.remove("mobile-pdf-exporter-skip"));
+      restoreMathReplacements(mathReplacements);
       preparedNoteDraw.cleanup();
       livePropertiesFallback?.remove();
       if (hasDrawingSurface) refreshLiveDrawingSurface(rootEl);
@@ -3888,6 +3929,12 @@ export default class MobilePdfExporterPlugin extends Plugin {
         await waitForImages(pageEl, IMAGE_WAIT_TIMEOUT_MS);
         await waitForPreviewDomStable(pageEl, previewWaitProfile.finalStableMs);
       }
+      // LaTeX renders to MathJax CHTML, which exposes neither text nodes nor
+      // media elements, and the reading view typesets it after the markdown
+      // render settles. Materialize every formula as an image here, before the
+      // export geometry is measured, so no export mode loses it.
+      await waitForMathTypeset(markdownEl, markdownHasMath(markdownToRender), MATH_TYPESET_WAIT_TIMEOUT_MS);
+      await replaceMathWithImages(markdownEl);
       this.injectNoteDoodleOverlay(file, markdownEl);
       await nextAnimationFrame(FRAME_WAIT_TIMEOUT_MS);
 
@@ -11199,6 +11246,377 @@ function normalizeVisibleCssColor(value: string): string | null {
   }
 
   return clean;
+}
+
+interface MathJaxRuntime {
+  typesetPromise?: (elements?: HTMLElement[]) => Promise<void>;
+}
+
+interface MathJaxHostWindow {
+  MathJax?: MathJaxRuntime;
+}
+
+const mathJaxFontDataUrlCache = new Map<string, Promise<string | null>>();
+let mathJaxStylesheetTextPromise: Promise<string | null> | null = null;
+
+function getMathJaxRuntime(): MathJaxRuntime | null {
+  const runtime = (activeWindow as unknown as MathJaxHostWindow).MathJax;
+  return runtime && typeof runtime === "object" ? runtime : null;
+}
+
+function findMathJaxStylesheet(doc: Document): CSSStyleSheet | null {
+  for (const sheet of Array.from(doc.styleSheets)) {
+    let rules: CSSRuleList | null = null;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      continue;
+    }
+    if (!rules) continue;
+    for (const rule of Array.from(rules)) {
+      let text = "";
+      try {
+        text = rule.cssText;
+      } catch {
+        continue;
+      }
+      if (text.includes("@font-face") && text.includes(MATHJAX_ASSET_HINT)) return sheet;
+    }
+  }
+  return null;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return activeWindow.btoa(binary);
+}
+
+function fetchMathJaxFontDataUrl(url: string): Promise<string | null> {
+  const cached = mathJaxFontDataUrlCache.get(url);
+  if (cached) return cached;
+  const pending = (async (): Promise<string | null> => {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) return null;
+      const buffer = await response.arrayBuffer();
+      const mime = url.endsWith(".woff2") ? "font/woff2" : "font/woff";
+      return `data:${mime};base64,${arrayBufferToBase64(buffer)}`;
+    } catch (error) {
+      console.warn("Mobile PDF Exporter math font embed failed", error);
+      return null;
+    }
+  })();
+  mathJaxFontDataUrlCache.set(url, pending);
+  return pending;
+}
+
+/**
+ * MathJax's CHTML stylesheet holds the per-glyph ::before rules, the layout
+ * rules and the @font-face declarations. A detached SVG <foreignObject> cannot
+ * resolve Obsidian's app:// font URLs, so every referenced font file is fetched
+ * once and inlined as a data URL.
+ */
+async function getMathJaxStylesheetText(): Promise<string | null> {
+  if (!mathJaxStylesheetTextPromise) {
+    mathJaxStylesheetTextPromise = (async (): Promise<string | null> => {
+      const sheet = findMathJaxStylesheet(activeDocument);
+      if (!sheet) return null;
+      let rules: CSSRuleList | null = null;
+      try {
+        rules = sheet.cssRules;
+      } catch {
+        return null;
+      }
+      const texts: string[] = [];
+      const fontUrls = new Set<string>();
+      for (const rule of Array.from(rules ?? [])) {
+        let text = "";
+        try {
+          text = rule.cssText;
+        } catch {
+          continue;
+        }
+        if (!text) continue;
+        if (text.includes("@font-face")) {
+          for (const match of text.matchAll(/url\((["']?)([^"')]+)\1\)/gu)) {
+            const candidate = match[2];
+            if (candidate.endsWith(".woff") || candidate.endsWith(".woff2")) fontUrls.add(candidate);
+          }
+        }
+        texts.push(text);
+      }
+      if (!texts.length) return null;
+      const dataUrls = new Map<string, string>();
+      await Promise.all(
+        Array.from(fontUrls).map(async (url) => {
+          const dataUrl = await fetchMathJaxFontDataUrl(url);
+          if (dataUrl) dataUrls.set(url, dataUrl);
+        })
+      );
+      if (!dataUrls.size) return null;
+      return texts.join("\n").replace(/url\((["']?)([^"')]+)\1\)/gu, (match, _quote: string, raw: string) => {
+        const dataUrl = dataUrls.get(raw);
+        return dataUrl ? `url("${dataUrl}")` : match;
+      });
+    })().catch((error) => {
+      console.warn("Mobile PDF Exporter math stylesheet unavailable", error);
+      return null;
+    });
+  }
+  return mathJaxStylesheetTextPromise;
+}
+
+async function rasterizeMathContainer(container: HTMLElement, cssText: string): Promise<string | null> {
+  const rect = container.getBoundingClientRect();
+  const width = Math.ceil(rect.width);
+  const height = Math.ceil(rect.height);
+  if (width < 1 || height < 1) return null;
+
+  const style = getComputedStyle(container);
+  const ownerDocument = container.ownerDocument;
+  const deviceScale = activeWindow.devicePixelRatio || MATH_IMAGE_MIN_SCALE;
+  const scale = Math.min(MATH_IMAGE_MAX_SCALE, Math.max(MATH_IMAGE_MIN_SCALE, deviceScale));
+
+  const canvas = createCanvas(container);
+  canvas.width = Math.max(1, Math.ceil(width * scale));
+  canvas.height = Math.max(1, Math.ceil(height * scale));
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+
+  const svgNamespace = "http://www.w3.org/2000/svg";
+  const xhtmlNamespace = "http://www.w3.org/1999/xhtml";
+  const svg = ownerDocument.createElementNS(svgNamespace, "svg");
+  svg.setAttribute("xmlns", svgNamespace);
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+  const foreignObject = ownerDocument.createElementNS(svgNamespace, "foreignObject");
+  foreignObject.setAttribute("x", "0");
+  foreignObject.setAttribute("y", "0");
+  foreignObject.setAttribute("width", String(width));
+  foreignObject.setAttribute("height", String(height));
+
+  // The host mirrors the inherited typography so em-based MathJax metrics
+  // resolve exactly as they did in the reading view.
+  const host = ownerDocument.createElementNS(xhtmlNamespace, "div");
+  host.setAttribute("xmlns", xhtmlNamespace);
+  host.setAttribute(
+    "style",
+    [
+      "margin:0",
+      "padding:0",
+      "border:0",
+      "overflow:hidden",
+      "box-sizing:border-box",
+      `width:${width}px`,
+      `height:${height}px`,
+      `font-family:${style.fontFamily}`,
+      `font-size:${style.fontSize}`,
+      `font-weight:${style.fontWeight}`,
+      `font-style:${style.fontStyle}`,
+      `line-height:${style.lineHeight}`,
+      `letter-spacing:${style.letterSpacing}`,
+      `color:${style.color}`,
+      `direction:${style.direction}`
+    ].join(";")
+  );
+
+  const styleElement = ownerDocument.createElementNS(xhtmlNamespace, "style");
+  // A text node is used instead of a CDATA section: HTML documents reject
+  // createCDATASection, and the SVG is parsed as XML, which resolves the
+  // serializer's entity escapes back into the original CSS.
+  styleElement.appendChild(ownerDocument.createTextNode(cssText));
+  host.appendChild(styleElement);
+
+  const clone = container.cloneNode(true) as HTMLElement;
+  // The formula box was measured without the block margins MathJax applies to
+  // display math, so keep the clone anchored to the foreignObject origin.
+  const cloneStyle = clone.getAttribute("style");
+  clone.setAttribute("style", `${cloneStyle ? `${cloneStyle};` : ""}margin:0 !important;padding:0;`);
+  host.appendChild(clone);
+
+  foreignObject.appendChild(host);
+  svg.appendChild(foreignObject);
+
+  let phase = "init";
+  try {
+    phase = "serialize";
+    const xml = new XMLSerializer().serializeToString(svg);
+    // An SVG served from a blob: URL that contains <foreignObject> taints the
+    // canvas in this runtime ("Tainted canvases may not be exported"), while the
+    // exact same document loaded from a data: URL stays exportable. Keep the
+    // data URL form so the raster survives toDataURL.
+    phase = "encodeSrc";
+    const svgDataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(xml)}`;
+    phase = "load";
+    const image = await loadImage(svgDataUrl, SVG_IMAGE_LOAD_TIMEOUT_MS);
+    phase = "draw";
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+    context.drawImage(image, 0, 0, width, height);
+    phase = "encode";
+    return canvas.toDataURL("image/png");
+  } catch (error) {
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    throw new Error(`math rasterize [${phase}] ${message} (${width}x${height}@${scale})`);
+  }
+}
+
+function createMathImageElement(
+  container: HTMLElement,
+  dataUrl: string,
+  rect: DOMRect
+): HTMLImageElement {
+  const style = getComputedStyle(container);
+  const image = container.ownerDocument.createElement("img");
+  image.addClass("mobile-pdf-exporter-math-image");
+  image.src = dataUrl;
+  image.alt = "";
+  image.setAttribute(
+    "style",
+    [
+      `display:${style.display === "inline" ? "inline-block" : style.display}`,
+      `width:${Math.round(rect.width * 100) / 100}px`,
+      `height:${Math.round(rect.height * 100) / 100}px`,
+      `vertical-align:${style.verticalAlign}`,
+      "margin:0",
+      "padding:0",
+      "border:0"
+    ].join(";")
+  );
+  return image;
+}
+
+function markdownHasMath(markdown: string): boolean {
+  return MATH_SOURCE_PATTERN.test(markdown);
+}
+
+async function waitForMathTypeset(
+  root: HTMLElement,
+  hasMathSource: boolean,
+  timeoutMs: number
+): Promise<void> {
+  if (!hasMathSource) return;
+
+  // Reading-view math is post-processed after the markdown render settles, so
+  // wait for MathJax's typeset output instead of sampling the DOM too early.
+  // The markdown source is the only reliable gate here: a note without LaTeX
+  // returns immediately, while a note with LaTeX keeps waiting.
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (root.querySelector("mjx-container")) return;
+    await nextAnimationFrame(60);
+  }
+
+  // Obsidian typesets math through a lazily-loaded MathJax instance. When the
+  // wait above expired before typesetting landed, ask MathJax directly instead
+  // of silently exporting blank formulas.
+  const runtime = getMathJaxRuntime();
+  if (runtime?.typesetPromise && root.querySelector(".math")) {
+    try {
+      await waitForPromiseOrTimeout(runtime.typesetPromise([root]), timeoutMs);
+    } catch (error) {
+      console.warn("Mobile PDF Exporter MathJax typeset failed", error);
+    }
+  }
+
+  const retryStartedAt = Date.now();
+  while (Date.now() - retryStartedAt < 600) {
+    if (root.querySelector("mjx-container")) return;
+    await nextAnimationFrame(60);
+  }
+  if (root.querySelector(".math")) {
+    console.warn("Mobile PDF Exporter found LaTeX that MathJax never typeset; exporting it unchanged.");
+  }
+}
+
+/**
+ * One formula that was swapped from live MathJax DOM to a rasterized image.
+ * The original container is kept so the live reading view can be put back
+ * exactly as the user sees it once the capture is done.
+ */
+interface MathImageReplacement {
+  image: HTMLImageElement;
+  container: HTMLElement;
+  parent: Node;
+  nextSibling: Node | null;
+}
+
+/**
+ * Replaces every typeset math formula with a rasterized image so the fragment
+ * pipeline (text + media) can carry it into all export formats.
+ */
+async function replaceMathWithImages(root: HTMLElement): Promise<MathImageReplacement[]> {
+  const containers = Array.from(root.querySelectorAll<HTMLElement>("mjx-container"));
+  if (!containers.length) return [];
+
+  try {
+    await waitForPromiseOrTimeout(
+      Promise.resolve(activeDocument.fonts.ready),
+      MATH_STYLESHEET_WAIT_TIMEOUT_MS
+    );
+  } catch {
+    // Font readiness is best effort only.
+  }
+
+  const cssText = await getMathJaxStylesheetText();
+  if (!cssText) {
+    console.warn("Mobile PDF Exporter math stylesheet missing; formulas stay as live MathJax DOM.");
+    return [];
+  }
+
+  const replacements: MathImageReplacement[] = [];
+  for (const container of containers) {
+    if (!container.isConnected) continue;
+    const rect = container.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) continue;
+    try {
+      const dataUrl = await rasterizeMathContainer(container, cssText);
+      if (!dataUrl) continue;
+      const image = createMathImageElement(container, dataUrl, rect);
+      const parent = container.parentNode;
+      const nextSibling = container.nextSibling;
+      if (!parent) continue;
+      container.replaceWith(image);
+      replacements.push({ image, container, parent, nextSibling });
+      await waitForPromiseOrTimeout(image.decode(), SVG_IMAGE_LOAD_TIMEOUT_MS);
+    } catch (error) {
+      console.warn(
+        "Mobile PDF Exporter math rasterization failed:",
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      );
+    }
+  }
+
+  if (!replacements.length) {
+    console.warn(`Mobile PDF Exporter could not rasterize ${containers.length} LaTeX formula(s).`);
+  }
+  return replacements;
+}
+
+/**
+ * Puts the live MathJax DOM back after a live-surface capture, so exporting a
+ * note never leaves the user's reading view showing formula images.
+ */
+function restoreMathReplacements(replacements: MathImageReplacement[]): void {
+  for (const replacement of replacements) {
+    if (!replacement.image.parentNode) continue;
+    try {
+      if (replacement.nextSibling && replacement.nextSibling.parentNode === replacement.parent) {
+        replacement.parent.insertBefore(replacement.container, replacement.nextSibling);
+      } else {
+        replacement.parent.appendChild(replacement.container);
+      }
+      replacement.image.remove();
+    } catch (error) {
+      console.warn("Mobile PDF Exporter math restore failed", error);
+    }
+  }
 }
 
 function captureSvgFragments(pageEl: HTMLElement): SvgFragment[] {

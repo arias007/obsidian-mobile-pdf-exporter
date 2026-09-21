@@ -12881,6 +12881,11 @@ function getEncodablePdfText(font: PDFFont, text: string): string {
   if (!text) return "";
   if (canEncodePdfText(font, text)) return text;
 
+  // Per-char filter BEFORE the CJK/ASCII strips: a single unsupported char in a
+  // mixed line must not wipe out the whole Arabic/Hebrew/Thai/Devanagari run.
+  const perChar = filterEncodablePdfChars(font, text);
+  if (perChar && canEncodePdfText(font, perChar)) return perChar;
+
   const cjkFallback = text.replace(/[^\u0020-\u007E\u3400-\u9FFF\uF900-\uFAFF，。！？、；：“”‘’（）《》【】￥…—]/gu, "");
   if (cjkFallback && canEncodePdfText(font, cjkFallback)) return cjkFallback;
 

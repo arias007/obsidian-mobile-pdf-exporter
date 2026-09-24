@@ -6,9 +6,9 @@ High-fidelity PDF, DOCX, PPTX, PNG, and self-contained HTML export for Obsidian 
 
 One-click export, exactly what you see. Everything below runs on a phone.
 
-![demo](docs/mobile-pdf-exporter-demo-en.mp4)
+![Mobile PDF Exporter demo](docs/demo.gif)
 
-![Watch the demo](docs/demo-poster.png) 
+[▶ Watch the full demo (55s)](docs/mobile-pdf-exporter-demo-en.mp4) 
 
 ## What it does
 

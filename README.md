@@ -2,6 +2,14 @@
 
 High-fidelity PDF, DOCX, PPTX, PNG, and self-contained HTML export for Obsidian mobile and desktop.
 
+## Demo
+
+One-click export, exactly what you see. Everything below runs on a phone.
+
+https://github.com/arias007/obsidian-mobile-pdf-exporter/raw/main/docs/mobile-pdf-exporter-demo-en.mp4
+
+[![Watch the demo](docs/demo-poster.png)](docs/mobile-pdf-exporter-demo-en.mp4)
+
 ## What it does
 
 - Adds one ribbon button, one command, and one note menu item. The title follows the configured interface language.

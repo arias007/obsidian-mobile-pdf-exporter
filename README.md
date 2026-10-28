@@ -1,5 +1,8 @@
 # Obsidian Mobile PDF Exporter
 
+<!-- hire-line -->
+> **Need this adapted, extended, or built from scratch?** I wrote this plugin — [custom work available](https://github.com/arias007/arias007#hire-me). Working proof first, payment after.
+
 High-fidelity PDF, DOCX, PPTX, PNG, and self-contained HTML export for Obsidian mobile and desktop.
 
 ## Demo
